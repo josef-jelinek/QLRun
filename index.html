@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QLRun</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/x-icon" href="favicon.ico">
+<style>
+:root {
+    color-scheme: dark;
+    --paper: #111;
+    --ink: #EEE;
+    --muted: #999;
+    --line: #333;
+    --accent: #6C6;
+}
+html,
+body {
+    height: 100%;
+    font: 13px/1.2 monospace;
+    background: var(--paper);
+    color: var(--ink);
+}
+body {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+}
+header {
+    padding: 10px 14px 5px;
+    border-bottom: 1px solid var(--line);
+}
+.colbox,
+.rowbox {
+    display: flex;
+    gap: 6px;
+}
+.colbox {
+    flex: 0;
+    flex-direction: column;
+}
+.rowbox {
+    flex-wrap: wrap;
+    align-items: center;
+    min-width: 0;
+}
+a {
+    color: var(--accent);
+}
+button,
+.switch {
+    padding: 5px 12px;
+    border: 1px solid #666;
+    border-radius: 3.5px;
+    font-weight: bold;
+    background: #333;
+    color: var(--ink);
+    cursor: pointer;
+}
+button {
+    font: inherit;
+}
+.switch {
+    position: relative;
+}
+button:hover,
+.switch:hover {
+    background: #444;
+}
+button:active,
+.switch:active {
+    background: #000;
+}
+.switch:has(> input[type="checkbox"]:checked) {
+    color: #000;
+    background: var(--accent);
+}
+.switch > input[type="checkbox"] {
+    position: absolute;
+    width: 0;
+    height: 0;
+    margin: 0;
+    opacity: 0;
+    pointer-events: none;
+}
+.media-info {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: break-word;
+    color: var(--muted);
+}
+.media-info.error,
+.media-info > .error {
+    font-weight: 600;
+    color: var(--accent);
+}
+.media-row {
+    flex-wrap: nowrap;
+}
+.rom-load {
+    display: flex;
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+#rom-info {
+    text-align: right;
+}
+#mdv-info::before {
+    content: "";
+    display: inline-block;
+    box-sizing: border-box;
+    width: 9px;
+    height: 9px;
+    margin-right: 6px;
+    border: 1px solid #555;
+    border-radius: 50%;
+    background: #222;
+}
+#mdv-info.mdv-motor::before {
+    border-color: var(--accent);
+}
+#mdv-info.mdv-read::before {
+    border-color: var(--accent);
+    background: var(--accent);
+}
+#mdv-info.mdv-write::before {
+    border-color: var(--accent);
+    background: #FFF;
+}
+#mdv-info.mdv-motor::before,
+#mdv-info.mdv-read::before,
+#mdv-info.mdv-write::before {
+    animation: mdv-activity-pulse 600ms ease-in-out infinite alternate;
+}
+@keyframes mdv-activity-pulse {
+    from {
+        opacity: 0.35;
+    }
+    to {
+        opacity: 1;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    #mdv-info.mdv-motor::before,
+    #mdv-info.mdv-read::before,
+    #mdv-info.mdv-write::before {
+        animation: none;
+    }
+}
+#workspace {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+}
+#screen-slot {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+}
+#screen-slot:fullscreen {
+    width: 100%;
+    height: 100%;
+    background: var(--paper);
+}
+#screen {
+    display: block;
+    image-rendering: pixelated;
+}
+#screen.crt {
+    image-rendering: auto;
+}
+#keyboard-split {
+    flex: 0 0 6px;
+    cursor: row-resize;
+    background: var(--line);
+    touch-action: none;
+}
+#keyboard-split:hover,
+body.keyboard-splitting #keyboard-split {
+    background: var(--accent);
+}
+body.keyboard-splitting {
+    user-select: none;
+}
+#keyboard {
+    flex-shrink: 0;
+    padding: 10px 14px 14px;
+    touch-action: none;
+}
+.keyboard-face {
+    position: relative;
+    width: 720px;
+    aspect-ratio: 720 / 220;
+    margin: 0 auto;
+    background: #1A1A1A;
+    border: 1px solid #444;
+    border-radius: 6px;
+    isolation: isolate;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-user-drag: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+}
+.keyboard-hit {
+    position: absolute;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #2A2A2A;
+    color: #DDD;
+    font: 10px/1.1 monospace;
+    letter-spacing: 0.02em;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+}
+.keyboard-hit.hover {
+    background: color-mix(in srgb, var(--accent) 25%, #2A2A2A);
+}
+.keyboard-hit.on,
+.keyboard-hit.on.hover {
+    background: #FFF;
+    color: #111;
+    mix-blend-mode: difference;
+}
+@media (max-width: 700px) {
+    .media-row {
+        flex-wrap: wrap;
+    }
+}
+</style>
+</head>
+<body>
+<header id="page-header" class="colbox">
+    <div class="rowbox">
+        <button id="reset">Reset</button>
+        <label class="switch" title="Onscreen keyboard"><input id="keyboard-toggle" type="checkbox">Keyboard</label>
+        <label class="switch" title="CRT display filter"><input id="crt" type="checkbox" checked>CRT</label>
+        <label class="switch" title="Original AY-3-8910 QSound card"><input id="qsound" type="checkbox" checked disabled>QSound</label>
+        <label class="switch" title="Spread QSound PSG channels across the stereo image"><input id="stereo" type="checkbox">Stereo</label>
+        <label class="switch" title="US NTSC machine timing and jsu.rom by default"><input id="ntsc" type="checkbox">NTSC</label>
+        <button id="fullscreen-toggle" title="Fullscreen (F11)">Fullscreen</button>
+        <div class="media-info"><span id="init-info">Initializing...</span> <span id="qsound-info"></span> <span id="sound-info" title="Emulated frames per second (about 50.1 PAL / 60.1 NTSC is real time), then audio overrun discarded and underrun filled with silence over the last second"></span> <span id="startup-file-info"></span></div>
+        <a href="https://github.com/josef-jelinek/QLRun">GitHub repo</a>
+    </div>
+    <div class="rowbox media-row">
+        <button id="load-mdv">Load MDV1</button>
+        <input id="file-mdv" type="file" accept=".mdv" style="display: none">
+        <button id="eject-mdv">Eject</button>
+        <div id="mdv-info" class="media-info" title="Microdrive 1 idle">No cartridge</div>
+        <div class="rom-load">
+            <div id="rom-info" class="media-info">No system ROM file</div>
+            <button id="load-rom" title="Set system ROM">Load ROM</button>
+            <input id="file-rom" type="file" accept=".rom,.bin" style="display: none">
+        </div>
+    </div>
+</header>
+<main id="workspace">
+    <div id="screen-slot">
+        <canvas id="screen" width="512" height="256"></canvas>
+    </div>
+    <div id="keyboard-split" style="display: none"></div>
+    <div id="keyboard" style="display: none">
+        <div class="keyboard-face"></div>
+    </div>
+</main>
+<script type="module" src="main.js"></script>
+</body>
+</html>
