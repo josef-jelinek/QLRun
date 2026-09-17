@@ -1,0 +1,22 @@
+QSound ROM notice
+
+Bundled file:
+  Qsound_V1.94.rom
+
+Source:
+  https://github.com/alvaroalea/QL_Qsound2
+  https://github.com/alvaroalea/QL_QsoundQprint_clone
+
+Source revisions inspected:
+  QL_Qsound2: 6d1f2ac78494620411eb46c74f6799d757561d83
+  QL_QsoundQprint_clone: 36326aed93974c456bde3237e561025ce908f733
+
+The 8192-byte Qsound_V1.94.rom file is byte-identical in both inspected
+repositories.
+
+SHA-256:
+  d6caabb6c96e32a4c5c6dfd443b7c2b30835755b9519b04b61ee52e5f17b8082
+
+The upstream repositories state that they are licensed under CERN Open Hardware
+Licence Version 2 - Strongly Reciprocal. The license text is included next to
+the ROM as Qsound_CERN-OHL-S-2.0.txt.
