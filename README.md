@@ -51,7 +51,9 @@ normal defaults:
 
 For example, `?crt=0&keyboard=1&ntsc=1&rom=jsu` starts with the CRT filter
 off, the onscreen keyboard shown, and the US machine. Fullscreen is not
-exposed as a URL parameter.
+exposed as a URL parameter. Toggling a listed switch updates its parameter to
+an explicit `0` or `1` without reloading the page or adding a browser-history
+entry; other parameters and the URL fragment are preserved.
 
 ## Emulator page
 
@@ -84,8 +86,9 @@ selects another.
 - NTSC - US QL clocks (7.552445 MHz CPU from a 15.10489 MHz crystal). The
   312-line monitor field stays near 50.4 Hz; JSU TV mode (F2) sets ZX8301
   bit 6 for the 262-line field at about 60.05 Hz. Starting with `?ntsc=1`
-  loads `roms/jsu.rom` unless `?rom=` is set; changing the switch later keeps
-  the current ROM.
+  loads `roms/jsu.rom` unless `?rom=` is set. While using the automatic ROM,
+  changing the switch reloads `js.rom` or `jsu.rom`; an explicit or locally
+  loaded ROM stays selected.
 - Fullscreen - show only the fullscreen emulator canvas (also F11).
 - Load MDV1 - insert a raw QLAY `.mdv` into physical microdrive 1. The
   machine is not reset; swap tapes and `LRUN mdv1_BOOT` as on a real QL. Its

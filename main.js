@@ -38,6 +38,7 @@ const ui = {
 };
 
 const query = new URLSearchParams(window.location.search);
+const configuredRomName = query.get("rom") ?? "";
 const keys = {
     rows: new Uint8Array(8),
     shift: false,
@@ -61,6 +62,7 @@ let startupFileName = null;
 /** @type {ArrayBuffer | null} */
 let startupFileBytes = null;
 let startupRomReady = false;
+let defaultRomSelected = configuredRomName === "";
 let lastNow = 0;
 let carryMs = 0;
 let framesRun = 0;
@@ -91,30 +93,38 @@ ui.reset.onclick = function () {
 };
 
 ui.keyboardToggle.onchange = function () {
+    updateSwitchParam("keyboard", ui.keyboardToggle.checked);
     setKeyboardVisibility(ui.keyboardToggle.checked);
 };
 
 ui.crt.onchange = function () {
+    updateSwitchParam("crt", ui.crt.checked);
     if (gfx !== null) {
         screen.setCrt(gfx, ui.crt.checked);
     }
 };
 
 ui.stereo.onchange = function () {
+    updateSwitchParam("stereo", ui.stereo.checked);
     if (sfx !== null) {
         sound.setStereo(sfx, ui.stereo.checked);
     }
 };
 
 ui.qsound.onchange = function () {
+    updateSwitchParam("qsound", ui.qsound.checked);
     machine.enableQsound(ql, ui.qsound.checked);
     resetSystem();
 };
 
 ui.ntsc.onchange = function () {
+    updateSwitchParam("ntsc", ui.ntsc.checked);
     machine.setNtsc(ql, ui.ntsc.checked);
     resetSystem();
     syncFrameTiming();
+    if (defaultRomSelected) {
+        loadSystemRom();
+    }
 };
 
 ui.fullscreenToggle.onclick = function () {
@@ -251,6 +261,7 @@ ui.fileRom.onchange = function () {
             showError(ui.romInfo, romErr);
             return;
         }
+        defaultRomSelected = false;
         resetSystem();
         showInfo(ui.romInfo, file.name);
     });
@@ -347,9 +358,16 @@ requestAnimationFrame(onFrame);
 
 /** Fetch and install the selected system ROM after QSound configuration. */
 function loadSystemRom() {
-    let romName = query.get("rom") ?? "";
-    if (ntscOn && romName === "") {
-        romName = "jsu";
+    if (abortLoadRom !== null) {
+        abortLoadRom();
+        abortLoadRom = null;
+    }
+    let romName = configuredRomName;
+    if (romName === "") {
+        romName = "js";
+        if (ui.ntsc.checked) {
+            romName = "jsu";
+        }
     }
     abortLoadRom = boot.loadStartupRom(
         romName,
@@ -414,6 +432,22 @@ function applySwitchParamValue(input, value) {
     }
 }
 
+/**
+ * Keep a switch's explicit state in the shareable URL without adding history.
+ *
+ * @param {string} name
+ * @param {boolean} on
+ */
+function updateSwitchParam(name, on) {
+    let value = "0";
+    if (on) {
+        value = "1";
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.set(name, value);
+    window.history.replaceState(null, "", url);
+}
+
 /** Reset machine and audio state, then resume available sound. */
 function resetSystem() {
     if (sfx === null) {
@@ -456,6 +490,7 @@ function applyStartupFile(name, bytes) {
             showError(ui.romInfo, romErr);
             return;
         }
+        defaultRomSelected = false;
         resetSystem();
         showInfo(ui.romInfo, name);
         return;
