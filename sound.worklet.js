@@ -1,5 +1,6 @@
-// Beeper (ula plane) and optional QSound PSG planes share one mix. Keep their
-// relative gains together so both mono and stereo output use the same balance.
+// Beeper (ula plane) and sound-card planes share one mix. Keep their relative
+// gains together so mono and stereo output use the same balance. Centred FM is
+// already present equally in the three sound-card planes.
 const ayInputOhms = 47000;
 const ulaInputOhms = 100000;
 const ayPathRatio = ulaInputOhms / ayInputOhms;

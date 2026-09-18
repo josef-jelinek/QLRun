@@ -2424,6 +2424,101 @@ export function executeOpcode(c, bus, opcode) {
 }
 
 /**
+ * Run a QDOS trap synchronously from a host pseudo-op, returning when the
+ * guest handler reaches the pseudo-op's continuation PC or the limit expires.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} trap
+ * @param {number} callId
+ * @param {number} instructionLimit
+ */
+export function callTrap(c, bus, trap, callId, instructionLimit) {
+    if (c.stopped || instructionLimit <= 0) {
+        return;
+    }
+    c.reg[0] = callId;
+    c.exception = qdosTrapVectorBase + trap;
+    c.extraFlag = true;
+    runGuestCall(c, bus, c.pc, instructionLimit);
+}
+
+/**
+ * Call a guest subroutine synchronously from a host pseudo-op.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} address
+ * @param {number} instructionLimit
+ */
+export function callSubroutine(c, bus, address, instructionLimit) {
+    if (c.stopped || instructionLimit <= 0 || (address & 1) !== 0) {
+        return;
+    }
+    const returnPc = c.pc;
+    if (!pushLongToStack(c, bus, returnPc)) {
+        return;
+    }
+    setPc(c, bus, asI32(address));
+    c.extraFlag = false;
+    c.exception = 0;
+    runGuestCall(c, bus, returnPc, instructionLimit);
+}
+
+/**
+ * Execute a bounded nested guest call without disturbing the outer loop.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} returnPc
+ * @param {number} instructionLimit
+ */
+function runGuestCall(c, bus, returnPc, instructionLimit) {
+    const savedCode = c.code;
+    const savedInstructionPc = c.currentInstructionPc;
+    const savedAccess = c.accessActive;
+    const savedOverride = c.instructionCycleOverride;
+    const savedNInst = c.nInst;
+    const savedNInst2 = c.nInst2;
+    const savedCycleLimitActive = c.cycleLimitActive;
+    c.accessActive = false;
+    c.cycleLimitActive = false;
+    if (!c.extraFlag) {
+        c.exception = 0;
+    }
+    c.nInst = instructionLimit;
+    if (c.extraFlag) {
+        c.nInst2 = c.nInst;
+        c.nInst = 0;
+    }
+    for (;;) {
+        while (c.nInst > 0) {
+            c.nInst -= 1;
+            if (c.pc === returnPc) {
+                c.nInst = 0;
+                break;
+            }
+            executeTimedPcInstruction(c, bus);
+        }
+        if (!c.extraFlag) {
+            break;
+        }
+        c.nInst = c.nInst2;
+        exceptionProcessing(c, bus);
+        if (c.nInst <= 0) {
+            break;
+        }
+    }
+    c.nInst = savedNInst;
+    c.nInst2 = savedNInst2;
+    c.code = savedCode;
+    c.currentInstructionPc = savedInstructionPc;
+    c.accessActive = savedAccess;
+    c.instructionCycleOverride = savedOverride;
+    c.cycleLimitActive = savedCycleLimitActive;
+}
+
+/**
  * @param {Cpu} c
  * @param {CpuBus} bus
  */

@@ -3,6 +3,7 @@ precision mediump float;
 
 uniform highp usampler2D u_tex;
 uniform bool u_crt;
+uniform bool u_ntsc;
 
 in vec2 v_uv;
 out vec4 o_color;
@@ -36,7 +37,13 @@ void main() {
     }
 
     ivec2 tex_size = textureSize(u_tex, 0);
-    vec2 source = v_uv * vec2(tex_size);
+    vec2 source_uv = v_uv;
+    if (u_ntsc) {
+        // The flipped texture's lower quarter contains QL rows 192-255,
+        // which the 192-line NTSC TV raster does not scan.
+        source_uv.y = 0.25 + source_uv.y * 0.75;
+    }
+    vec2 source = source_uv * vec2(tex_size);
     ivec2 m_texel = clamp(ivec2(floor(source)), ivec2(0), tex_size - 1);
     ivec2 l_texel = ivec2(max(m_texel.x - 1, 0), m_texel.y);
     ivec2 r_texel = ivec2(min(m_texel.x + 1, tex_size.x - 1), m_texel.y);

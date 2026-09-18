@@ -21,6 +21,7 @@ const crtViewH = 384;
  *   crtOn: boolean,
  *   pixelRatio: number,
  *   crtLoc: WebGLUniformLocation,
+ *   ntscLoc: WebGLUniformLocation,
  * }} Gfx
  */
 
@@ -146,12 +147,14 @@ export function resize(gfx) {
  *
  * @param {Gfx} gfx
  * @param {Uint8Array} pixels
+ * @param {boolean} ntsc
  */
-export function draw(gfx, pixels) {
+export function draw(gfx, pixels, ntsc) {
     if (gfx.pixelRatio !== displayPixelRatio()) {
         resize(gfx);
     }
     const gl = gfx.gl;
+    gl.uniform1i(gfx.ntscLoc, Number(ntsc));
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frameW, frameH, gl.RED_INTEGER, gl.UNSIGNED_BYTE, pixels);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
@@ -199,12 +202,17 @@ function createGfx(canvas, vertGLSL, fragGLSL) {
     if (crtLoc === null) {
         return null;
     }
+    const ntscLoc = gl.getUniformLocation(program, "u_ntsc");
+    if (ntscLoc === null) {
+        return null;
+    }
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
     gl.useProgram(program);
     gl.uniform1i(texLoc, 0);
     gl.uniform1i(crtLoc, 0);
+    gl.uniform1i(ntscLoc, 0);
     gl.viewport(0, 0, frameW, frameH);
-    return {gl, crtOn: false, pixelRatio: 0, crtLoc};
+    return {gl, crtOn: false, pixelRatio: 0, crtLoc, ntscLoc};
 }
 
 /**

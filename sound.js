@@ -67,7 +67,7 @@ export function init(framesPerSecond, onDone) {
         return;
     }
 
-    context.audioWorklet.addModule("sound.worklet.js").then(
+    context.audioWorklet.addModule("sound.worklet.js?v=2").then(
         function () {
             const frameSampleCount = Math.round(context.sampleRate / framesPerSecond);
             /** @type {Sfx} */
@@ -305,10 +305,13 @@ export function push(sfx, chunk) {
     }
     for (let i = 0; i < n; i += 1) {
         const at = i * 4;
+        // Adding the mono FM signal equally to all PSG planes keeps it centred:
+        // either pan layout gives their common component the same total weight.
+        const fm = chunk.fm[i];
         samples[at] = chunk.ula[i];
-        samples[at + 1] = chunk.a[i];
-        samples[at + 2] = chunk.b[i];
-        samples[at + 3] = chunk.c[i];
+        samples[at + 1] = chunk.a[i] + fm;
+        samples[at + 2] = chunk.b[i] + fm;
+        samples[at + 3] = chunk.c[i] + fm;
     }
     sfx.queuedSamples += n;
     sfx.sentSamples += n;

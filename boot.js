@@ -100,7 +100,7 @@ export function loadStartupRom(name, maxBytes, onDone) {
 }
 
 /**
- * Fetch the bundled original-QSound extension ROM.
+ * Fetch the bundled QSound extension ROM shared by both card models.
  *
  * @param {number} maxBytes
  * @param {function(string | null, ArrayBuffer | null): void} onDone

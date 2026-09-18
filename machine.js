@@ -1,8 +1,14 @@
 import * as ay from "./ay.js";
 import * as cpu from "./cpu.js";
+import * as fm from "./fm.js";
+import * as hdd from "./hdd.js";
 
 export const sysRomSize = 0xC000;
+export const romCartridgeSize = 0x4000;
 export const qsoundRomSize = 0x2000;
+export const qsoundOff = 0;
+export const qsoundOriginal = 1;
+export const qsound2 = 2;
 export const minRamKb = 128;
 export const maxRamKb = 896;
 export const defaultRamKb = 128;
@@ -32,7 +38,7 @@ const interruptClearMask = 0x1F;
 const ipcReadMarker = 0xA50000;
 const ipcReadSetMarker = 0xA58000;
 const ipcReadDoneMarker = 0xA5;
-const ipcReadIdleValue = 2;
+const ipcReadIdleValue = 0;
 const ipcWireTransferReady = 0x0C;
 const ipcWireCommandReadyBit = 0x10;
 const ipcWireCommandMask = 0x0F;
@@ -51,22 +57,28 @@ const maxIpcQueuedKeys = 7;
 const audioCap = 8192;
 const qlaySectorSize = 686;
 const microdriveUnitCount = 2;
+const blankMdvSectorCount = 255;
 const microdriveBitRateHz = 100000;
 const microdriveBitsPerPair = 8;
 const microdriveSelectDataBit = 0x01;
 const microdriveSelectClockBit = 0x02;
 const microdriveReadWriteBit = 0x04;
 const microdriveEraseBit = 0x08;
+const microdriveStatusTransmitFullBit = 0x02;
 const microdriveStatusReadReadyBit = 0x04;
 const microdriveStatusGapBit = 0x08;
 const microdriveGapInterruptBit = 0x01;
 const microdriveMaxImageBytes = 2 * 1024 * 1024;
 const microdriveHeaderGapEndOffset = 6;
+const qlaySectorHeaderOffset = 12;
 const qlayBlockPreambleOffset = 28;
 const qlayBlockGapEndOffset = 34;
+const qlayBlockHeaderOffset = 40;
 const qlayDataPreambleOffset = 44;
 const qlayDataOffset = 52;
 const qlayGapOffset = 566;
+const qlayFormatGapOffset = 652;
+const qlayBadFileId = 0xFF;
 const soundIpcTickHz = 22917;
 const soundPitchFractionScale = 10;
 const soundPitchBaseUnits = 106;
@@ -75,15 +87,19 @@ const soundNibbleMax = 0x0F;
 const soundSignedNibbleMax = 7;
 const soundSignedNibbleBias = 16;
 const soundPitchWrapDelta = 8;
+const romCartridgeBase = sysRomSize;
 const qsoundBase = 0xC0000;
 const qsoundBytes = 0x4000;
 const qsoundRomBytes = qsoundRomSize;
 const qsoundPiaBase = qsoundBase + qsoundRomBytes;
+const qsound2PiaBytes = 0x1000;
+const qsound2DirectBase = qsoundPiaBase + qsound2PiaBytes;
 const qsoundDataSelectBit = 0x04;
 const qsoundAddressSelect = 0x05;
 const qsoundDataWrite = 0x04;
 const qsoundSelectMask = 0x05;
 const qsoundAyTickCycles = 80;
+const qsound2SsgTickHz = 125000;
 const qsoundRegisterMasks = Uint8Array.of(
     0xFF, 0x0F, 0xFF, 0x0F, 0xFF, 0x0F, 0x1F, 0xFF,
     0x1F, 0x1F, 0x1F, 0xFF, 0xFF, 0x0F, 0xFF, 0xFF,
@@ -117,6 +133,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  *   a: Float32Array,
  *   b: Float32Array,
  *   c: Float32Array,
+ *   fm: Float32Array,
  * }} AudioChunk
  */
 
@@ -128,6 +145,10 @@ for (let ink = 0; ink < 16; ink += 1) {
  *   inserted: boolean,
  *   writable: boolean,
  *   name: string,
+ *   unformatted: boolean,
+ *   formatVerifying: boolean,
+ *   formatVerified: boolean,
+ *   modified: boolean,
  *   readCount: number,
  *   writeCount: number,
  * }} MicrodriveCartridge
@@ -144,6 +165,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  *   guestRamTop: number,
  *   guestClock: number,
  *   romLoaded: boolean,
+ *   romCartridgeLoaded: boolean,
  *   ntscMachine: boolean,
  *   displayNtsc: boolean,
  *   displayBlank: boolean,
@@ -191,22 +213,27 @@ for (let ink = 0; ink < 16; ink += 1) {
  *     direction: number,
  *   },
  *   qsound: {
- *     enabled: boolean,
+ *     model: number,
  *     rom: Uint8Array,
  *     selectedRegister: number,
  *     pia: Uint8Array,
  *     dataDirectionA: number,
  *     dataDirectionB: number,
  *     ay: import("./ay.js").State,
+ *     fm: import("./fm.js").State,
  *   },
+ *   hdd: import("./hdd.js").State,
  *   mdv: {
  *     cartridges: MicrodriveCartridge[],
  *     selectedMask: number,
+ *     readingMask: number,
  *     control: number,
  *     latchedByteOffset: number,
  *     latchedTracks: number,
- *     writeLatchedByteOffset: number,
- *     writtenTracks: number,
+ *     transmitFullUntil: number,
+ *     formattingUnit: number,
+ *     formatWriteOffset: number,
+ *     formatBurstBytes: number,
  *     gapActive: boolean,
  *     dataReady: boolean,
  *     cycleAnchor: number,
@@ -278,6 +305,7 @@ export function create(keys) {
             a: new Float32Array(audioN),
             b: new Float32Array(audioN),
             c: new Float32Array(audioN),
+            fm: new Float32Array(audioN),
         },
         ipcRead: 0,
         ipcReceived: 1,
@@ -313,14 +341,16 @@ export function create(keys) {
             direction: 1,
         },
         qsound: {
-            enabled: false,
+            model: qsoundOff,
             rom: new Uint8Array(qsoundRomBytes),
             selectedRegister: 0,
             pia: new Uint8Array(4),
             dataDirectionA: 0,
             dataDirectionB: 0,
             ay: ay.create(qsoundAyTickCycles),
+            fm: fm.create(),
         },
+        hdd: hdd.create(),
         mdv: {
             cartridges: [
                 {
@@ -330,6 +360,10 @@ export function create(keys) {
                     inserted: false,
                     writable: true,
                     name: "",
+                    unformatted: false,
+                    formatVerifying: false,
+                    formatVerified: false,
+                    modified: false,
                     readCount: 0,
                     writeCount: 0,
                 },
@@ -340,23 +374,32 @@ export function create(keys) {
                     inserted: false,
                     writable: true,
                     name: "",
+                    unformatted: false,
+                    formatVerifying: false,
+                    formatVerified: false,
+                    modified: false,
                     readCount: 0,
                     writeCount: 0,
                 },
             ],
             selectedMask: 0,
+            readingMask: 0,
             control: microdriveSelectClockBit | microdriveReadWriteBit,
             latchedByteOffset: 0,
             latchedTracks: 0,
-            writeLatchedByteOffset: 0,
-            writtenTracks: 0,
+            transmitFullUntil: 0,
+            formattingUnit: -1,
+            formatWriteOffset: 0,
+            formatBurstBytes: 0,
             gapActive: false,
             dataReady: false,
             cycleAnchor: 0,
             pairCycles: cpu.qlPalClockHz / microdriveBitRateHz * microdriveBitsPerPair,
         },
         romLoaded: false,
+        romCartridgeLoaded: false,
     };
+    hdd.attach(m.hdd, m.cpuBus);
     fillRam(m);
     resetAudioClock(m);
     return m;
@@ -379,6 +422,7 @@ export function reset(m) {
     m.guestClock = 0;
     m.theInt = 0;
     stopBeep(m);
+    hdd.prepareReset(m.hdd, m.mem);
     cpu.reset(m.cpu, m.cpuBus);
     resetQsound(m);
     resetAudioClock(m);
@@ -404,11 +448,92 @@ export function setSysRom(m, bytes) {
     m.mem.fill(0, 0, sysRomSize);
     m.mem.set(src, 0);
     m.romLoaded = true;
+    hdd.patchRom(m.hdd, m.mem);
     return null;
 }
 
 /**
- * Install the original QSound extension ROM, padded to its 8 KiB window.
+ * Insert a writable QLWA hard disk image as WIN1_.
+ *
+ * @param {Machine} m
+ * @param {ArrayBuffer | Uint8Array} bytes
+ * @param {string} name
+ * @returns {string | null}
+ */
+export function insertHdd(m, bytes, name) {
+    return hdd.insert(m.hdd, bytes, name);
+}
+
+/** @param {Machine} m @returns {{name: string, bytes: Uint8Array} | null} */
+export function saveHdd(m) {
+    return hdd.save(m.hdd);
+}
+
+/** @param {Machine} m */
+export function ejectHdd(m) {
+    hdd.eject(m.hdd);
+}
+
+/** @param {Machine} m @returns {{inserted: boolean, name: string, modified: boolean, driverReady: boolean}} */
+export function hddInfo(m) {
+    return hdd.info(m.hdd);
+}
+
+/**
+ * Select the contiguous QL RAM size and initialize its mapped contents.
+ *
+ * @param {Machine} m
+ * @param {number} ramKb
+ * @returns {boolean}
+ */
+export function setRamKb(m, ramKb) {
+    switch (ramKb) {
+    case 128:
+    case 384:
+    case 640:
+    case 896:
+        break;
+    default:
+        return false;
+    }
+    m.guestRamTop = cpu.qdosUserRamBase + ramKb * 1024;
+    fillRam(m);
+    return true;
+}
+
+/**
+ * Insert a read-only ROM-port cartridge, padded to its 16 KiB window.
+ *
+ * @param {Machine} m
+ * @param {ArrayBuffer | Uint8Array} bytes
+ * @returns {string | null}
+ */
+export function insertRomCartridge(m, bytes) {
+    let src = bytes;
+    if (!(src instanceof Uint8Array)) {
+        src = new Uint8Array(src);
+    }
+    if (src.byteLength === 0 || src.byteLength > romCartridgeSize) {
+        return "Expected 1 to " + romCartridgeSize + ", got " + src.byteLength + " bytes.";
+    }
+    m.mem.fill(0, romCartridgeBase, romCartridgeBase + romCartridgeSize);
+    m.mem.set(src, romCartridgeBase);
+    m.romCartridgeLoaded = true;
+    return null;
+}
+
+/**
+ * Clear the external ROM-port cartridge without changing the running CPU.
+ *
+ * @param {Machine} m
+ */
+export function ejectRomCartridge(m) {
+    m.mem.fill(0, romCartridgeBase, romCartridgeBase + romCartridgeSize);
+    m.romCartridgeLoaded = false;
+}
+
+/**
+ * Install the QSound extension ROM shared by both card models.
  *
  * @param {Machine} m
  * @param {ArrayBuffer | Uint8Array} bytes
@@ -428,14 +553,19 @@ export function setQsoundRom(m, bytes) {
 }
 
 /**
- * Connect or disconnect the original QSound expansion card.
+ * Select no sound card, original QSound, or QSound2.
  *
  * @param {Machine} m
- * @param {boolean} enabled
+ * @param {number} model
+ * @returns {boolean}
  */
-export function enableQsound(m, enabled) {
-    m.qsound.enabled = enabled;
+export function setQsoundModel(m, model) {
+    if (model !== qsoundOff && model !== qsoundOriginal && model !== qsound2) {
+        return false;
+    }
+    m.qsound.model = model;
     resetQsound(m);
+    return true;
 }
 
 /**
@@ -565,6 +695,7 @@ export function takeAudio(m) {
         a: chunk.a,
         b: chunk.b,
         c: chunk.c,
+        fm: chunk.fm,
     };
     return chunk;
 }
@@ -596,8 +727,50 @@ export function insertMdv(m, drive, bytes, name) {
     cart.inserted = true;
     cart.writable = true;
     cart.name = name;
+    cart.unformatted = false;
+    cart.formatVerifying = false;
+    cart.formatVerified = false;
+    cart.modified = false;
+    cart.readCount = 0;
+    cart.writeCount = 0;
     microdriveOnMediumChange(m);
     return null;
+}
+
+/**
+ * Insert a zero-filled, unformatted cartridge with standard maximum capacity.
+ *
+ * @param {Machine} m
+ * @param {number} drive
+ * @param {string} name
+ * @returns {string | null}
+ */
+export function insertBlankMdv(m, drive, name) {
+    const error = insertMdv(m, drive, new Uint8Array(blankMdvSectorCount * qlaySectorSize), name);
+    if (error === null) {
+        m.mdv.cartridges[drive].unformatted = true;
+    }
+    return error;
+}
+
+/**
+ * Copy the current cartridge for download and mark that revision as saved.
+ *
+ * @param {Machine} m
+ * @param {number} drive
+ * @returns {{name: string, bytes: Uint8Array} | null}
+ */
+export function saveMdv(m, drive) {
+    if (drive < 0 || drive >= microdriveUnitCount) {
+        return null;
+    }
+    const cart = m.mdv.cartridges[drive];
+    if (!cart.inserted) {
+        return null;
+    }
+    const bytes = cart.image.slice(0, cart.imageLen);
+    cart.modified = false;
+    return {name: cart.name, bytes};
 }
 
 /**
@@ -616,6 +789,12 @@ export function ejectMdv(m, drive) {
     cart.byteOffset = 0;
     cart.inserted = false;
     cart.name = "";
+    cart.unformatted = false;
+    cart.formatVerifying = false;
+    cart.formatVerified = false;
+    cart.modified = false;
+    cart.readCount = 0;
+    cart.writeCount = 0;
     microdriveOnMediumChange(m);
 }
 
@@ -628,6 +807,9 @@ export function ejectMdv(m, drive) {
  *   inserted: boolean,
  *   name: string,
  *   motorOn: boolean,
+ *   reading: boolean,
+ *   writing: boolean,
+ *   modified: boolean,
  *   readCount: number,
  *   writeCount: number,
  * }}
@@ -635,10 +817,15 @@ export function ejectMdv(m, drive) {
 export function mdvInfo(m, drive) {
     const cart = m.mdv.cartridges[drive];
     const motorOn = (m.mdv.selectedMask & (1 << drive)) !== 0;
+    const reading = cart.inserted && motorOn && (m.mdv.readingMask & (1 << drive)) !== 0;
+    const writing = cart.inserted && motorOn && (m.mdv.control & microdriveEraseBit) !== 0;
     return {
         inserted: cart.inserted,
         name: cart.name,
         motorOn,
+        reading,
+        writing,
+        modified: cart.modified,
         readCount: cart.readCount,
         writeCount: cart.writeCount,
     };
@@ -650,7 +837,6 @@ function fillRam(m) {
     if (seed === 0) {
         seed = 1;
     }
-    m.mem.fill(0, 0, cpu.qdosUserRamBase);
     for (let offset = cpu.qdosUserRamBase; offset < m.guestRamTop; offset += 4) {
         seed ^= (seed << 13);
         seed >>>= 0;
@@ -1143,10 +1329,12 @@ function renderAudioTo(m, untilCycle) {
             ay.runTo(m.qsound.ay, m.sampleEndT);
             chunk.ula[chunk.n] = renderBeepSample(m);
             ay.takeSample(m.qsound.ay, period, chunk.a, chunk.b, chunk.c, chunk.n);
+            chunk.fm[chunk.n] = renderFmSample(m);
             chunk.n += 1;
         } else {
             ay.runSilent(m.qsound.ay, m.sampleEndT);
             renderBeepSample(m);
+            renderFmSample(m);
         }
         nextSampleWindow(m);
     }
@@ -1175,6 +1363,14 @@ function nextSampleWindow(m) {
     const step = Math.floor(m.sampleAcc / m.sampleRate);
     m.sampleAcc -= step * m.sampleRate;
     m.sampleEndT += step;
+}
+
+/** @param {Machine} m @returns {number} */
+function renderFmSample(m) {
+    if (m.qsound.model !== qsound2) {
+        return 0;
+    }
+    return fm.takeSample(m.qsound.fm, m.sampleRate);
 }
 
 /**
@@ -1297,7 +1493,7 @@ function activeRandomNibble(beep, value) {
 
 /** @param {Machine} m @param {number} addr @returns {boolean} */
 function qsoundContains(m, addr) {
-    return m.qsound.enabled && addr >= qsoundBase && addr < qsoundBase + qsoundBytes;
+    return m.qsound.model !== qsoundOff && addr >= qsoundBase && addr < qsoundBase + qsoundBytes;
 }
 
 /** @param {Machine} m */
@@ -1307,13 +1503,22 @@ function resetQsound(m) {
     qsound.pia.fill(0);
     qsound.dataDirectionA = 0;
     qsound.dataDirectionB = 0;
-    ay.reset(qsound.ay, m.cpu.cycleCount);
+    let tickCycles = qsoundAyTickCycles;
+    const ymStyle = qsound.model === qsound2;
+    if (ymStyle) {
+        tickCycles = cpuClockHz(m) / qsound2SsgTickHz;
+    }
+    ay.configure(qsound.ay, tickCycles, ymStyle, m.cpu.cycleCount);
+    fm.reset(qsound.fm);
 }
 
 /** @param {Machine} m @param {number} addr @returns {number} */
 function readQsound(m, addr) {
     if (addr < qsoundPiaBase) {
         return m.qsound.rom[addr - qsoundBase];
+    }
+    if (!qsoundPiaContains(m, addr)) {
+        return readQsound2Direct(m, addr);
     }
     const reg = (addr - qsoundPiaBase) & 3;
     switch (reg) {
@@ -1337,6 +1542,10 @@ function readQsound(m, addr) {
 /** @param {Machine} m @param {number} addr @param {number} value */
 function writeQsound(m, addr, value) {
     if (addr < qsoundPiaBase) {
+        return;
+    }
+    if (!qsoundPiaContains(m, addr)) {
+        writeQsound2Direct(m, addr, value);
         return;
     }
     const reg = (addr - qsoundPiaBase) & 3;
@@ -1380,6 +1589,50 @@ function updateQsoundAy(m, value) {
     ay.writeReg(m.qsound.ay, reg, masked);
 }
 
+/** @param {Machine} m @param {number} addr @returns {boolean} */
+function qsoundPiaContains(m, addr) {
+    if (addr < qsoundPiaBase) {
+        return false;
+    }
+    if (m.qsound.model === qsoundOriginal) {
+        return addr < qsoundBase + qsoundBytes;
+    }
+    return addr < qsoundPiaBase + qsound2PiaBytes;
+}
+
+/** @param {Machine} m @param {number} addr @returns {number} */
+function readQsound2Direct(m, addr) {
+    if (m.qsound.model !== qsound2 || addr < qsound2DirectBase) {
+        return 0;
+    }
+    if (((addr - qsound2DirectBase) & 2) === 0) {
+        return 0;
+    }
+    const reg = m.qsound.selectedRegister;
+    if (reg < 16) {
+        return ay.readReg(m.qsound.ay, reg);
+    }
+    return fm.readReg(m.qsound.fm, reg);
+}
+
+/** @param {Machine} m @param {number} addr @param {number} value */
+function writeQsound2Direct(m, addr, value) {
+    if (m.qsound.model !== qsound2 || addr < qsound2DirectBase) {
+        return;
+    }
+    if (((addr - qsound2DirectBase) & 2) === 0) {
+        m.qsound.selectedRegister = value;
+        return;
+    }
+    renderAudioTo(m, m.cpu.cycleCount);
+    const reg = m.qsound.selectedRegister;
+    if (reg < 16) {
+        ay.writeReg(m.qsound.ay, reg, value & qsoundRegisterMasks[reg]);
+        return;
+    }
+    fm.writeReg(m.qsound.fm, reg, value);
+}
+
 /**
  * @param {Machine} m
  * @returns {boolean}
@@ -1415,10 +1668,13 @@ function microdriveResetHardware(m) {
  * @param {Machine} m
  */
 function microdriveOnMediumChange(m) {
+    m.mdv.readingMask = 0;
     m.mdv.latchedByteOffset = 0;
     m.mdv.latchedTracks = 0;
-    m.mdv.writeLatchedByteOffset = 0;
-    m.mdv.writtenTracks = 0;
+    m.mdv.transmitFullUntil = 0;
+    m.mdv.formattingUnit = -1;
+    m.mdv.formatWriteOffset = 0;
+    m.mdv.formatBurstBytes = 0;
     m.mdv.gapActive = false;
     m.mdv.dataReady = false;
     m.mdv.cycleAnchor = m.cpu.cycleCount;
@@ -1440,6 +1696,9 @@ function microdriveOffsetIsGap(cartridge, byteOffset) {
     if (sectorOffset >= qlayBlockPreambleOffset && sectorOffset < qlayBlockGapEndOffset) {
         return true;
     }
+    if (cartridge.unformatted && !cartridge.formatVerified) {
+        return sectorOffset >= qlayFormatGapOffset;
+    }
     return sectorOffset >= qlayGapOffset;
 }
 
@@ -1453,7 +1712,48 @@ function microdriveOffsetIsPreamble(cartridge, byteOffset) {
         return false;
     }
     const sectorOffset = byteOffset % qlaySectorSize;
+    if (sectorOffset >= microdriveHeaderGapEndOffset && sectorOffset < qlaySectorHeaderOffset) {
+        return true;
+    }
+    if (sectorOffset >= qlayBlockGapEndOffset && sectorOffset < qlayBlockHeaderOffset) {
+        return true;
+    }
+    if (cartridge.unformatted && !cartridge.formatVerified) {
+        return false;
+    }
     return sectorOffset >= qlayDataPreambleOffset && sectorOffset < qlayDataOffset;
+}
+
+/**
+ * Change one cartridge byte and retain that change for a later download.
+ *
+ * @param {MicrodriveCartridge} cartridge
+ * @param {number} offset
+ * @param {number} value
+ */
+function microdriveWriteImageByte(cartridge, offset, value) {
+    if (!cartridge.writable || offset < 0 || offset >= cartridge.imageLen) {
+        return;
+    }
+    cartridge.image[offset] = value;
+    cartridge.modified = true;
+}
+
+/**
+ * Apply the active erase line to both interleaved track bytes at the head.
+ *
+ * @param {MicrodriveCartridge} cartridge
+ */
+function microdriveEraseCurrentPair(cartridge) {
+    if (!cartridge.writable || cartridge.imageLen === 0) {
+        return;
+    }
+    microdriveWriteImageByte(cartridge, cartridge.byteOffset, 0);
+    let second = cartridge.byteOffset + 1;
+    if (second >= cartridge.imageLen) {
+        second = 0;
+    }
+    microdriveWriteImageByte(cartridge, second, 0);
 }
 
 /**
@@ -1481,22 +1781,38 @@ function microdriveAdvanceActive(m) {
         return;
     }
     const cartridge = m.mdv.cartridges[unit];
-    if (m.cpu.cycleCount < m.mdv.cycleAnchor || cartridge.imageLen === 0) {
+    if (cartridge.imageLen === 0) {
+        m.mdv.cycleAnchor = m.cpu.cycleCount;
+        return;
+    }
+    if (m.cpu.cycleCount < m.mdv.cycleAnchor) {
+        return;
+    }
+    if (
+        m.mdv.formattingUnit === unit &&
+        (m.mdv.control & microdriveEraseBit) !== 0 &&
+        (m.mdv.control & microdriveReadWriteBit) === 0
+    ) {
         m.mdv.cycleAnchor = m.cpu.cycleCount;
         return;
     }
     const elapsed = m.cpu.cycleCount - m.mdv.cycleAnchor;
-    let steps = Math.floor(elapsed / m.mdv.pairCycles);
+    const pairCycles = m.mdv.pairCycles;
+    let steps = Math.floor(elapsed / pairCycles);
     if (steps === 0) {
         return;
     }
-    if (m.mdv.latchedTracks !== 0 || m.mdv.writtenTracks !== 0) {
+    if (m.mdv.latchedTracks !== 0) {
         m.mdv.cycleAnchor = m.cpu.cycleCount;
         return;
     }
     const completed = steps;
     while (steps > 0) {
         const oldGap = microdriveOffsetIsGap(cartridge, cartridge.byteOffset);
+        if ((m.mdv.control & microdriveEraseBit) !== 0) {
+            microdriveEraseCurrentPair(cartridge);
+            m.mdv.readingMask &= ~(1 << unit);
+        }
         cartridge.byteOffset += 2;
         if (cartridge.byteOffset >= cartridge.imageLen) {
             cartridge.byteOffset -= cartridge.imageLen;
@@ -1509,7 +1825,7 @@ function microdriveAdvanceActive(m) {
         m.mdv.dataReady = !newGap && !microdriveOffsetIsPreamble(cartridge, cartridge.byteOffset);
         steps -= 1;
     }
-    m.mdv.cycleAnchor += completed * m.mdv.pairCycles;
+    m.mdv.cycleAnchor += completed * pairCycles;
 }
 
 /**
@@ -1518,18 +1834,22 @@ function microdriveAdvanceActive(m) {
  */
 function microdriveStatusBits(m) {
     microdriveAdvanceActive(m);
+    let status = 0;
+    if (m.cpu.cycleCount < m.mdv.transmitFullUntil) {
+        status |= microdriveStatusTransmitFullBit;
+    }
     const unit = microdriveActiveUnit(m);
     if (unit < 0) {
-        return microdriveStatusGapBit;
+        return status | microdriveStatusGapBit;
     }
     const cartridge = m.mdv.cartridges[unit];
     if (microdriveOffsetIsGap(cartridge, cartridge.byteOffset)) {
-        return microdriveStatusGapBit;
+        return status | microdriveStatusGapBit;
     }
     if (!m.mdv.dataReady) {
-        return 0;
+        return status;
     }
-    return microdriveStatusReadReadyBit;
+    return status | microdriveStatusReadReadyBit;
 }
 
 /**
@@ -1538,6 +1858,63 @@ function microdriveStatusBits(m) {
  */
 function microdriveControlWrite(m, data) {
     microdriveAdvanceActive(m);
+    const oldControl = m.mdv.control;
+    const unit = microdriveActiveUnit(m);
+    const enteringWrite =
+        (oldControl & microdriveEraseBit) !== 0 &&
+        (oldControl & microdriveReadWriteBit) === 0 &&
+        (data & microdriveReadWriteBit) !== 0;
+    const leavingWrite =
+        (oldControl & microdriveReadWriteBit) !== 0 &&
+        (data & microdriveEraseBit) !== 0 &&
+        (data & microdriveReadWriteBit) === 0;
+    const verifyingFormat =
+        unit >= 0 &&
+        m.mdv.formattingUnit === unit &&
+        (oldControl & microdriveEraseBit) !== 0 &&
+        (data & (microdriveEraseBit | microdriveReadWriteBit)) === 0;
+    const startingCatalog =
+        unit >= 0 &&
+        m.mdv.formattingUnit === unit &&
+        m.mdv.cartridges[unit].formatVerifying &&
+        (oldControl & (microdriveEraseBit | microdriveReadWriteBit)) === 0 &&
+        (data & microdriveEraseBit) !== 0;
+    if (unit >= 0 && enteringWrite && m.mdv.cartridges[unit].unformatted) {
+        if (m.mdv.formattingUnit !== unit) {
+            m.mdv.formattingUnit = unit;
+            m.mdv.formatWriteOffset = 0;
+        }
+        if (!m.mdv.cartridges[unit].formatVerified) {
+            m.mdv.cartridges[unit].byteOffset = m.mdv.formatWriteOffset;
+        }
+        m.mdv.formatBurstBytes = 0;
+        m.mdv.transmitFullUntil = 0;
+        m.mdv.cycleAnchor = m.cpu.cycleCount;
+    }
+    if (
+        unit >= 0 &&
+        leavingWrite &&
+        m.mdv.formattingUnit === unit &&
+        !m.mdv.cartridges[unit].formatVerified
+    ) {
+        if (m.mdv.formatBurstBytes !== 28) {
+            m.mdv.formatWriteOffset += 34;
+            if (m.mdv.formatWriteOffset >= m.mdv.cartridges[unit].imageLen) {
+                m.mdv.formatWriteOffset -= m.mdv.cartridges[unit].imageLen;
+            }
+        }
+        m.mdv.cartridges[unit].byteOffset = m.mdv.formatWriteOffset;
+        m.mdv.cycleAnchor = m.cpu.cycleCount;
+    }
+    if (verifyingFormat) {
+        m.mdv.cartridges[unit].formatVerifying = true;
+        m.mdv.cycleAnchor = m.cpu.cycleCount;
+    }
+    if (startingCatalog) {
+        m.mdv.cartridges[unit].formatVerifying = false;
+        m.mdv.cartridges[unit].formatVerified = true;
+        m.mdv.cycleAnchor = m.cpu.cycleCount;
+    }
     const oldClock = (m.mdv.control & microdriveSelectClockBit) !== 0;
     const newClock = (data & microdriveSelectClockBit) !== 0;
     if (oldClock && !newClock) {
@@ -1552,9 +1929,22 @@ function microdriveControlWrite(m, data) {
             previousSelected = wasSelected;
         }
         if (nextMask !== m.mdv.selectedMask) {
+            if (nextMask === 0 && m.mdv.formattingUnit >= 0) {
+                const formatted = m.mdv.cartridges[m.mdv.formattingUnit];
+                if (formatted.formatVerified) {
+                    microdriveFinalizeFormat(formatted);
+                }
+                formatted.unformatted = false;
+                formatted.formatVerifying = false;
+                formatted.formatVerified = false;
+                m.mdv.formattingUnit = -1;
+                m.mdv.formatWriteOffset = 0;
+                m.mdv.formatBurstBytes = 0;
+            }
             m.mdv.selectedMask = nextMask;
+            m.mdv.readingMask &= nextMask;
             m.mdv.latchedTracks = 0;
-            m.mdv.writtenTracks = 0;
+            m.mdv.transmitFullUntil = 0;
             m.mdv.dataReady = false;
             m.mdv.cycleAnchor = m.cpu.cycleCount;
             if (nextMask !== 0 && microdriveActiveUnit(m) < 0 && !m.mdv.gapActive) {
@@ -1565,9 +1955,36 @@ function microdriveControlWrite(m, data) {
     }
     if (((m.mdv.control ^ data) & microdriveReadWriteBit) !== 0) {
         m.mdv.latchedTracks = 0;
-        m.mdv.writtenTracks = 0;
+        m.mdv.transmitFullUntil = 0;
     }
     m.mdv.control = data;
+}
+
+/**
+ * Make the physical QLAY records agree with the bad sectors selected by FORMAT.
+ *
+ * @param {MicrodriveCartridge} cartridge
+ */
+function microdriveFinalizeFormat(cartridge) {
+    const sectorCount = Math.floor(cartridge.imageLen / qlaySectorSize);
+    let mapOffset = -1;
+    for (let physical = 0; physical < sectorCount; physical += 1) {
+        const base = physical * qlaySectorSize;
+        if (cartridge.image[base + qlaySectorHeaderOffset + 1] === 0) {
+            mapOffset = base;
+            break;
+        }
+    }
+    if (mapOffset < 0) {
+        return;
+    }
+    for (let physical = 0; physical < sectorCount; physical += 1) {
+        const base = physical * qlaySectorSize;
+        const logical = cartridge.image[base + qlaySectorHeaderOffset + 1];
+        if (cartridge.image[mapOffset + qlayDataOffset + logical * 2] === qlayBadFileId) {
+            microdriveWriteImageByte(cartridge, base + qlaySectorHeaderOffset, 0);
+        }
+    }
 }
 
 /**
@@ -1577,32 +1994,33 @@ function microdriveControlWrite(m, data) {
  */
 function microdriveWriteTrackByte(m, addr, value) {
     microdriveAdvanceActive(m);
-    const track = addr - microdriveTrack1Addr;
     const unit = microdriveActiveUnit(m);
-    if (unit < 0 || (m.mdv.control & microdriveReadWriteBit) !== 0) {
+    if (
+        addr !== microdriveTrack1Addr ||
+        unit < 0 ||
+        (m.mdv.control & microdriveReadWriteBit) === 0 ||
+        m.cpu.cycleCount < m.mdv.transmitFullUntil
+    ) {
         return;
     }
     const cartridge = m.mdv.cartridges[unit];
     if (cartridge.imageLen === 0 || !cartridge.writable) {
         return;
     }
-    const trackBit = 1 << track;
-    if (m.mdv.writtenTracks === 0 || (m.mdv.writtenTracks & trackBit) !== 0) {
-        m.mdv.writeLatchedByteOffset = cartridge.byteOffset;
-        m.mdv.writtenTracks = 0;
+    microdriveWriteImageByte(cartridge, cartridge.byteOffset, value);
+    cartridge.byteOffset += 1;
+    if (cartridge.byteOffset >= cartridge.imageLen) {
+        cartridge.byteOffset = 0;
     }
-    let offset = m.mdv.writeLatchedByteOffset + track;
-    if (offset >= cartridge.imageLen) {
-        offset -= cartridge.imageLen;
-    }
-    cartridge.image[offset] = value;
+    m.mdv.readingMask &= ~(1 << unit);
     cartridge.writeCount += 1;
-    m.mdv.writtenTracks |= trackBit;
-    if (m.mdv.writtenTracks === 0x03) {
-        m.mdv.writtenTracks = 0;
-        m.mdv.dataReady = false;
-        m.mdv.cycleAnchor = m.cpu.cycleCount;
+    if (m.mdv.formattingUnit === unit && !cartridge.formatVerified) {
+        m.mdv.formatWriteOffset = cartridge.byteOffset;
+        m.mdv.formatBurstBytes += 1;
     }
+    m.mdv.dataReady = false;
+    m.mdv.transmitFullUntil = m.cpu.cycleCount + m.mdv.pairCycles / 2;
+    m.mdv.cycleAnchor = m.mdv.transmitFullUntil;
 }
 
 /**
@@ -1631,6 +2049,7 @@ function microdriveReadTrackByte(m, addr) {
         offset -= cartridge.imageLen;
     }
     const value = cartridge.image[offset];
+    m.mdv.readingMask |= 1 << unit;
     cartridge.readCount += 1;
     m.mdv.latchedTracks |= trackBit;
     if (m.mdv.latchedTracks === 0x03) {

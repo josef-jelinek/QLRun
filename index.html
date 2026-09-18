@@ -71,6 +71,11 @@ button:active,
 .switch:active {
     background: #000;
 }
+button:disabled {
+    color: var(--muted);
+    cursor: default;
+    background: #222;
+}
 .switch:has(> input[type="checkbox"]:checked) {
     color: #000;
     background: var(--accent);
@@ -97,18 +102,18 @@ button:active,
 .media-row {
     flex-wrap: nowrap;
 }
-.rom-load {
+.media-group {
     display: flex;
-    flex: 1 1 auto;
+    flex: 1 1 0;
     flex-wrap: nowrap;
     align-items: center;
     gap: 6px;
     min-width: 0;
 }
-#rom-info {
+.media-group-right > .media-info {
     text-align: right;
 }
-#mdv-info::before {
+.mdv-info::before {
     content: "";
     display: inline-block;
     box-sizing: border-box;
@@ -119,20 +124,20 @@ button:active,
     border-radius: 50%;
     background: #222;
 }
-#mdv-info.mdv-motor::before {
+.mdv-info.mdv-motor::before {
     border-color: var(--accent);
 }
-#mdv-info.mdv-read::before {
+.mdv-info.mdv-read::before {
     border-color: var(--accent);
     background: var(--accent);
 }
-#mdv-info.mdv-write::before {
+.mdv-info.mdv-write::before {
     border-color: var(--accent);
     background: #FFF;
 }
-#mdv-info.mdv-motor::before,
-#mdv-info.mdv-read::before,
-#mdv-info.mdv-write::before {
+.mdv-info.mdv-motor::before,
+.mdv-info.mdv-read::before,
+.mdv-info.mdv-write::before {
     animation: mdv-activity-pulse 600ms ease-in-out infinite alternate;
 }
 @keyframes mdv-activity-pulse {
@@ -144,9 +149,9 @@ button:active,
     }
 }
 @media (prefers-reduced-motion: reduce) {
-    #mdv-info.mdv-motor::before,
-    #mdv-info.mdv-read::before,
-    #mdv-info.mdv-write::before {
+    .mdv-info.mdv-motor::before,
+    .mdv-info.mdv-read::before,
+    .mdv-info.mdv-write::before {
         animation: none;
     }
 }
@@ -241,6 +246,12 @@ body.keyboard-splitting {
     .media-row {
         flex-wrap: wrap;
     }
+    .media-group {
+        flex-basis: 100%;
+    }
+    .media-placeholder {
+        display: none;
+    }
 }
 </style>
 </head>
@@ -251,21 +262,58 @@ body.keyboard-splitting {
         <label class="switch" title="Onscreen keyboard"><input id="keyboard-toggle" type="checkbox">Keyboard</label>
         <label class="switch" title="CRT display filter"><input id="crt" type="checkbox" checked>CRT</label>
         <label class="switch" title="Original AY-3-8910 QSound card"><input id="qsound" type="checkbox" checked disabled>QSound</label>
+        <label class="switch" title="YM2203-compatible QSound2 card"><input id="qsound2" type="checkbox" disabled>QSound2</label>
         <label class="switch" title="Spread QSound PSG channels across the stereo image"><input id="stereo" type="checkbox">Stereo</label>
         <label class="switch" title="US NTSC machine timing and jsu.rom by default"><input id="ntsc" type="checkbox">NTSC</label>
+        <label class="switch" title="Add 256 KiB of RAM"><input id="ram-256" type="checkbox">+256K</label>
+        <label class="switch" title="Add 512 KiB of RAM"><input id="ram-512" type="checkbox">+512K</label>
+        <label class="switch" title="Run four times faster while either Microdrive is reading"><input id="turbo" type="checkbox" checked>Turbo</label>
         <button id="fullscreen-toggle" title="Fullscreen (F11)">Fullscreen</button>
         <div class="media-info"><span id="init-info">Initializing...</span> <span id="qsound-info"></span> <span id="sound-info" title="Emulated frames per second (about 50.1 PAL / 60.1 NTSC is real time), then audio overrun discarded and underrun filled with silence over the last second"></span> <span id="startup-file-info"></span></div>
         <a href="https://github.com/josef-jelinek/QLRun">GitHub repo</a>
     </div>
     <div class="rowbox media-row">
-        <button id="load-mdv">Load MDV1</button>
-        <input id="file-mdv" type="file" accept=".mdv" style="display: none">
-        <button id="eject-mdv">Eject</button>
-        <div id="mdv-info" class="media-info" title="Microdrive 1 idle">No cartridge</div>
-        <div class="rom-load">
+        <div class="media-group">
+            <strong>MDV1</strong>
+            <button id="new-mdv1">New</button>
+            <button id="load-mdv1">Load</button>
+            <input id="file-mdv1" type="file" accept=".mdv" style="display: none">
+            <button id="download-mdv1" disabled>Download</button>
+            <button id="eject-mdv1" disabled>Eject</button>
+            <div id="mdv1-info" class="media-info mdv-info" title="Microdrive 1 idle">No cartridge</div>
+        </div>
+        <div class="media-group media-group-right">
             <div id="rom-info" class="media-info">No system ROM file</div>
             <button id="load-rom" title="Set system ROM">Load ROM</button>
             <input id="file-rom" type="file" accept=".rom,.bin" style="display: none">
+        </div>
+    </div>
+    <div class="rowbox media-row">
+        <div class="media-group">
+            <strong>MDV2</strong>
+            <button id="new-mdv2">New</button>
+            <button id="load-mdv2">Load</button>
+            <input id="file-mdv2" type="file" accept=".mdv" style="display: none">
+            <button id="download-mdv2" disabled>Download</button>
+            <button id="eject-mdv2" disabled>Eject</button>
+            <div id="mdv2-info" class="media-info mdv-info" title="Microdrive 2 idle">No cartridge</div>
+        </div>
+        <div class="media-group media-group-right">
+            <div id="rom-cartridge-info" class="media-info">No cartridge</div>
+            <button id="eject-rom-cartridge" disabled>Eject</button>
+            <button id="load-rom-cartridge">Load cart</button>
+            <input id="file-rom-cartridge" type="file" accept=".rom,.bin" style="display: none">
+        </div>
+    </div>
+    <div class="rowbox media-row">
+        <div class="media-group media-placeholder"></div>
+        <div class="media-group media-group-right">
+            <div id="hdd-info" class="media-info">No hard disk</div>
+            <button id="download-hdd" disabled>Download</button>
+            <button id="eject-hdd" disabled>Eject</button>
+            <button id="load-hdd">Load HDD</button>
+            <input id="file-hdd" type="file" accept=".win" style="display: none">
+            <strong>WIN1</strong>
         </div>
     </div>
 </header>

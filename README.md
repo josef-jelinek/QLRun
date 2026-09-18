@@ -5,7 +5,8 @@ Try it live: <https://josef-jelinek.github.io/QLRun/>
 QLRun is a browser emulator for the Sinclair QL. It loads a JS or JSU
 system ROM from `roms/` when those files are available, paints the ZX8301
 display, talks to the ZX8302 IPC for keyboard, beeper, and Microdrive, and
-emulates the original AY-3-8910 QSound card.
+emulates the original AY-3-8910 QSound card and the YM2203-compatible QSound2.
+It also mounts writable QLWA `.win` hard disk images as `WIN1_`.
 
 No build, package manager, or external library is required. The page uses
 plain JavaScript. `tsconfig.json` is only for optional static checking during
@@ -32,14 +33,17 @@ python3 -m http.server 8080
 
 Then visit `http://127.0.0.1:8000/` (or the port you chose).
 
-The machine initializes 128 KiB of RAM and starts without a ROM, then tries
-`roms/<name>.rom` (up to 48 KiB). The default `<name>` is `js`, or `jsu` when
-`?ntsc=1` selects US timing; an explicit `?rom=` overrides that choice. If a
-ROM fetch fails, **Load ROM** still accepts a raw `.rom` or `.bin` file.
+The machine initializes 128 KiB of RAM by default and starts without a ROM,
+then tries `roms/<name>.rom` (up to 48 KiB). The default `<name>` is `js`, or
+`jsu` when `?ntsc=1` selects US timing; an explicit `?rom=` overrides that
+choice. If a ROM fetch fails, **Load ROM** still accepts a raw `.rom` or `.bin`
+file. An optional external ROM cartridge occupies the standard 16 KiB ROM-port
+window at `0x0C000`.
 
-The UI switches can also be initialized through URL parameters. Use `0` to
-disable a switch and `1` to enable it. Missing or invalid parameters keep the
-normal defaults:
+The UI controls can also be initialized through URL parameters. Use `0` to
+disable a switch and `1` to enable it. `qsound` accepts `0` for no card, `1`
+for QSound, or `2` for QSound2. RAM accepts `128`, `384`, `640`, or `896`.
+Missing or invalid parameters keep the normal defaults:
 
 | Parameter | Default |
 | --- | --- |
@@ -48,17 +52,20 @@ normal defaults:
 | `qsound` | `1` |
 | `stereo` | `0` |
 | `ntsc` | `0` |
+| `ram` | `128` |
+| `turbo` | `1` |
 
-For example, `?crt=0&keyboard=1&ntsc=1&rom=jsu` starts with the CRT filter
-off, the onscreen keyboard shown, and the US machine. Fullscreen is not
-exposed as a URL parameter. Toggling a listed switch updates its parameter to
-an explicit `0` or `1` without reloading the page or adding a browser-history
-entry; other parameters and the URL fragment are preserved.
+For example, `?crt=0&keyboard=1&ntsc=1&ram=640&rom=jsu` starts with the CRT
+filter off, the onscreen keyboard shown, the US machine, and 640 KiB of RAM.
+Fullscreen is not exposed as a URL parameter. Changing a listed control
+updates its parameter without reloading the page or adding a browser-history
+entry. Selecting a local ROM removes `rom`, and selecting a local Microdrive
+image removes `url`; other parameters and the URL fragment are preserved.
 
 ## Emulator page
 
 `index.html` is the standalone emulator. A QLAY `.mdv` or a ZIP containing one
-can be fetched and loaded at startup with the `url` parameter. Encode the file
+can be fetched into MDV1 at startup with the `url` parameter. Encode the file
 URL with `encodeURIComponent`:
 
 ```text
@@ -81,22 +88,51 @@ selects another.
   steps, and the canvas may therefore use fractional CSS dimensions.
 - QSound - connect the original MC6821/AY-3-8910 card and its bundled extension
   ROM. Changing the switch resets the machine. It is enabled by default.
-- Stereo - spread QSound channels A, B, and C across the stereo image. Off
-  reproduces the card's summed mono output; the IPC beeper stays centred.
+- QSound2 - connect the mutually exclusive YM2203-compatible card, using the
+  same extension ROM. Its PSG and three-channel FM synthesizer run from a fixed
+  2 MHz master clock. Changing the switch resets the machine.
+- Stereo - spread either card's PSG channels A, B, and C across the stereo
+  image. Off reproduces the card's summed mono output; QSound2 FM and the IPC
+  beeper stay centred.
 - NTSC - US QL clocks (7.552445 MHz CPU from a 15.10489 MHz crystal). The
   312-line monitor field stays near 50.4 Hz; JSU TV mode (F2) sets ZX8301
-  bit 6 for the 262-line field at about 60.05 Hz. Starting with `?ntsc=1`
-  loads `roms/jsu.rom` unless `?rom=` is set. While using the automatic ROM,
-  changing the switch reloads `js.rom` or `jsu.rom`; an explicit or locally
-  loaded ROM stays selected.
+  bit 6 for the 262-line field at about 60.05 Hz. CRT output then displays its
+  192 active scan lines; non-CRT output keeps exposing the complete 256-line
+  framebuffer. Starting with `?ntsc=1` loads `roms/jsu.rom` unless `?rom=` is
+  set. While using the automatic ROM, changing the switch reloads `js.rom` or
+  `jsu.rom`; an explicit or locally loaded ROM stays selected.
+- +256K / +512K - independently add either RAM expansion to the stock 128 KiB.
+  Selecting both provides 896 KiB. Changing either switch initializes the
+  selected memory and resets the machine. Because either sound card occupies
+  `0xC0000`, it conflicts with the top 256 KiB of this configuration. Selecting
+  the second RAM expansion turns the card off; selecting either card with both
+  expansions active turns +256K off, leaving 640 KiB. The selected card wins
+  the same conflict during startup when its ROM is available.
 - Fullscreen - show only the fullscreen emulator canvas (also F11).
-- Load MDV1 - insert a raw QLAY `.mdv` into physical microdrive 1. The
-  machine is not reset; swap tapes and `LRUN mdv1_BOOT` as on a real QL. Its
-  indicator is outlined while the motor runs, green during reads, white during
-  writes, and dark while idle. The indicator pulses whenever the drive is
-  active.
-- Eject - unplug that cartridge without resetting.
+- MDV1 / MDV2 - each physical Microdrive has independent New, Load, Download,
+  and Eject controls. Load inserts a raw QLAY `.mdv` without resetting the
+  machine. New inserts an unformatted 255-sector cartridge named `mdv1.mdv` or
+  `mdv2.mdv`; format it inside the QL with a command such as
+  `FORMAT mdv2_work`. Guest erase and track writes update the in-memory image.
+  Download saves its current contents, while Eject discards them. A changed
+  image is labelled `(modified)` until it is downloaded.
+- The drive indicator is outlined while its motor runs, green during reads,
+  white during writes or erasure, and dark while idle. It pulses whenever that
+  drive is active.
+- Turbo - run the machine at up to four times normal speed while either
+  Microdrive is actively being read, including gaps between transfers. It is
+  enabled by default. Intermediate video and audio fields are discarded;
+  writes and execution outside Microdrive reads remain at normal speed.
 - Load ROM - replace the 48 KiB system ROM and reset.
+- Load cart / Eject - load a raw `.rom` or `.bin` image of up to 16 KiB into
+  the external ROM port, or eject the current image. Short images are padded
+  with zeroes. Loading or ejecting resets the machine so QDOS detects the
+  change.
+- WIN1 - Load mounts a QLWA `.win` hard disk image without resetting the
+  machine. Guest file creation, deletion, truncation, and writes update its
+  in-memory image. Download saves the current image and clears the
+  `(modified)` label; Eject discards the mounted copy. The bundled JS and JSU
+  ROMs expose it as `WIN1_`; an unsupported ROM is reported in the media row.
 
 F1 and F2 reach the emulated machine (monitor/TV select on the JS ROM). F11
 is the page fullscreen shortcut.
@@ -107,11 +143,13 @@ Ctrl+Left; Delete is Ctrl+Right.
 
 ## Sound
 
-The ZX8302 IPC beeper and QSound's AY-3-8910 are mixed in the browser. The
+The ZX8302 IPC beeper and the selected card are mixed in the browser. The
 beeper implements both pitches, gradient timing, wrapping, random pitch, fuzz,
 finite duration, and continuous sounds. QSound follows the QL E clock: 750 kHz
-on PAL machines and 755,244.5 Hz on NTSC machines. A click or key may be
-required before anything is audible.
+on PAL machines and 755,244.5 Hz on NTSC machines. QSound2 provides a
+YM2149-style PSG clocked at 1 MHz and centred three-channel YM2203 FM audio
+from its 2 MHz master clock. A click or key may be required before anything is
+audible.
 
 Two to three video frames of samples are kept queued: the audio thread asks for
 one more whenever the queue falls below two, and the machine runs a frame only
@@ -140,12 +178,14 @@ the QL.
 - `io.js` - HTTP GET and local file reads.
 - `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, and frame run.
 - `cpu.js` - MC68008 state and execution core.
-- `ay.js` - AY-3-8910 synthesis used by the original QSound card.
+- `hdd.js` - writable QLWA hard disk image and QDOS `WIN1_` host driver.
+- `ay.js` - AY-3-8910/YM2149 PSG synthesis used by the sound cards.
+- `fm.js` - YM2203 FM synthesis used by QSound2.
 - `keyboard.js` - host keyboard mapping and the overlay.
 - `zip.js` - ZIP listing and entry extraction.
-- `media.js` - Microdrive, ROM, and junk file-name rules.
+- `media.js` - Microdrive, hard disk, ROM, and junk file-name rules.
 - `sound.js` - Web Audio host and worklet loader.
-- `sound.worklet.js` - mixes beeper and optional PSG planes on the audio thread.
+- `sound.worklet.js` - mixes beeper and sound-card planes on the audio thread.
 - `audioworklet.d.ts` - check-only declarations for the AudioWorklet globals.
 - `screen.js` - WebGL2 display renderer.
 - `screen.vert.glsl` / `screen.frag.glsl` - display shaders.

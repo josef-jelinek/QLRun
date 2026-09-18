@@ -1,4 +1,4 @@
-const volume = Float64Array.of(
+const ayVolume = Float64Array.of(
     0.0000,
     0.0137,
     0.0205,
@@ -17,6 +17,8 @@ const volume = Float64Array.of(
     1.0000,
 );
 
+const ymVolume = createYmVolume();
+
 const regNoise = 6;
 const regMixer = 7;
 const regAmpA = 8;
@@ -31,6 +33,8 @@ const ampEnvMode = 0x10;
  *
  * @typedef {{
  *   tickT: number,
+ *   ymStyle: boolean,
+ *   levelMax: number,
  *   t: number,
  *   nextTickT: number,
  *   regs: Uint8Array,
@@ -64,6 +68,8 @@ export function create(tickT) {
     /** @type {State} */
     const state = {
         tickT,
+        ymStyle: false,
+        levelMax: 15,
         t: 0,
         nextTickT: tickT,
         regs: new Uint8Array(16),
@@ -81,6 +87,24 @@ export function create(tickT) {
     };
     reset(state, 0);
     return state;
+}
+
+/**
+ * Select the chip timing and DAC/envelope style, then reset it at `t`.
+ *
+ * @param {State} state
+ * @param {number} tickT
+ * @param {boolean} ymStyle
+ * @param {number} t
+ */
+export function configure(state, tickT, ymStyle, t) {
+    state.tickT = tickT;
+    state.ymStyle = ymStyle;
+    state.levelMax = 15;
+    if (ymStyle) {
+        state.levelMax = 31;
+    }
+    reset(state, t);
 }
 
 /**
@@ -142,6 +166,11 @@ export function writeReg(state, reg, value) {
         resetEnvelope(state);
     }
     refreshLevels(state);
+}
+
+/** @param {State} state @param {number} reg @returns {number} */
+export function readReg(state, reg) {
+    return state.regs[reg & 0x0F];
 }
 
 /**
@@ -218,22 +247,23 @@ function tick(state) {
             state.toneCounter[channel] -= 1;
         }
     }
-    if (!clock16) {
-        return;
+    if (clock16) {
+        if (state.noiseCounter === 0) {
+            state.noiseCounter = noisePeriod(state) - 1;
+            const feedback = (state.noiseLfsr ^ (state.noiseLfsr >> 3)) & 1;
+            state.noiseLfsr = (state.noiseLfsr >> 1) | (feedback << 16);
+            state.noiseLevel = state.noiseLfsr & 1;
+        } else {
+            state.noiseCounter -= 1;
+        }
     }
-    if (state.noiseCounter === 0) {
-        state.noiseCounter = noisePeriod(state) - 1;
-        const feedback = (state.noiseLfsr ^ (state.noiseLfsr >> 3)) & 1;
-        state.noiseLfsr = (state.noiseLfsr >> 1) | (feedback << 16);
-        state.noiseLevel = state.noiseLfsr & 1;
-    } else {
-        state.noiseCounter -= 1;
-    }
-    if (state.env.counter === 0) {
-        state.env.counter = envelopePeriod(state) - 1;
-        stepEnvelope(state);
-    } else {
-        state.env.counter -= 1;
+    if (clock16 || state.ymStyle) {
+        if (state.env.counter === 0) {
+            state.env.counter = envelopePeriod(state) - 1;
+            stepEnvelope(state);
+        } else {
+            state.env.counter -= 1;
+        }
     }
 }
 
@@ -251,8 +281,14 @@ function refreshLevels(state) {
         let amp = ampReg & 0x0F;
         if ((ampReg & ampEnvMode) !== 0) {
             amp = state.env.level;
+        } else if (state.ymStyle && amp > 0) {
+            amp = amp * 2 + 1;
         }
-        state.out[channel] = volume[amp];
+        if (state.ymStyle) {
+            state.out[channel] = ymVolume[amp];
+        } else {
+            state.out[channel] = ayVolume[amp];
+        }
     }
 }
 
@@ -270,7 +306,7 @@ function stepEnvelope(state) {
     if (state.env.holding) {
         return;
     }
-    if (state.env.step < 15) {
+    if (state.env.step < state.levelMax) {
         state.env.step += 1;
         setEnvelopeLevel(state);
         return;
@@ -287,7 +323,7 @@ function stepEnvelope(state) {
             state.env.attack = !state.env.attack;
         }
         if (state.env.attack) {
-            state.env.level = 15;
+            state.env.level = state.levelMax;
         } else {
             state.env.level = 0;
         }
@@ -305,7 +341,7 @@ function setEnvelopeLevel(state) {
     if (state.env.attack) {
         state.env.level = state.env.step;
     } else {
-        state.env.level = 15 - state.env.step;
+        state.env.level = state.levelMax - state.env.step;
     }
 }
 
@@ -322,4 +358,21 @@ function noisePeriod(state) {
 /** @param {State} state @returns {number} */
 function envelopePeriod(state) {
     return Math.max(state.regs[regEnvFine] | state.regs[regEnvCoarse] << 8, 1);
+}
+
+/** Build the YM2149 32-step DAC curve around the measured AY ladder. */
+function createYmVolume() {
+    const levels = new Float64Array(32);
+    for (let level = 1; level < levels.length; level += 1) {
+        if (level === 1) {
+            levels[level] = ayVolume[1] * ayVolume[1] / ayVolume[2];
+        } else if (level === 2) {
+            levels[level] = ayVolume[1] * Math.sqrt(ayVolume[1] / ayVolume[2]);
+        } else if ((level & 1) !== 0) {
+            levels[level] = ayVolume[level >> 1];
+        } else {
+            levels[level] = Math.sqrt(ayVolume[(level >> 1) - 1] * ayVolume[level >> 1]);
+        }
+    }
+    return levels;
 }

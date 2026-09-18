@@ -1,6 +1,7 @@
 const mdvExt = /\.(mdv|MDV)$/;
 const zipExt = /\.(zip|ZIP)$/;
 const romExt = /\.(rom|bin|ROM|BIN)$/;
+const winExt = /\.(win|WIN)$/;
 
 /** @param {string} name */
 export function isMdvName(name) {
@@ -15,6 +16,11 @@ export function isZipName(name) {
 /** @param {string} name */
 export function isRomName(name) {
     return romExt.test(name);
+}
+
+/** @param {string} name */
+export function isWinName(name) {
+    return winExt.test(name);
 }
 
 /** @param {string} name */
