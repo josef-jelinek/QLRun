@@ -170,6 +170,7 @@ the QL.
 ## Repository files
 
 - `README.md` - project overview and user documentation.
+- `LICENSE` - MIT terms for project-owned sources.
 - `index.html` - emulator page markup and page-specific styles.
 - `favicon.ico` - browser tab icon.
 - `main.js` - emulator page, session, display, sound, controls, and file loading.
@@ -200,3 +201,8 @@ ROM images in `roms/` are not owned by this project. `Qsound_V1.94.rom` is the
 8 KiB image identified in `Qsound_NOTICE.txt` (SHA-256
 `d6caabb6c96e32a4c5c6dfd443b7c2b30835755b9519b04b61ee52e5f17b8082`) and
 is distributed with its upstream CERN-OHL-S-2.0 notice and license.
+
+## License
+
+Project-owned emulator sources and documentation are under the MIT license in
+`LICENSE`. ROM images in `roms/` are excluded from that grant.
