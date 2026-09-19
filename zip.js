@@ -325,7 +325,7 @@ function inflateError(name, ex) {
     if (ex instanceof Error && ex.message !== "") {
         err += ": " + ex.message;
     }
-    return err;
+    return err + ".";
 }
 
 /**

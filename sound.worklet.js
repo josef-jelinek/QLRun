@@ -1,11 +1,11 @@
-// Beeper (ula plane) and sound-card planes share one mix. Keep their relative
-// gains together so mono and stereo output use the same balance. Centred FM is
+// Beeper and sound-card planes share one mix. Keep their relative gains
+// together so mono and stereo output use the same balance. Centred FM is
 // already present equally in the three sound-card planes.
 const ayInputOhms = 47000;
-const ulaInputOhms = 100000;
-const ayPathRatio = ulaInputOhms / ayInputOhms;
-const ulaPathGain = 0.95 / (1.5 * ayPathRatio + 1.25);
-const ayPathGain = ulaPathGain * ayPathRatio;
+const beepInputOhms = 100000;
+const ayPathRatio = beepInputOhms / ayInputOhms;
+const beepPathGain = 0.95 / (1.5 * ayPathRatio + 1.25);
+const ayPathGain = beepPathGain * ayPathRatio;
 
 // The speaker and the TV audio input are both AC coupled. One pole at 20 Hz
 // removes the AY channels' offset without touching the audible band, so a queue
@@ -14,7 +14,7 @@ const dcBlockHz = 20;
 const dcBlockPole = 1 - 2 * Math.PI * dcBlockHz / sampleRate;
 
 /**
- * One chunk of interleaved ULA, A, B and C samples. The buffer is pooled and
+ * One chunk of interleaved beeper, A, B and C samples. The buffer is pooled and
  * can be longer than the audio in it, so length is carried rather than derived.
  *
  * @typedef {{
@@ -43,7 +43,7 @@ const dcBlockPole = 1 - 2 * Math.PI * dcBlockHz / sampleRate;
  *   panCenter: number,
  *   panFar: number,
  *   ayGain: number,
- *   ulaGain: number,
+ *   beepGain: number,
  *   lowSamples: number,
  *   capSamples: number,
  *   cutSamples: number,
@@ -78,10 +78,10 @@ function QLRunProcessor() {
     p.panCenter = 0.5;
     p.panFar = 0.5;
     p.ayGain = ayPathGain;
-    p.ulaGain = ulaPathGain;
+    p.beepGain = beepPathGain;
     // Both replaced by "queue-samples"; sound.js owns the depth policy.
-    p.lowSamples = 2 * 44100 / (7500000 / 149760);
-    p.capSamples = 2 * p.lowSamples;
+    p.lowSamples = 1;
+    p.capSamples = 2;
     p.cutSamples = 0;
     p.gapSamples = 0;
     p.statsSamples = 0;
@@ -187,16 +187,16 @@ function process(p, output) {
         for (let j = 0; j < take; j += 1) {
             const source = p.offset + j;
             const at = source * 4;
-            const ula = chunk.samples[at] * p.ulaGain;
+            const beep = chunk.samples[at] * p.beepGain;
             const levelL = chunk.samples[at + 1];
             const levelM = chunk.samples[at + 2];
             const levelR = chunk.samples[at + 3];
             const left = levelL * p.panNear + levelM * p.panCenter + levelR * p.panFar;
-            const sampleL = left * p.ayGain + ula;
+            const sampleL = left * p.ayGain + beep;
             let sampleR = sampleL;
             if (or !== undefined) {
                 const right = levelL * p.panFar + levelM * p.panCenter + levelR * p.panNear;
-                sampleR = right * p.ayGain + ula;
+                sampleR = right * p.ayGain + beep;
             }
             writeSample(p, ol, or, i + j, sampleL, sampleR);
         }

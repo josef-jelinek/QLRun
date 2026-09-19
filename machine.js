@@ -9,8 +9,6 @@ export const qsoundRomSize = 0x2000;
 export const qsoundOff = 0;
 export const qsoundOriginal = 1;
 export const qsound2 = 2;
-export const minRamKb = 128;
-export const maxRamKb = 896;
 export const defaultRamKb = 128;
 export const frameW = 512;
 export const frameH = 256;
@@ -19,11 +17,8 @@ export const screenBytes = screenLineBytes * frameH;
 export const screenBase = cpu.qdosUserRamBase;
 export const secondScreenBase = screenBase + screenBytes;
 export const qdosUnixEpochDelta = 283996800;
-export const cpuHz = cpu.qlPalClockHz;
-export const tStatesPerFrame = cpu.zx8301PalClocksPerFrame;
 
-const internalIoBase = 0x18000;
-const qdosClockBaseAddr = internalIoBase;
+const qdosClockBaseAddr = cpu.internalIoBase;
 const ipcWriteAddr = qdosClockBaseAddr + 3;
 const ipcReadAddr = qdosClockBaseAddr + 0x20;
 const interruptStatusAddr = ipcReadAddr + 1;
@@ -90,8 +85,7 @@ const soundPitchWrapDelta = 8;
 const romCartridgeBase = sysRomSize;
 const qsoundBase = 0xC0000;
 const qsoundBytes = 0x4000;
-const qsoundRomBytes = qsoundRomSize;
-const qsoundPiaBase = qsoundBase + qsoundRomBytes;
+const qsoundPiaBase = qsoundBase + qsoundRomSize;
 const qsound2PiaBytes = 0x1000;
 const qsound2DirectBase = qsoundPiaBase + qsound2PiaBytes;
 const qsoundDataSelectBit = 0x04;
@@ -129,7 +123,7 @@ for (let ink = 0; ink < 16; ink += 1) {
 /**
  * @typedef {{
  *   n: number,
- *   ula: Float32Array,
+ *   beep: Float32Array,
  *   a: Float32Array,
  *   b: Float32Array,
  *   c: Float32Array,
@@ -143,7 +137,6 @@ for (let ink = 0; ink < 16; ink += 1) {
  *   imageLen: number,
  *   byteOffset: number,
  *   inserted: boolean,
- *   writable: boolean,
  *   name: string,
  *   unformatted: boolean,
  *   formatVerifying: boolean,
@@ -163,9 +156,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  *   keys: import("./keyboard.js").KeyState,
  *   theInt: number,
  *   guestRamTop: number,
- *   guestClock: number,
  *   romLoaded: boolean,
- *   romCartridgeLoaded: boolean,
  *   ntscMachine: boolean,
  *   displayNtsc: boolean,
  *   displayBlank: boolean,
@@ -251,6 +242,24 @@ for (let ink = 0; ink < 16; ink += 1) {
 export function create(keys) {
     const audioN = audioCap;
     const mem = new Uint8Array(cpu.addressSpaceBytes);
+    const hddState = hdd.create();
+    /** @type {MicrodriveCartridge[]} */
+    const cartridges = [];
+    for (let i = 0; i < microdriveUnitCount; i += 1) {
+        cartridges.push({
+            image: new Uint8Array(0),
+            imageLen: 0,
+            byteOffset: 0,
+            inserted: false,
+            name: "",
+            unformatted: false,
+            formatVerifying: false,
+            formatVerified: false,
+            modified: false,
+            readCount: 0,
+            writeCount: 0,
+        });
+    }
     /** @type {Machine} */
     const m = {
         mem,
@@ -261,6 +270,9 @@ export function create(keys) {
             isUnmapped: function (addr) {
                 return isUnmapped(m, addr);
             },
+            isHw: function (addr) {
+                return hardwareIsMapped(m, addr);
+            },
             readHwByte: function (addr) {
                 return readHwByte(m, addr);
             },
@@ -270,9 +282,7 @@ export function create(keys) {
             writeHwByte: function (addr, d) {
                 writeHwByte(m, addr, d);
             },
-            qsoundContains: function (addr) {
-                return qsoundContains(m, addr);
-            },
+            hdd: hddState,
             afterInstruction: function () {
                 microdriveAdvanceActive(m);
             },
@@ -286,7 +296,6 @@ export function create(keys) {
         keys,
         theInt: 0,
         guestRamTop: cpu.qdosUserRamBase + defaultRamKb * 1024,
-        guestClock: 0,
         ntscMachine: false,
         displayNtsc: false,
         displayBlank: false,
@@ -301,7 +310,7 @@ export function create(keys) {
         sampleEndT: 0,
         audio: {
             n: 0,
-            ula: new Float32Array(audioN),
+            beep: new Float32Array(audioN),
             a: new Float32Array(audioN),
             b: new Float32Array(audioN),
             c: new Float32Array(audioN),
@@ -342,7 +351,7 @@ export function create(keys) {
         },
         qsound: {
             model: qsoundOff,
-            rom: new Uint8Array(qsoundRomBytes),
+            rom: new Uint8Array(qsoundRomSize),
             selectedRegister: 0,
             pia: new Uint8Array(4),
             dataDirectionA: 0,
@@ -350,38 +359,9 @@ export function create(keys) {
             ay: ay.create(qsoundAyTickCycles),
             fm: fm.create(),
         },
-        hdd: hdd.create(),
+        hdd: hddState,
         mdv: {
-            cartridges: [
-                {
-                    image: new Uint8Array(0),
-                    imageLen: 0,
-                    byteOffset: 0,
-                    inserted: false,
-                    writable: true,
-                    name: "",
-                    unformatted: false,
-                    formatVerifying: false,
-                    formatVerified: false,
-                    modified: false,
-                    readCount: 0,
-                    writeCount: 0,
-                },
-                {
-                    image: new Uint8Array(0),
-                    imageLen: 0,
-                    byteOffset: 0,
-                    inserted: false,
-                    writable: true,
-                    name: "",
-                    unformatted: false,
-                    formatVerifying: false,
-                    formatVerified: false,
-                    modified: false,
-                    readCount: 0,
-                    writeCount: 0,
-                },
-            ],
+            cartridges,
             selectedMask: 0,
             readingMask: 0,
             control: microdriveSelectClockBit | microdriveReadWriteBit,
@@ -394,12 +374,11 @@ export function create(keys) {
             gapActive: false,
             dataReady: false,
             cycleAnchor: 0,
-            pairCycles: cpu.qlPalClockHz / microdriveBitRateHz * microdriveBitsPerPair,
+            pairCycles: 0,
         },
         romLoaded: false,
-        romCartridgeLoaded: false,
     };
-    hdd.attach(m.hdd, m.cpuBus);
+    applyTiming(m);
     fillRam(m);
     resetAudioClock(m);
     return m;
@@ -419,7 +398,6 @@ export function reset(m) {
     m.displayNtsc = false;
     m.flashFrame = 0;
     m.audio.n = 0;
-    m.guestClock = 0;
     m.theInt = 0;
     stopBeep(m);
     hdd.prepareReset(m.hdd, m.mem);
@@ -518,7 +496,6 @@ export function insertRomCartridge(m, bytes) {
     }
     m.mem.fill(0, romCartridgeBase, romCartridgeBase + romCartridgeSize);
     m.mem.set(src, romCartridgeBase);
-    m.romCartridgeLoaded = true;
     return null;
 }
 
@@ -529,7 +506,6 @@ export function insertRomCartridge(m, bytes) {
  */
 export function ejectRomCartridge(m) {
     m.mem.fill(0, romCartridgeBase, romCartridgeBase + romCartridgeSize);
-    m.romCartridgeLoaded = false;
 }
 
 /**
@@ -544,8 +520,8 @@ export function setQsoundRom(m, bytes) {
     if (!(src instanceof Uint8Array)) {
         src = new Uint8Array(src);
     }
-    if (src.byteLength === 0 || src.byteLength > qsoundRomBytes) {
-        return "Expected 1 to " + qsoundRomBytes + ", got " + src.byteLength + " bytes.";
+    if (src.byteLength === 0 || src.byteLength > qsoundRomSize) {
+        return "Expected 1 to " + qsoundRomSize + ", got " + src.byteLength + " bytes.";
     }
     m.qsound.rom.fill(0);
     m.qsound.rom.set(src);
@@ -576,11 +552,7 @@ export function setQsoundModel(m, model) {
  */
 export function setNtsc(m, ntsc) {
     m.ntscMachine = ntsc;
-    if (ntsc) {
-        m.mdv.pairCycles = Math.round(cpu.qlNtscClockHz / microdriveBitRateHz * microdriveBitsPerPair);
-    } else {
-        m.mdv.pairCycles = cpu.qlPalClockHz / microdriveBitRateHz * microdriveBitsPerPair;
-    }
+    applyTiming(m);
 }
 
 /**
@@ -691,7 +663,7 @@ export function takeAudio(m) {
     const chunk = m.audio;
     m.audio = {
         n: 0,
-        ula: chunk.ula,
+        beep: chunk.beep,
         a: chunk.a,
         b: chunk.b,
         c: chunk.c,
@@ -725,7 +697,6 @@ export function insertMdv(m, drive, bytes, name) {
     cart.imageLen = src.byteLength;
     cart.byteOffset = 0;
     cart.inserted = true;
-    cart.writable = true;
     cart.name = name;
     cart.unformatted = false;
     cart.formatVerifying = false;
@@ -838,13 +809,19 @@ function fillRam(m) {
         seed = 1;
     }
     for (let offset = cpu.qdosUserRamBase; offset < m.guestRamTop; offset += 4) {
-        seed ^= (seed << 13);
-        seed >>>= 0;
-        seed ^= seed >>> 17;
-        seed ^= (seed << 5);
-        seed >>>= 0;
+        seed = xorshift32(seed);
         cpu.writePointerLong(m.mem, offset, seed);
     }
+}
+
+/** @param {number} seed @returns {number} */
+function xorshift32(seed) {
+    let value = seed >>> 0;
+    value ^= value << 13;
+    value >>>= 0;
+    value ^= value >>> 17;
+    value ^= value << 5;
+    return value >>> 0;
 }
 
 /**
@@ -863,6 +840,20 @@ function isUnmapped(m, addr) {
         return false;
     }
     return addr < screenBase || addr >= secondScreenBase;
+}
+
+/**
+ * ZX8302 I/O window and the selected QSound card occupy hardware, not RAM.
+ *
+ * @param {Machine} m
+ * @param {number} addr
+ * @returns {boolean}
+ */
+function hardwareIsMapped(m, addr) {
+    if (addr >= cpu.internalIoBase && addr < cpu.internalIoEnd) {
+        return true;
+    }
+    return qsoundContains(m, addr);
 }
 
 /** @param {Machine} m */
@@ -884,7 +875,7 @@ function resetIpc(m) {
 function readQdosClock(m) {
     const unix = Math.floor(Date.now() / 1000);
     const zone = -new Date().getTimezoneOffset() * 60;
-    return (unix + qdosUnixEpochDelta + zone + m.guestClock) >>> 0;
+    return (unix + qdosUnixEpochDelta + zone) >>> 0;
 }
 
 /**
@@ -1327,7 +1318,7 @@ function renderAudioTo(m, untilCycle) {
         const collect = m.soundOn && chunk.n < audioCap;
         if (collect) {
             ay.runTo(m.qsound.ay, m.sampleEndT);
-            chunk.ula[chunk.n] = renderBeepSample(m);
+            chunk.beep[chunk.n] = renderBeepSample(m);
             ay.takeSample(m.qsound.ay, period, chunk.a, chunk.b, chunk.c, chunk.n);
             chunk.fm[chunk.n] = renderFmSample(m);
             chunk.n += 1;
@@ -1482,10 +1473,7 @@ function activeRandomNibble(beep, value) {
     if (state === 0) {
         state = 1;
     }
-    state ^= state << 13;
-    state ^= state >>> 17;
-    state ^= state << 5;
-    state >>>= 0;
+    state = xorshift32(state);
     beep.randomState = state;
     const bitCount = (value & soundSignedNibbleMax) + 1;
     return state & ((1 << bitCount) - 1);
@@ -1496,6 +1484,16 @@ function qsoundContains(m, addr) {
     return m.qsound.model !== qsoundOff && addr >= qsoundBase && addr < qsoundBase + qsoundBytes;
 }
 
+/**
+ * PAL/NTSC clocks for Microdrive pair timing and the selected card's PSG divider.
+ *
+ * @param {Machine} m
+ */
+function applyTiming(m) {
+    m.mdv.pairCycles = Math.round(cpuClockHz(m) / microdriveBitRateHz * microdriveBitsPerPair);
+    m.qsound.ay.tickT = qsoundTickCycles(m);
+}
+
 /** @param {Machine} m */
 function resetQsound(m) {
     const qsound = m.qsound;
@@ -1503,13 +1501,21 @@ function resetQsound(m) {
     qsound.pia.fill(0);
     qsound.dataDirectionA = 0;
     qsound.dataDirectionB = 0;
-    let tickCycles = qsoundAyTickCycles;
-    const ymStyle = qsound.model === qsound2;
-    if (ymStyle) {
-        tickCycles = cpuClockHz(m) / qsound2SsgTickHz;
-    }
-    ay.configure(qsound.ay, tickCycles, ymStyle, m.cpu.cycleCount);
+    ay.configure(qsound.ay, qsoundTickCycles(m), qsound.model === qsound2, m.cpu.cycleCount);
     fm.reset(qsound.fm);
+}
+
+/**
+ * Original QSound follows a fixed E-clock divider; QSound2's PSG follows 125 kHz.
+ *
+ * @param {Machine} m
+ * @returns {number}
+ */
+function qsoundTickCycles(m) {
+    if (m.qsound.model === qsound2) {
+        return cpuClockHz(m) / qsound2SsgTickHz;
+    }
+    return qsoundAyTickCycles;
 }
 
 /** @param {Machine} m @param {number} addr @returns {number} */
@@ -1732,7 +1738,7 @@ function microdriveOffsetIsPreamble(cartridge, byteOffset) {
  * @param {number} value
  */
 function microdriveWriteImageByte(cartridge, offset, value) {
-    if (!cartridge.writable || offset < 0 || offset >= cartridge.imageLen) {
+    if (offset < 0 || offset >= cartridge.imageLen) {
         return;
     }
     cartridge.image[offset] = value;
@@ -1745,7 +1751,7 @@ function microdriveWriteImageByte(cartridge, offset, value) {
  * @param {MicrodriveCartridge} cartridge
  */
 function microdriveEraseCurrentPair(cartridge) {
-    if (!cartridge.writable || cartridge.imageLen === 0) {
+    if (cartridge.imageLen === 0) {
         return;
     }
     microdriveWriteImageByte(cartridge, cartridge.byteOffset, 0);
@@ -2004,7 +2010,7 @@ function microdriveWriteTrackByte(m, addr, value) {
         return;
     }
     const cartridge = m.mdv.cartridges[unit];
-    if (cartridge.imageLen === 0 || !cartridge.writable) {
+    if (cartridge.imageLen === 0) {
         return;
     }
     microdriveWriteImageByte(cartridge, cartridge.byteOffset, value);

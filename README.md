@@ -176,7 +176,7 @@ the QL.
 - `boot.js` - shader and default ROM fetch.
 - `load.js` - MDV or ZIP fetch for `index.html?url=`.
 - `io.js` - HTTP GET and local file reads.
-- `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, and frame run.
+- `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, QSound/QSound2, and frame run.
 - `cpu.js` - MC68008 state and execution core.
 - `hdd.js` - writable QLWA hard disk image and QDOS `WIN1_` host driver.
 - `ay.js` - AY-3-8910/YM2149 PSG synthesis used by the sound cards.

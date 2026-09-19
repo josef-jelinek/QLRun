@@ -34,7 +34,6 @@ const guestCallShortLimit = 20000;
 const guestCallMediumLimit = 200000;
 const qdosHeapAllocCall = 0x18;
 const qdosLinkFileDriverCall = 0x22;
-const qdosUserRamBase = 0x20000;
 const qdosFileLength = 0;
 const qdosFileType = 5;
 const qdosFileName = 14;
@@ -69,8 +68,12 @@ const openShare = 1;
 const openNew = 2;
 const openOverwrite = 3;
 const openDirectory = 4;
-const busStates = new WeakMap();
 let handlersInstalled = false;
+
+/**
+ * @typedef {import("./cpu.js").Cpu} Cpu
+ * @typedef {import("./cpu.js").CpuBus} CpuBus
+ */
 
 /**
  * Mutable single-drive QLWA state.
@@ -100,7 +103,11 @@ let handlersInstalled = false;
  * }} State
  */
 
-/** @returns {State} */
+/**
+ * Empty unmounted drive. Opcode handlers are installed once per page load.
+ *
+ * @returns {State}
+ */
 export function create() {
     installHandlers();
     return {
@@ -119,11 +126,6 @@ export function create() {
     };
 }
 
-/** @param {State} state @param {import("./cpu.js").CpuBus} bus */
-export function attach(state, bus) {
-    busStates.set(bus, state);
-}
-
 /**
  * Find and patch the QDOS ROM initialization hook without rejecting unknown ROMs.
  *
@@ -134,7 +136,7 @@ export function patchRom(state, mem) {
     state.romInitAddr = -1;
     state.driverReady = false;
     for (let addr = 0x4A00; addr + 6 <= 0xC000; addr += 2) {
-        if (readU16(mem, addr) === originalRomInitOpcode && readU16(mem, addr + 2) === 0x4AFB) {
+        if (cpu.readPointerWord(mem, addr) === originalRomInitOpcode && cpu.readPointerWord(mem, addr + 2) === 0x4AFB) {
             state.romInitAddr = addr;
             break;
         }
@@ -142,9 +144,9 @@ export function patchRom(state, mem) {
     if (state.romInitAddr < 0) {
         for (let addr = 0; addr + 6 <= 0xC000; addr += 2) {
             if (
-                readU16(mem, addr) === originalRomInitOpcode &&
-                readU16(mem, addr + 2) === 0x4AFB &&
-                readU16(mem, addr + 4) === 1
+                cpu.readPointerWord(mem, addr) === originalRomInitOpcode &&
+                cpu.readPointerWord(mem, addr + 2) === 0x4AFB &&
+                cpu.readPointerWord(mem, addr + 4) === 1
             ) {
                 state.romInitAddr = addr;
                 break;
@@ -154,18 +156,23 @@ export function patchRom(state, mem) {
     prepareReset(state, mem);
 }
 
-/** @param {State} state @param {Uint8Array} mem */
+/**
+ * Drop open channels and re-apply the host-driver trampolines for the next boot.
+ *
+ * @param {State} state
+ * @param {Uint8Array} mem
+ */
 export function prepareReset(state, mem) {
     state.channels.clear();
     state.driverReady = false;
     if (state.romInitAddr >= 0) {
-        writeU16(mem, state.romInitAddr, romInitOpcode);
+        cpu.writePointerWord(mem, state.romInitAddr, romInitOpcode);
     }
-    writeU16(mem, driverIoAddr, driverIoOpcode);
-    writeU16(mem, driverOpenAddr, driverOpenOpcode);
-    writeU16(mem, driverCloseAddr, driverCloseOpcode);
-    writeU16(mem, driverCloseAddr + 2, driverSlaveOpcode);
-    writeU16(mem, driverFormatAddr, driverFormatOpcode);
+    cpu.writePointerWord(mem, driverIoAddr, driverIoOpcode);
+    cpu.writePointerWord(mem, driverOpenAddr, driverOpenOpcode);
+    cpu.writePointerWord(mem, driverCloseAddr, driverCloseOpcode);
+    cpu.writePointerWord(mem, driverCloseAddr + 2, driverSlaveOpcode);
+    cpu.writePointerWord(mem, driverFormatAddr, driverFormatOpcode);
 }
 
 /**
@@ -195,7 +202,12 @@ export function insert(state, bytes, name) {
     return null;
 }
 
-/** @param {State} state @returns {{name: string, bytes: Uint8Array} | null} */
+/**
+ * Copy the mounted image for download and clear the modified flag.
+ *
+ * @param {State} state
+ * @returns {{name: string, bytes: Uint8Array} | null}
+ */
 export function save(state) {
     if (!state.inserted) {
         return null;
@@ -204,7 +216,11 @@ export function save(state) {
     return {name: state.name, bytes: state.image.slice()};
 }
 
-/** @param {State} state */
+/**
+ * Unmount the image and invalidate open channels.
+ *
+ * @param {State} state
+ */
 export function eject(state) {
     state.image = new Uint8Array(0);
     state.name = "";
@@ -218,7 +234,12 @@ export function eject(state) {
     state.rootCluster = 0;
 }
 
-/** @param {State} state @returns {{inserted: boolean, name: string, modified: boolean, driverReady: boolean}} */
+/**
+ * User-visible mount name, dirty flag, and whether QDOS accepted the driver.
+ *
+ * @param {State} state
+ * @returns {{inserted: boolean, name: string, modified: boolean, driverReady: boolean}}
+ */
 export function info(state) {
     return {
         inserted: state.inserted,
@@ -241,16 +262,16 @@ function installHandlers() {
     cpu.setOpcode(driverFormatOpcode, driverFormat);
 }
 
-/** @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {Cpu} c @param {CpuBus} bus */
 function romInit(c, bus) {
-    const state = busStates.get(bus);
-    if (state === undefined || state.romInitAddr < 0) {
+    const state = bus.hdd;
+    if (state.romInitAddr < 0) {
         return;
     }
-    writeU16(bus.mem, state.romInitAddr, originalRomInitOpcode);
+    cpu.writePointerWord(bus.mem, state.romInitAddr, originalRomInitOpcode);
     const saved = new Int32Array(c.reg);
-    const savedPollMask = readU16(bus.mem, qdosPollMaskAddr);
-    writeU16(bus.mem, qdosPollMaskAddr, 0);
+    const savedPollMask = cpu.readPointerWord(bus.mem, qdosPollMaskAddr);
+    cpu.writePointerWord(bus.mem, qdosPollMaskAddr, 0);
     const name = "WIN";
     const linkSize = 38;
     c.reg[1] = 4 + linkSize;
@@ -258,16 +279,16 @@ function romInit(c, bus) {
     cpu.callTrap(c, bus, 1, qdosHeapAllocCall, guestCallMediumLimit);
     if (c.exception === 0 && c.reg[0] === 0) {
         const base = c.reg[8] & qdosChannelMask;
-        if (base >= qdosUserRamBase && base + 4 + linkSize <= bus.mem.length) {
+        if (base >= cpu.qdosUserRamBase && base + 4 + linkSize <= bus.mem.length) {
             const link = base + 4;
             bus.mem.fill(0, link, link + linkSize);
-            writeU32(bus.mem, link, driverIoAddr);
-            writeU32(bus.mem, link + 4, driverOpenAddr);
-            writeU32(bus.mem, link + 8, driverCloseAddr);
-            writeU32(bus.mem, link + 12, driverCloseAddr + 2);
-            writeU32(bus.mem, link + 24, driverFormatAddr);
-            writeU32(bus.mem, link + 28, 36);
-            writeU16(bus.mem, link + 32, name.length);
+            cpu.writePointerLong(bus.mem, link, driverIoAddr);
+            cpu.writePointerLong(bus.mem, link + 4, driverOpenAddr);
+            cpu.writePointerLong(bus.mem, link + 8, driverCloseAddr);
+            cpu.writePointerLong(bus.mem, link + 12, driverCloseAddr + 2);
+            cpu.writePointerLong(bus.mem, link + 24, driverFormatAddr);
+            cpu.writePointerLong(bus.mem, link + 28, 36);
+            cpu.writePointerWord(bus.mem, link + 32, name.length);
             for (let i = 0; i < name.length; i += 1) {
                 bus.mem[link + 34 + i] = name.charCodeAt(i);
             }
@@ -275,28 +296,28 @@ function romInit(c, bus) {
             state.driverReady = c.exception === 0 && c.reg[0] === 0;
         }
     }
-    writeU16(bus.mem, qdosPollMaskAddr, savedPollMask);
+    cpu.writePointerWord(bus.mem, qdosPollMaskAddr, savedPollMask);
     c.reg.set(saved);
     cpu.executeOpcode(c, bus, originalRomInitOpcode);
 }
 
-/** @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {Cpu} c @param {CpuBus} bus */
 function driverOpen(c, bus) {
-    const state = busStates.get(bus);
-    if (state === undefined || !state.inserted) {
+    const state = bus.hdd;
+    if (!state.inserted) {
         c.reg[0] = qerrNf;
         returnFromDriver(c, bus);
         return;
     }
     const channelBase = c.reg[8] & qdosChannelMask;
     const data = channelBase + channelDataOffset;
-    if (data < qdosUserRamBase || data + channelDataSize > bus.mem.length) {
+    if (data < cpu.qdosUserRamBase || data + channelDataSize > bus.mem.length) {
         c.reg[0] = qerrOv;
         returnFromDriver(c, bus);
         return;
     }
     const pdb = c.reg[9] & qdosChannelMask;
-    if (pdb < qdosUserRamBase || pdb + 0x15 > bus.mem.length || bus.mem[pdb + 0x14] !== 1) {
+    if (pdb < cpu.qdosUserRamBase || pdb + 0x15 > bus.mem.length || bus.mem[pdb + 0x14] !== 1) {
         c.reg[0] = qerrNf;
         returnFromDriver(c, bus);
         return;
@@ -350,50 +371,54 @@ function driverOpen(c, bus) {
         eof: length,
     };
     state.channels.set(channelBase, channel);
-    writeU32(bus.mem, data + channelPositionOffset, channel.position);
-    writeU32(bus.mem, data + channelEofOffset, channel.eof);
-    writeU16(bus.mem, data + channelKeyOffset, key);
-    writeU16(bus.mem, data + channelDriveOffset, 0);
-    writeU16(bus.mem, data + channelDirectoryOffset, Number(isDirectory));
-    writeU16(bus.mem, data + channelOpenOffset, 1);
-    writeU32(bus.mem, data + channelFileIdOffset, file.file);
+    cpu.writePointerLong(bus.mem, data + channelPositionOffset, channel.position);
+    cpu.writePointerLong(bus.mem, data + channelEofOffset, channel.eof);
+    cpu.writePointerWord(bus.mem, data + channelKeyOffset, key);
+    cpu.writePointerWord(bus.mem, data + channelDriveOffset, 0);
+    let directoryFlag = 0;
+    if (isDirectory) {
+        directoryFlag = 1;
+    }
+    cpu.writePointerWord(bus.mem, data + channelDirectoryOffset, directoryFlag);
+    cpu.writePointerWord(bus.mem, data + channelOpenOffset, 1);
+    cpu.writePointerLong(bus.mem, data + channelFileIdOffset, file.file);
     c.reg[0] = 0;
     returnFromDriver(c, bus);
 }
 
-/** @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {Cpu} c @param {CpuBus} bus */
 function driverClose(c, bus) {
-    const state = busStates.get(bus);
+    const state = bus.hdd;
     const channelBase = c.reg[8] & qdosChannelMask;
-    state?.channels.delete(channelBase);
+    state.channels.delete(channelBase);
     const data = channelBase + channelDataOffset;
-    writeU16(bus.mem, data + channelOpenOffset, 0);
-    writeU32(bus.mem, data + channelFileIdOffset, 0);
-    const pdb = readU32(bus.mem, qdosPdbTableAddr + 4);
-    if (pdb >= qdosUserRamBase && pdb + 0x23 <= bus.mem.length && bus.mem[pdb + 0x22] > 0) {
+    cpu.writePointerWord(bus.mem, data + channelOpenOffset, 0);
+    cpu.writePointerLong(bus.mem, data + channelFileIdOffset, 0);
+    const pdb = cpu.readPointerLong(bus.mem, qdosPdbTableAddr + 4);
+    if (pdb >= cpu.qdosUserRamBase && pdb + 0x23 <= bus.mem.length && bus.mem[pdb + 0x22] > 0) {
         bus.mem[pdb + 0x22] -= 1;
     }
     const savedA0 = c.reg[8];
     c.reg[8] = channelBase + 0x18;
     c.reg[9] = qdosMdvDriverLinkAddr;
-    const mdvCloseEntry = readU16(bus.mem, qdosMdvCloseEntryAddr);
+    const mdvCloseEntry = cpu.readPointerWord(bus.mem, qdosMdvCloseEntryAddr);
     if (mdvCloseEntry !== 0) {
         cpu.callSubroutine(c, bus, mdvCloseEntry, guestCallShortLimit);
     }
     c.reg[8] = savedA0;
-    const driverCloseEntry = readU16(bus.mem, qdosDriverCloseEntryAddr);
+    const driverCloseEntry = cpu.readPointerWord(bus.mem, qdosDriverCloseEntryAddr);
     if (driverCloseEntry !== 0) {
         cpu.callSubroutine(c, bus, driverCloseEntry, guestCallShortLimit);
     }
     returnFromDriver(c, bus);
 }
 
-/** @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {Cpu} c @param {CpuBus} bus */
 function driverIo(c, bus) {
-    const state = busStates.get(bus);
+    const state = bus.hdd;
     const channelBase = c.reg[8] & qdosChannelMask;
-    const channel = state?.channels.get(channelBase);
-    if (state === undefined || channel === undefined || channel.generation !== state.generation || !state.inserted) {
+    const channel = state.channels.get(channelBase);
+    if (channel === undefined || channel.generation !== state.generation || !state.inserted) {
         c.reg[0] = qerrNo;
         returnFromDriver(c, bus);
         return;
@@ -462,7 +487,7 @@ function driverIo(c, bus) {
     case 0x49:
         transferWrite(state, channel, c, bus, Math.max(c.reg[2], 0), false);
         break;
-    case 75:
+    case 0x4B:
         if (!channelWritable(channel)) {
             c.reg[0] = qerrRo;
         } else {
@@ -470,13 +495,13 @@ function driverIo(c, bus) {
             channel.eof = channel.position;
         }
         break;
-    case 76:
+    case 0x4C:
         fileDate(state, channel, c, bus);
         break;
-    case 78:
+    case 0x4E:
         fileVersionOp(state, channel, c);
         break;
-    case 79:
+    case 0x4F:
         extendedInfo(state, c, bus);
         break;
     default:
@@ -484,18 +509,18 @@ function driverIo(c, bus) {
         break;
     }
     const data = channelBase + channelDataOffset;
-    writeU32(bus.mem, data + channelPositionOffset, channel.position);
-    writeU32(bus.mem, data + channelEofOffset, channel.eof);
+    cpu.writePointerLong(bus.mem, data + channelPositionOffset, channel.position);
+    cpu.writePointerLong(bus.mem, data + channelEofOffset, channel.eof);
     returnFromDriver(c, bus);
 }
 
-/** @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {Cpu} c @param {CpuBus} bus */
 function driverFormat(c, bus) {
     c.reg[0] = qerrNi;
     returnFromDriver(c, bus);
 }
 
-/** @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {Cpu} c @param {CpuBus} bus */
 function returnFromDriver(c, bus) {
     cpu.executeOpcode(c, bus, 0x4E75);
 }
@@ -508,10 +533,10 @@ function validateImage(image) {
     if (image[0] !== 0x51 || image[1] !== 0x4C || image[2] !== 0x57 || image[3] !== 0x41) {
         return "Not a QLWA .win image (missing QLWA signature).";
     }
-    const sectorsPerCluster = readU16(image, sectorsPerClusterOffset);
-    const clusterCount = readU16(image, clusterCountOffset);
-    const mapSectors = readU16(image, mapSectorCountOffset);
-    const rootCluster = readU16(image, rootClusterOffset);
+    const sectorsPerCluster = cpu.readPointerWord(image, sectorsPerClusterOffset);
+    const clusterCount = cpu.readPointerWord(image, clusterCountOffset);
+    const mapSectors = cpu.readPointerWord(image, mapSectorCountOffset);
+    const rootCluster = cpu.readPointerWord(image, rootClusterOffset);
     const expectedBytes = sectorsPerCluster * clusterCount * sectorSize;
     if (
         sectorsPerCluster === 0 || clusterCount === 0 || mapSectors === 0 ||
@@ -525,10 +550,10 @@ function validateImage(image) {
 
 /** @param {State} state */
 function readGeometry(state) {
-    state.sectorsPerCluster = readU16(state.image, sectorsPerClusterOffset);
-    state.clusterCount = readU16(state.image, clusterCountOffset);
-    state.mapSectors = readU16(state.image, mapSectorCountOffset);
-    state.rootCluster = readU16(state.image, rootClusterOffset);
+    state.sectorsPerCluster = cpu.readPointerWord(state.image, sectorsPerClusterOffset);
+    state.clusterCount = cpu.readPointerWord(state.image, clusterCountOffset);
+    state.mapSectors = cpu.readPointerWord(state.image, mapSectorCountOffset);
+    state.rootCluster = cpu.readPointerWord(state.image, rootClusterOffset);
 }
 
 /** @param {State} state @param {number} cluster @param {number} sector @returns {number} */
@@ -548,7 +573,7 @@ function nextCluster(state, cluster) {
     if (cluster < 0 || cluster >= state.clusterCount) {
         return -1;
     }
-    const next = readU16(state.image, fatOffset + cluster * 2);
+    const next = cpu.readPointerWord(state.image, fatOffset + cluster * 2);
     if (next >= state.clusterCount) {
         return -1;
     }
@@ -600,13 +625,13 @@ function fileHeader(state, file) {
 /** @param {State} state @param {FileId} file @returns {number} */
 function storedFileLength(state, file) {
     if (file.file === state.rootCluster) {
-        return readU32(state.image, rootLengthOffset);
+        return cpu.readPointerLong(state.image, rootLengthOffset);
     }
     const header = fileHeader(state, file);
     if (header === null) {
         return 0;
     }
-    return readU32(state.image, header + qdosFileLength);
+    return cpu.readPointerLong(state.image, header + qdosFileLength);
 }
 
 /** @param {State} state @param {FileId} file @returns {number} */
@@ -635,14 +660,14 @@ function findInDirectory(state, directory, name, directoriesOnly, seen) {
     const entries = Math.floor(storedFileLength(state, directory) / fileHeaderSize);
     for (let entry = 1; entry < entries; entry += 1) {
         const header = directoryHeader(state, directory, entry);
-        if (header < 0 || readU32(state.image, header) === 0) {
+        if (header < 0 || cpu.readPointerLong(state.image, header) === 0) {
             continue;
         }
         const entryName = readHeaderName(state.image, header);
         const isDirectory = state.image[header + qdosFileType] === directoryType;
         const file = {
             parent: directory.file,
-            file: readU16(state.image, header + fileIdOffset),
+            file: cpu.readPointerWord(state.image, header + fileIdOffset),
             entry,
         };
         const foldedEntryName = entryName.toUpperCase();
@@ -682,7 +707,7 @@ function createFile(state, name, now) {
     let entry = 1;
     for (; entry < entries; entry += 1) {
         const header = directoryHeader(state, parent, entry);
-        if (header >= 0 && readU32(state.image, header) === 0) {
+        if (header >= 0 && cpu.readPointerLong(state.image, header) === 0) {
             break;
         }
     }
@@ -703,11 +728,11 @@ function createFile(state, name, now) {
     }
     state.image.fill(0, header, header + fileHeaderSize);
     state.image.fill(0, data, data + fileHeaderSize);
-    writeU32(state.image, header, fileHeaderSize);
+    cpu.writePointerLong(state.image, header, fileHeaderSize);
     writeHeaderName(state.image, header, name);
-    writeU32(state.image, header + qdosFileUpdate, now);
-    writeU16(state.image, header + fileIdOffset, allocated);
-    writeU32(state.image, header + fileBackupDate, now);
+    cpu.writePointerLong(state.image, header + qdosFileUpdate, now);
+    cpu.writePointerWord(state.image, header + fileIdOffset, allocated);
+    cpu.writePointerLong(state.image, header + fileBackupDate, now);
     markModified(state);
     return {parent: parent.file, file: allocated, entry};
 }
@@ -729,7 +754,7 @@ function findParentDirectory(state, name) {
             const header = directoryHeader(state, directory, entry);
             if (
                 header < 0 ||
-                readU32(state.image, header) === 0 ||
+                cpu.readPointerLong(state.image, header) === 0 ||
                 state.image[header + qdosFileType] !== directoryType
             ) {
                 continue;
@@ -737,7 +762,7 @@ function findParentDirectory(state, name) {
             const dirName = readHeaderName(state.image, header);
             const file = {
                 parent: directory.file,
-                file: readU16(state.image, header + fileIdOffset),
+                file: cpu.readPointerWord(state.image, header + fileIdOffset),
                 entry,
             };
             stack.push(file);
@@ -752,8 +777,8 @@ function findParentDirectory(state, name) {
 
 /** @param {State} state @returns {number} */
 function allocateCluster(state) {
-    const freeCount = readU16(state.image, freeClusterCountOffset);
-    const cluster = readU16(state.image, firstFreeClusterOffset);
+    const freeCount = cpu.readPointerWord(state.image, freeClusterCountOffset);
+    const cluster = cpu.readPointerWord(state.image, firstFreeClusterOffset);
     if (freeCount === 0 || cluster <= 0 || cluster >= state.clusterCount) {
         return -1;
     }
@@ -761,9 +786,9 @@ function allocateCluster(state) {
     if (next < 0) {
         return -1;
     }
-    writeU16(state.image, firstFreeClusterOffset, next);
-    writeU16(state.image, freeClusterCountOffset, freeCount - 1);
-    writeU16(state.image, fatOffset + cluster * 2, 0);
+    cpu.writePointerWord(state.image, firstFreeClusterOffset, next);
+    cpu.writePointerWord(state.image, freeClusterCountOffset, freeCount - 1);
+    cpu.writePointerWord(state.image, fatOffset + cluster * 2, 0);
     markModified(state);
     return cluster;
 }
@@ -784,9 +809,9 @@ function releaseChain(state, first) {
     if (chain.length === 0) {
         return;
     }
-    writeU16(state.image, fatOffset + chain[chain.length - 1] * 2, readU16(state.image, firstFreeClusterOffset));
-    writeU16(state.image, firstFreeClusterOffset, chain[0]);
-    writeU16(state.image, freeClusterCountOffset, Math.min(readU16(state.image, freeClusterCountOffset) + chain.length, 0xFFFF));
+    cpu.writePointerWord(state.image, fatOffset + chain[chain.length - 1] * 2, cpu.readPointerWord(state.image, firstFreeClusterOffset));
+    cpu.writePointerWord(state.image, firstFreeClusterOffset, chain[0]);
+    cpu.writePointerWord(state.image, freeClusterCountOffset, Math.min(cpu.readPointerWord(state.image, freeClusterCountOffset) + chain.length, 0xFFFF));
     markModified(state);
 }
 
@@ -822,7 +847,7 @@ function ensureFileCapacity(state, file, byteLength) {
             if (allocated < 0) {
                 return false;
             }
-            writeU16(state.image, fatOffset + cluster * 2, allocated);
+            cpu.writePointerWord(state.image, fatOffset + cluster * 2, allocated);
             markModified(state);
             cluster = allocated;
         } else if (next < 0) {
@@ -838,11 +863,11 @@ function ensureFileCapacity(state, file, byteLength) {
 /** @param {State} state @param {FileId} file @param {number} length */
 function setStoredLength(state, file, length) {
     if (file.file === state.rootCluster) {
-        writeU32(state.image, rootLengthOffset, length);
+        cpu.writePointerLong(state.image, rootLengthOffset, length);
     } else {
         const header = fileHeader(state, file);
         if (header !== null) {
-            writeU32(state.image, header, length);
+            cpu.writePointerLong(state.image, header, length);
         }
     }
     markModified(state);
@@ -860,7 +885,7 @@ function truncateFile(state, file, position) {
     }
     if (cluster > 0) {
         const tail = nextCluster(state, cluster);
-        writeU16(state.image, fatOffset + cluster * 2, 0);
+        cpu.writePointerWord(state.image, fatOffset + cluster * 2, 0);
         if (tail > 0) {
             releaseChain(state, tail);
         }
@@ -901,7 +926,7 @@ function writeFileBytes(state, channel, source, sourceOffset, count) {
     return 0;
 }
 
-/** @param {State} state @param {Channel} channel @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus @param {boolean} line @param {number} requested */
+/** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus @param {boolean} line @param {number} requested */
 function transferRead(state, channel, c, bus, line, requested) {
     let address = c.reg[9] & 0xFFFFFF;
     let count = 0;
@@ -911,7 +936,7 @@ function transferRead(state, channel, c, bus, line, requested) {
             status = qerrEof;
             break;
         }
-        if (address < qdosUserRamBase || address >= bus.mem.length) {
+        if (address < cpu.qdosUserRamBase || address >= bus.mem.length) {
             status = qerrBp;
             break;
         }
@@ -938,7 +963,7 @@ function transferRead(state, channel, c, bus, line, requested) {
     c.reg[9] = address;
 }
 
-/** @param {State} state @param {Channel} channel @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus @param {number} requested @param {boolean} wordCount */
+/** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus @param {number} requested @param {boolean} wordCount */
 function transferWrite(state, channel, c, bus, requested, wordCount) {
     if (!channelWritable(channel)) {
         c.reg[0] = qerrRo;
@@ -946,7 +971,7 @@ function transferWrite(state, channel, c, bus, requested, wordCount) {
     }
     const address = c.reg[9] & 0xFFFFFF;
     const available = Math.max(Math.min(requested, bus.mem.length - address), 0);
-    if (address < qdosUserRamBase || available !== requested) {
+    if (address < cpu.qdosUserRamBase || available !== requested) {
         c.reg[0] = qerrBp;
         return;
     }
@@ -962,43 +987,43 @@ function channelWritable(channel) {
     return !channel.isDirectory && channel.key !== openShare;
 }
 
-/** @param {State} state @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {State} state @param {Cpu} c @param {CpuBus} bus */
 function mediumInfo(state, c, bus) {
     const address = c.reg[9] & 0xFFFFFF;
-    if (address < qdosUserRamBase || address + 10 > bus.mem.length) {
+    if (address < cpu.qdosUserRamBase || address + 10 > bus.mem.length) {
         c.reg[0] = qerrBp;
         return;
     }
-    const freeSectors = readU16(state.image, freeClusterCountOffset) * state.sectorsPerCluster;
+    const freeSectors = cpu.readPointerWord(state.image, freeClusterCountOffset) * state.sectorsPerCluster;
     const totalSectors = state.clusterCount * state.sectorsPerCluster;
     c.reg[1] = ((freeSectors & 0xFFFF) << 16) | (totalSectors & 0xFFFF);
     bus.mem.set(state.image.subarray(10, 20), address);
     c.reg[9] = address + 10;
 }
 
-/** @param {State} state @param {Channel} channel @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus */
 function readFileHeader(state, channel, c, bus) {
     const count = Math.min(Math.max(c.reg[2] & 0xFFFE, 4), fileHeaderSize);
     const address = c.reg[9] & 0xFFFFFF;
-    if (address < qdosUserRamBase || address + count > bus.mem.length) {
+    if (address < cpu.qdosUserRamBase || address + count > bus.mem.length) {
         c.reg[0] = qerrBp;
         return;
     }
     const result = new Uint8Array(fileHeaderSize);
     const header = fileHeader(state, channel.file);
     if (header === null) {
-        writeU32(result, 0, fileLength(state, channel.file));
+        cpu.writePointerLong(result, 0, fileLength(state, channel.file));
         result[qdosFileType] = directoryType;
     } else {
         result.set(state.image.subarray(header, header + fileHeaderSize));
-        writeU32(result, 0, fileLength(state, channel.file));
+        cpu.writePointerLong(result, 0, fileLength(state, channel.file));
     }
     bus.mem.set(result.subarray(0, count), address);
     c.reg[1] = count;
     c.reg[9] = address + count;
 }
 
-/** @param {State} state @param {Channel} channel @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus */
 function setFileHeader(state, channel, c, bus) {
     if (!channelWritable(channel)) {
         c.reg[0] = qerrRo;
@@ -1006,7 +1031,7 @@ function setFileHeader(state, channel, c, bus) {
     }
     const header = fileHeader(state, channel.file);
     const address = c.reg[9] & 0xFFFFFF;
-    if (header === null || address < qdosUserRamBase || address + 14 > bus.mem.length) {
+    if (header === null || address < cpu.qdosUserRamBase || address + 14 > bus.mem.length) {
         c.reg[0] = qerrBp;
         return;
     }
@@ -1015,7 +1040,7 @@ function setFileHeader(state, channel, c, bus) {
     markModified(state);
 }
 
-/** @param {State} state @param {Channel} channel @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus */
 function fileDate(state, channel, c, bus) {
     const header = fileHeader(state, channel.file);
     if (header === null) {
@@ -1027,7 +1052,7 @@ function fileDate(state, channel, c, bus) {
         offset = qdosFileUpdate;
     }
     if (c.reg[1] < 0) {
-        c.reg[1] = readU32(state.image, header + offset) | 0;
+        c.reg[1] = cpu.readPointerLong(state.image, header + offset) | 0;
         return;
     }
     if (!channelWritable(channel)) {
@@ -1038,19 +1063,19 @@ function fileDate(state, channel, c, bus) {
     if (date === 0) {
         date = bus.readHwLongClock();
     }
-    writeU32(state.image, header + offset, date);
+    cpu.writePointerLong(state.image, header + offset, date);
     c.reg[1] = date;
     markModified(state);
 }
 
-/** @param {State} state @param {Channel} channel @param {import("./cpu.js").Cpu} c */
+/** @param {State} state @param {Channel} channel @param {Cpu} c */
 function fileVersionOp(state, channel, c) {
     const header = fileHeader(state, channel.file);
     if (header === null) {
         c.reg[0] = qerrBp;
         return;
     }
-    let version = signed16(readU16(state.image, header + fileVersion));
+    let version = signed16(cpu.readPointerWord(state.image, header + fileVersion));
     if (c.reg[1] === 0) {
         c.reg[1] = version;
         return;
@@ -1064,62 +1089,38 @@ function fileVersionOp(state, channel, c) {
     } else {
         version = c.reg[1];
     }
-    writeU16(state.image, header + fileVersion, version);
+    cpu.writePointerWord(state.image, header + fileVersion, version);
     c.reg[1] = signed16(version & 0xFFFF);
     markModified(state);
 }
 
-/** @param {State} state @param {import("./cpu.js").Cpu} c @param {import("./cpu.js").CpuBus} bus */
+/** @param {State} state @param {Cpu} c @param {CpuBus} bus */
 function extendedInfo(state, c, bus) {
     const address = c.reg[9] & 0xFFFFFF;
-    if (address < qdosUserRamBase || address + 64 > bus.mem.length) {
+    if (address < cpu.qdosUserRamBase || address + 64 > bus.mem.length) {
         c.reg[0] = qerrBp;
         return;
     }
     bus.mem.fill(0xFF, address, address + 64);
     const mountLength = Math.min(state.name.length, 20);
-    writeU16(bus.mem, address, mountLength);
+    cpu.writePointerWord(bus.mem, address, mountLength);
     for (let i = 0; i < mountLength; i += 1) {
         bus.mem[address + 2 + i] = state.name.charCodeAt(i);
     }
-    writeU16(bus.mem, address + 22, 3);
+    cpu.writePointerWord(bus.mem, address + 22, 3);
     bus.mem.set(Uint8Array.of(0x57, 0x49, 0x4E), address + 24);
     bus.mem[address + 28] = 1;
     bus.mem[address + 29] = 0;
-    writeU16(bus.mem, address + 30, 1024);
-    writeU32(bus.mem, address + 32, state.clusterCount * state.sectorsPerCluster / 2);
-    writeU32(bus.mem, address + 36, readU16(state.image, freeClusterCountOffset) * state.sectorsPerCluster / 2);
-    writeU32(bus.mem, address + 40, fileHeaderSize);
+    cpu.writePointerWord(bus.mem, address + 30, 1024);
+    cpu.writePointerLong(bus.mem, address + 32, state.clusterCount * state.sectorsPerCluster / 2);
+    cpu.writePointerLong(bus.mem, address + 36, cpu.readPointerWord(state.image, freeClusterCountOffset) * state.sectorsPerCluster / 2);
+    cpu.writePointerLong(bus.mem, address + 40, fileHeaderSize);
 }
 
 /** @param {State} state */
 function markModified(state) {
     state.modified = true;
-    writeU32(state.image, updateCountOffset, (readU32(state.image, updateCountOffset) + 1) >>> 0);
-}
-
-/** @param {Uint8Array} bytes @param {number} offset @returns {number} */
-function readU16(bytes, offset) {
-    return (bytes[offset] << 8) | bytes[offset + 1];
-}
-
-/** @param {Uint8Array} bytes @param {number} offset @returns {number} */
-function readU32(bytes, offset) {
-    return ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
-}
-
-/** @param {Uint8Array} bytes @param {number} offset @param {number} value */
-function writeU16(bytes, offset, value) {
-    bytes[offset] = (value >> 8) & 0xFF;
-    bytes[offset + 1] = value & 0xFF;
-}
-
-/** @param {Uint8Array} bytes @param {number} offset @param {number} value */
-function writeU32(bytes, offset, value) {
-    bytes[offset] = (value >>> 24) & 0xFF;
-    bytes[offset + 1] = (value >>> 16) & 0xFF;
-    bytes[offset + 2] = (value >>> 8) & 0xFF;
-    bytes[offset + 3] = value & 0xFF;
+    cpu.writePointerLong(state.image, updateCountOffset, (cpu.readPointerLong(state.image, updateCountOffset) + 1) >>> 0);
 }
 
 /** @param {Uint8Array} bytes @param {number} offset @returns {string | null} */
@@ -1127,7 +1128,7 @@ function readQdosName(bytes, offset) {
     if (offset < 0 || offset + 2 > bytes.length) {
         return null;
     }
-    const length = readU16(bytes, offset);
+    const length = cpu.readPointerWord(bytes, offset);
     if (length > 36 || offset + 2 + length > bytes.length) {
         return null;
     }
@@ -1140,7 +1141,7 @@ function readQdosName(bytes, offset) {
 
 /** @param {Uint8Array} bytes @param {number} header @returns {string} */
 function readHeaderName(bytes, header) {
-    const length = Math.min(readU16(bytes, header + qdosFileName), 36);
+    const length = Math.min(cpu.readPointerWord(bytes, header + qdosFileName), 36);
     let name = "";
     for (let i = 0; i < length; i += 1) {
         name += String.fromCharCode(bytes[header + qdosFileName + 2 + i]);
@@ -1151,7 +1152,7 @@ function readHeaderName(bytes, header) {
 /** @param {Uint8Array} bytes @param {number} header @param {string} name */
 function writeHeaderName(bytes, header, name) {
     const length = Math.min(name.length, 36);
-    writeU16(bytes, header + qdosFileName, length);
+    cpu.writePointerWord(bytes, header + qdosFileName, length);
     for (let i = 0; i < length; i += 1) {
         bytes[header + qdosFileName + 2 + i] = name.charCodeAt(i);
     }

@@ -309,6 +309,10 @@ for (let drive = 0; drive < ui.mdv.length; drive += 1) {
         URL.revokeObjectURL(url);
     };
     controls.eject.onclick = function () {
+        if (drive === 0) {
+            updateUrlParam("url", null);
+            cancelStartupFile();
+        }
         machine.ejectMdv(ql, drive);
         showInfo(controls.info, "No cartridge.");
     };
@@ -492,7 +496,11 @@ boot.loadQsoundRom(machine.qsoundRomSize, function (err, rom) {
     if (rom === null) {
         ui.qsound.checked = false;
         ui.qsound2.checked = false;
-        showError(ui.qsoundInfo, "QSound ROM unavailable.");
+        let message = "QSound ROM unavailable.";
+        if (err !== null) {
+            message = err;
+        }
+        showError(ui.qsoundInfo, message);
     } else {
         const romErr = machine.setQsoundRom(ql, rom);
         if (romErr !== null) {
@@ -508,9 +516,6 @@ boot.loadQsoundRom(machine.qsoundRomSize, function (err, rom) {
             ui.qsound.disabled = false;
             ui.qsound2.disabled = false;
         }
-    }
-    if (err !== null) {
-        console.error(err);
     }
     loadSystemRom();
 });
@@ -690,17 +695,6 @@ function updateRamSize() {
     resetSystem();
 }
 
-/** @returns {number} */
-function selectedQsoundModel() {
-    if (ui.qsound2.checked) {
-        return machine.qsound2;
-    }
-    if (ui.qsound.checked) {
-        return machine.qsoundOriginal;
-    }
-    return machine.qsoundOff;
-}
-
 /**
  * Apply one card switch, including mutual exclusion and the expansion conflict.
  *
@@ -735,6 +729,17 @@ function applyRamSize() {
     updateUrlParam("ram", ramKb);
 }
 
+/** @returns {number} */
+function selectedQsoundModel() {
+    if (ui.qsound2.checked) {
+        return machine.qsound2;
+    }
+    if (ui.qsound.checked) {
+        return machine.qsoundOriginal;
+    }
+    return machine.qsoundOff;
+}
+
 /** Reset machine and audio state, then resume available sound. */
 function resetSystem() {
     if (sfx === null) {
@@ -756,7 +761,7 @@ function cancelStartupFile() {
 }
 
 /**
- * Load a URL-supplied cartridge or ROM after any prerequisite ROM load.
+ * Load a URL-supplied Microdrive image after any prerequisite ROM load.
  *
  * @param {string} name
  * @param {ArrayBuffer} bytes
@@ -769,17 +774,6 @@ function applyStartupFile(name, bytes) {
             return;
         }
         showInfo(ui.mdv[0].info, name);
-        return;
-    }
-    if (media.isRomName(name)) {
-        const romErr = machine.setSysRom(ql, bytes);
-        if (romErr !== null) {
-            showError(ui.romInfo, romErr);
-            return;
-        }
-        defaultRomSelected = false;
-        resetSystem();
-        showInfo(ui.romInfo, name);
         return;
     }
     showError(ui.startupFileInfo, "Unsupported startup file type: " + name + ".");
@@ -796,11 +790,12 @@ function toggleCanvasFullscreen() {
     if (document.fullscreenElement !== null || screenOnlyFallback) {
         screenOnlyFallback = false;
         if (document.fullscreenElement !== null && document.exitFullscreen !== undefined) {
-            exitFullscreen(function (err) {
-                if (err !== null) {
+            document.exitFullscreen().then(
+                function () {},
+                function () {
                     setScreenOnly(false);
-                }
-            });
+                },
+            );
             return;
         }
         setScreenOnly(false);
@@ -808,48 +803,16 @@ function toggleCanvasFullscreen() {
     }
 
     const slot = ui.screen.parentElement;
-    if (slot?.requestFullscreen === undefined) {
+    if (slot === null || slot.requestFullscreen === undefined) {
         screenOnlyFallback = true;
         setScreenOnly(true);
         return;
     }
-    enterFullscreen(slot, function (err) {
-        if (err !== null) {
+    slot.requestFullscreen().then(
+        function () {},
+        function () {
             screenOnlyFallback = true;
             setScreenOnly(true);
-        }
-    });
-}
-
-/**
- * Adapt a browser fullscreen request to the callback convention.
- *
- * @param {HTMLElement} el
- * @param {function(string | null): void} onDone
- */
-function enterFullscreen(el, onDone) {
-    el.requestFullscreen().then(
-        function () {
-            onDone(null);
-        },
-        function () {
-            onDone("Could not enter fullscreen.");
-        },
-    );
-}
-
-/**
- * Adapt a browser fullscreen exit to the callback convention.
- *
- * @param {function(string | null): void} onDone
- */
-function exitFullscreen(onDone) {
-    document.exitFullscreen().then(
-        function () {
-            onDone(null);
-        },
-        function () {
-            onDone("Could not exit fullscreen.");
         },
     );
 }
@@ -997,7 +960,7 @@ function refreshMdvActivity(now) {
             info.name !== activity.name ||
             info.modified !== activity.modified
         ) {
-            let label = "No cartridge";
+            let label = "No cartridge.";
             if (info.inserted) {
                 label = info.name;
                 if (info.modified) {
@@ -1048,7 +1011,7 @@ function refreshHddStatus() {
     ) {
         return;
     }
-    let label = "No hard disk";
+    let label = "No hard disk.";
     if (info.inserted) {
         label = info.name;
         if (info.modified) {

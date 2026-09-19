@@ -36,7 +36,7 @@ export function loadShaders(onDone) {
                     done = true;
                     aborts[0]?.();
                     aborts[1]?.();
-                    onDone("Failed to load \"" + url + "\"", null);
+                    onDone("Failed to load \"" + url + "\".", null);
                     return;
                 }
                 shaders[slot] = text;

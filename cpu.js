@@ -1,73 +1,75 @@
 export const addressSpaceBytes = 0x100000;
-export const addrMask = addressSpaceBytes - 1;
+const addrMask = addressSpaceBytes - 1;
 export const qdosUserRamBase = 0x20000;
 export const qlPalClockHz = 7500000;
 export const qlNtscClockHz = 7552445;
 export const zx8301PalClocksPerFrame = 149760;
 export const zx8301NtscClocksPerFrame = 125760;
-export const zx8301OnboardRamEnd = 0x40000;
-export const busCycleClocks = 4;
-export const byteBusCycles = 1;
-export const wordBusCycles = 2;
-export const longBusCycles = 4;
-export const zx8301TimingChunkClocks = 12;
-export const zx8301TimingChunksPerLine = 40;
-export const zx8301DisplayChunksPerLine = 32;
-export const zx8301BusSlotsPerChunk = zx8301TimingChunkClocks / busCycleClocks;
-export const zx8301BusSlotsPerLine = zx8301TimingChunksPerLine * zx8301BusSlotsPerChunk;
-export const zx8301DisplayBusSlots = zx8301DisplayChunksPerLine * zx8301BusSlotsPerChunk;
-export const zx8301CpuDisplaySlot = zx8301BusSlotsPerChunk - 1;
-export const busErrorVector = 2;
-export const addressErrorVector = 3;
-export const illegalInstructionVector = 4;
-export const divideByZeroVector = 5;
-export const chkVector = 6;
-export const trapvVector = 7;
-export const privilegeViolationVector = 8;
-export const traceVector = 9;
-export const line1010Vector = 10;
-export const line1111Vector = 11;
-export const interruptLevelMask = 7;
-export const nonmaskableInterruptLevel = 7;
-export const frameInterruptLevel = 2;
+export const internalIoBase = 0x18000;
+export const internalIoEnd = 0x1C000;
+const zx8301OnboardRamEnd = 0x40000;
+const busCycleClocks = 4;
+const byteBusCycles = 1;
+const wordBusCycles = 2;
+const longBusCycles = 4;
+const zx8301TimingChunkClocks = 12;
+const zx8301TimingChunksPerLine = 40;
+const zx8301DisplayChunksPerLine = 32;
+const zx8301BusSlotsPerChunk = zx8301TimingChunkClocks / busCycleClocks;
+const zx8301BusSlotsPerLine = zx8301TimingChunksPerLine * zx8301BusSlotsPerChunk;
+const zx8301DisplayBusSlots = zx8301DisplayChunksPerLine * zx8301BusSlotsPerChunk;
+const zx8301CpuDisplaySlot = zx8301BusSlotsPerChunk - 1;
+const busErrorVector = 2;
+const addressErrorVector = 3;
+const illegalInstructionVector = 4;
+const divideByZeroVector = 5;
+const chkVector = 6;
+const trapvVector = 7;
+const privilegeViolationVector = 8;
+const traceVector = 9;
+const line1010Vector = 10;
+const line1111Vector = 11;
+const interruptLevelMask = 7;
+const nonmaskableInterruptLevel = 7;
+const frameInterruptLevel = 2;
 export const frameInterruptStatusBit = 8;
-export const interruptExceptionClocks = 72;
-export const exceptionFrameSize = 6;
-export const exceptionFramePcOffset = 2;
-export const busErrorFrameSize = 8;
-export const busErrorFrameOpcodeOffset = 6;
-export const autovectorBase = 24;
-export const qdosByteSize = 1;
-export const qdosWordSize = 2;
-export const qdosLongSize = 4;
-export const qdosTrapVectorBase = 32;
-export const qdosTrap0Vector = 32;
-export const qdosTrap4Vector = 36;
-export const qdosTrap15Vector = 47;
-export const qdosExceptionStateSysvarAddr = 0x28050;
-export const dataRegisterCount = 8;
-export const addressRegisterBase = 8;
-export const registerCount = 16;
-export const stackRegisterIndex = 15;
-export const stackAddressRegister = 7;
-export const operandByte = 0;
-export const operandWord = 1;
-export const operandLong = 2;
-export const sizeFieldShift = 6;
-export const sizeFieldCount = 4;
-export const sizeFieldMask = 3;
-export const invalidSizeField = 3;
-export const opcodeBitCount = 16;
-export const opcodeTableEntries = 65536;
-export const opcodeDynamicCycles = -1;
-export const opcodeHostCycleBias = 2;
-export const opcodeClassSelectBit = 0x4000;
-export const eaDestinationBit = 0x0100;
-export const rewriteInvalidTarget = -1;
-export const rewriteRegisterTargetBase = addrMask + 1;
-export const eaMode7AbsoluteCount = 2;
-export const eaMode7MemoryCount = 4;
-export const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
+const interruptExceptionClocks = 72;
+const exceptionFrameSize = 6;
+const exceptionFramePcOffset = 2;
+const busErrorFrameSize = 8;
+const busErrorFrameOpcodeOffset = 6;
+const autovectorBase = 24;
+const qdosByteSize = 1;
+const qdosWordSize = 2;
+const qdosLongSize = 4;
+const qdosTrapVectorBase = 32;
+const qdosTrap0Vector = 32;
+const qdosTrap4Vector = 36;
+const qdosTrap15Vector = 47;
+const qdosExceptionStateSysvarAddr = 0x28050;
+const dataRegisterCount = 8;
+const addressRegisterBase = 8;
+const registerCount = 16;
+const stackRegisterIndex = 15;
+const stackAddressRegister = 7;
+const operandByte = 0;
+const operandWord = 1;
+const operandLong = 2;
+const sizeFieldShift = 6;
+const sizeFieldCount = 4;
+const sizeFieldMask = 3;
+const invalidSizeField = 3;
+const opcodeBitCount = 16;
+const opcodeTableEntries = 65536;
+const opcodeDynamicCycles = -1;
+const opcodeHostCycleBias = 2;
+const opcodeClassSelectBit = 0x4000;
+const eaDestinationBit = 0x0100;
+const rewriteInvalidTarget = -1;
+const rewriteRegisterTargetBase = addrMask + 1;
+const eaMode7AbsoluteCount = 2;
+const eaMode7MemoryCount = 4;
+const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
 
 /**
  * Machine-owned memory and hardware operations used by the CPU core.
@@ -76,10 +78,11 @@ export const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
  *   mem: Uint8Array,
  *   zx8301ContentionEnabled: boolean,
  *   isUnmapped: function(number): boolean,
+ *   isHw: function(number): boolean,
  *   readHwByte: function(number): number,
  *   readHwLongClock: function(): number,
  *   writeHwByte: function(number, number): void,
- *   qsoundContains: function(number): boolean,
+ *   hdd: import("./hdd.js").State,
  *   afterInstruction: function(): void,
  *   resetHardware: function(): void,
  * }} CpuBus
@@ -597,7 +600,7 @@ function logicalShift(value, count, width, left) {
  * @param {CpuBus} bus
  * @returns {number}
  */
-export function getSr(c, bus) {
+function getSr(c, bus) {
     let sr = (c.interruptMask & 7) << 8;
     if (c.trace) {
         sr |= 0x8000;
@@ -674,7 +677,7 @@ function putSr(c, bus, sr) {
  * @param {CpuBus} bus
  * @param {number} vector
  */
-export function coreRaiseException(c, bus, vector) {
+function coreRaiseException(c, bus, vector) {
     c.exception = vector;
     c.extraFlag = true;
     c.nInst2 = c.nInst;
@@ -1357,8 +1360,7 @@ function mc68008DynamicInstructionCycles(c, bus, opcode) {
  * @returns {boolean}
  */
 function isHw(c, bus, addr) {
-    const unsignedAddr = addr >>> 0;
-    return (unsignedAddr >= 0x18000 && unsignedAddr < 0x1C000) || bus.qsoundContains(unsignedAddr);
+    return bus.isHw(addr >>> 0);
 }
 
 /**
@@ -1481,7 +1483,7 @@ function writeDecodedWord(c, bus, addr, d) {
  * @param {number} addr
  * @returns {number}
  */
-export function readByte(c, bus, addr) {
+function readByte(c, bus, addr) {
     addCpuBusCycles(c, bus, addr, byteBusCycles);
     if (c.accessActive && c.exception !== 0) {
         return 0;
@@ -1502,7 +1504,7 @@ export function readByte(c, bus, addr) {
  * @param {number} addr
  * @returns {number}
  */
-export function readWord(c, bus, addr) {
+function readWord(c, bus, addr) {
     addCpuBusCycles(c, bus, addr, wordBusCycles);
     if (cpuWordOrLongFaultIfNeeded(c, bus, addr, true)) {
         return 0;
@@ -1517,13 +1519,13 @@ export function readWord(c, bus, addr) {
  * @param {number} addr
  * @returns {number}
  */
-export function readLong(c, bus, addr) {
+function readLong(c, bus, addr) {
     addCpuBusCycles(c, bus, addr, longBusCycles);
     if (cpuWordOrLongFaultIfNeeded(c, bus, addr, true)) {
         return 0;
     }
     addr &= addrMask;
-    if (addr === 0x18000) {
+    if (addr === internalIoBase) {
         return bus.readHwLongClock();
     }
     const lowAddr = (addr + qdosWordSize) & addrMask;
@@ -1541,7 +1543,7 @@ export function readLong(c, bus, addr) {
  * @param {number} addr
  * @param {number} d
  */
-export function writeByte(c, bus, addr, d) {
+function writeByte(c, bus, addr, d) {
     addCpuBusCycles(c, bus, addr, byteBusCycles);
     if (c.accessActive && c.exception !== 0) {
         return;
@@ -1565,7 +1567,7 @@ export function writeByte(c, bus, addr, d) {
  * @param {number} addr
  * @param {number} d
  */
-export function writeWord(c, bus, addr, d) {
+function writeWord(c, bus, addr, d) {
     addCpuBusCycles(c, bus, addr, wordBusCycles);
     if (cpuWordOrLongFaultIfNeeded(c, bus, addr, false)) {
         return;
@@ -1580,7 +1582,7 @@ export function writeWord(c, bus, addr, d) {
  * @param {number} addr
  * @param {number} d
  */
-export function writeLong(c, bus, addr, d) {
+function writeLong(c, bus, addr, d) {
     addCpuBusCycles(c, bus, addr, longBusCycles);
     if (cpuWordOrLongFaultIfNeeded(c, bus, addr, false)) {
         return;
@@ -2288,7 +2290,7 @@ function setOpcodeHandler(pattern, handler) {
 }
 
 /** Build the shared opcode dispatch and base-cycle tables once. */
-export function ensureOpcodeTable() {
+function ensureOpcodeTable() {
     if (opcodeTableReady) {
         return;
     }

@@ -1,7 +1,7 @@
-const mdvExt = /\.(mdv|MDV)$/;
-const zipExt = /\.(zip|ZIP)$/;
-const romExt = /\.(rom|bin|ROM|BIN)$/;
-const winExt = /\.(win|WIN)$/;
+const mdvExt = /\.mdv$/i;
+const zipExt = /\.zip$/i;
+const romExt = /\.(rom|bin)$/i;
+const winExt = /\.win$/i;
 
 /** @param {string} name */
 export function isMdvName(name) {

@@ -58,16 +58,16 @@ export function init(framesPerSecond, onDone) {
         context = new AudioContext();
     } catch (ex) {
         console.error("AudioContext fail", ex);
-        onDone("No AudioContext available", null);
+        onDone("No AudioContext available.", null);
         return;
     }
     if (context.audioWorklet === undefined) {
         context.close();
-        onDone("No AudioWorklet available", null);
+        onDone("No AudioWorklet available.", null);
         return;
     }
 
-    context.audioWorklet.addModule("sound.worklet.js?v=2").then(
+    context.audioWorklet.addModule("sound.worklet.js").then(
         function () {
             const frameSampleCount = Math.round(context.sampleRate / framesPerSecond);
             /** @type {Sfx} */
@@ -142,7 +142,7 @@ export function init(framesPerSecond, onDone) {
         function (ex) {
             console.error("AudioWorklet module fail", ex);
             context.close();
-            onDone("Failed to load audio worklet", null);
+            onDone("Failed to load audio worklet.", null);
         },
     );
 }
@@ -308,7 +308,7 @@ export function push(sfx, chunk) {
         // Adding the mono FM signal equally to all PSG planes keeps it centred:
         // either pan layout gives their common component the same total weight.
         const fm = chunk.fm[i];
-        samples[at] = chunk.ula[i];
+        samples[at] = chunk.beep[i];
         samples[at + 1] = chunk.a[i] + fm;
         samples[at + 2] = chunk.b[i] + fm;
         samples[at + 3] = chunk.c[i] + fm;

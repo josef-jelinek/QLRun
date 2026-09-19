@@ -113,7 +113,7 @@ export function configure(state, tickT, ymStyle, t) {
  * @param {State} state
  * @param {number} t
  */
-export function reset(state, t) {
+function reset(state, t) {
     state.regs.fill(0);
     state.regs[regMixer] = 0x3F;
     state.toneCounter.fill(0);

@@ -1,11 +1,5 @@
 /**
  * @typedef {{
- *   code: number,
- * }} KeyId
- */
-
-/**
- * @typedef {{
  *   label: string,
  *   code: number,
  *   codes: string[],

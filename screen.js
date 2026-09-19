@@ -1,5 +1,6 @@
-// The decoded texture is always 512x256. Both modes use the same square output:
-// Mode 4 expands rows, while Mode 8 also combines each pair of columns.
+// Frame size is duplicated with machine.js. The decoded texture is always
+// 512x256. Both modes use the same square output: Mode 4 expands rows, while
+// Mode 8 also combines each pair of columns.
 const frameW = 512;
 const frameH = 256;
 const crtViewW = 512;
@@ -36,7 +37,7 @@ export function init(canvas, shaders, onGfx) {
 
     canvas.addEventListener("webglcontextlost", function (e) {
         e.preventDefault();
-        onGfx("WebGL2 context lost", null);
+        onGfx("WebGL2 context lost.", null);
     });
 
     canvas.addEventListener("webglcontextrestored", function () {
@@ -49,7 +50,7 @@ export function init(canvas, shaders, onGfx) {
     function initGfx() {
         const gfx = createGfx(canvas, shaders.vert, shaders.frag);
         if (gfx === null) {
-            onGfx("Failed to create WebGL2 context", null);
+            onGfx("Failed to create WebGL2 context.", null);
             return;
         }
         resize(gfx);
