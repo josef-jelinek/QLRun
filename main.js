@@ -969,11 +969,12 @@ function fillSoundQueue() {
 
 /** Run hidden fields while either Microdrive remains in an active read, then one visible field. */
 function stepTurboGroup() {
-    for (let frame = 1; frame < turboMultiplier; frame += 1) {
-        if (!turboReading()) {
-            break;
+    const burst = turboReading();
+    machine.clearMdvReading(ql);
+    if (burst) {
+        for (let frame = 1; frame < turboMultiplier; frame += 1) {
+            stepMachine(false);
         }
-        stepMachine(false);
     }
     stepMachine(true);
 }

@@ -832,6 +832,15 @@ export function mdvInfo(m, drive) {
     };
 }
 
+/**
+ * Consume the per-field read flag so Turbo does not stay on after the last transfer.
+ *
+ * @param {Machine} m
+ */
+export function clearMdvReading(m) {
+    m.mdv.readingMask = 0;
+}
+
 /** @param {Machine} m */
 function fillRam(m) {
     let seed = (Math.floor(Math.random() * 0xFFFFFFFF) ^ Date.now()) >>> 0;

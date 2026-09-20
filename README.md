@@ -118,12 +118,13 @@ selects another.
   Download saves its current contents, while Eject discards them. A changed
   image is labelled `(modified)` until it is downloaded.
 - The drive indicator is outlined while its motor runs, green during reads,
-  white during writes or erasure, and dark while idle. It pulses whenever that
-  drive is active.
+  white during writes or erasure, and dark while idle. It pulses during reads
+  and writes.
 - Turbo - run the machine at up to four times normal speed while either
-  Microdrive is actively being read, including gaps between transfers. It is
-  enabled by default. Intermediate video and audio fields are discarded;
-  writes and execution outside Microdrive reads remain at normal speed.
+  Microdrive is transferring a read in the current field. It is enabled by
+  default. Intermediate video and audio fields are discarded. A motor left
+  spinning after the last read, writes, and other execution stay at normal
+  speed.
 - Load ROM - replace the 48 KiB system ROM and reset.
 - Load cart / Eject - load a raw `.rom` or `.bin` image of up to 16 KiB into
   the external ROM port, or eject the current image. Short images are padded
