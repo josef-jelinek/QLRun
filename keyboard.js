@@ -7,6 +7,7 @@
  *   y: number,
  *   w: number,
  *   h: number,
+ *   title?: string,
  * }} OverlayKeySpec
  */
 
@@ -138,21 +139,21 @@ const overlayKeys = [
     {label: "F4", code: keyF4, codes: ["F4"], x: 8, y: 110, w: 40, h: 28},
     {label: "F5", code: keyF5, codes: ["F5"], x: 8, y: 144, w: 40, h: 28},
 
-    {label: "ESC", code: keyEscape, codes: ["Escape"], x: 64, y: 8, w: 40, h: 28},
-    {label: "1", code: key1, codes: ["Digit1", "Numpad1"], x: 108, y: 8, w: 40, h: 28},
-    {label: "2", code: key2, codes: ["Digit2", "Numpad2"], x: 152, y: 8, w: 40, h: 28},
-    {label: "3", code: key3, codes: ["Digit3", "Numpad3"], x: 196, y: 8, w: 40, h: 28},
-    {label: "4", code: key4, codes: ["Digit4", "Numpad4"], x: 240, y: 8, w: 40, h: 28},
-    {label: "5", code: key5, codes: ["Digit5", "Numpad5"], x: 284, y: 8, w: 40, h: 28},
-    {label: "6", code: key6, codes: ["Digit6", "Numpad6"], x: 328, y: 8, w: 40, h: 28},
-    {label: "7", code: key7, codes: ["Digit7", "Numpad7"], x: 372, y: 8, w: 40, h: 28},
-    {label: "8", code: key8, codes: ["Digit8", "Numpad8"], x: 416, y: 8, w: 40, h: 28},
-    {label: "9", code: key9, codes: ["Digit9", "Numpad9"], x: 460, y: 8, w: 40, h: 28},
-    {label: "0", code: key0, codes: ["Digit0", "Numpad0"], x: 504, y: 8, w: 40, h: 28},
-    {label: "-", code: keyMinus, codes: ["Minus", "NumpadSubtract"], x: 548, y: 8, w: 40, h: 28},
-    {label: "=", code: keyEqual, codes: ["Equal"], x: 592, y: 8, w: 40, h: 28},
-    {label: "\u00A3", code: keyPound, codes: ["Backquote"], x: 636, y: 8, w: 40, h: 28},
-    {label: "\\", code: keyBackslash, codes: ["Backslash"], x: 680, y: 8, w: 40, h: 28},
+    {label: "ESC", code: keyEscape, codes: ["Escape"], x: 64, y: 8, w: 40, h: 28, title: "\u00A9"},
+    {label: "1", code: key1, codes: ["Digit1", "Numpad1"], x: 108, y: 8, w: 40, h: 28, title: "!"},
+    {label: "2", code: key2, codes: ["Digit2", "Numpad2"], x: 152, y: 8, w: 40, h: 28, title: "@"},
+    {label: "3", code: key3, codes: ["Digit3", "Numpad3"], x: 196, y: 8, w: 40, h: 28, title: "#"},
+    {label: "4", code: key4, codes: ["Digit4", "Numpad4"], x: 240, y: 8, w: 40, h: 28, title: "$"},
+    {label: "5", code: key5, codes: ["Digit5", "Numpad5"], x: 284, y: 8, w: 40, h: 28, title: "%"},
+    {label: "6", code: key6, codes: ["Digit6", "Numpad6"], x: 328, y: 8, w: 40, h: 28, title: "^"},
+    {label: "7", code: key7, codes: ["Digit7", "Numpad7"], x: 372, y: 8, w: 40, h: 28, title: "&"},
+    {label: "8", code: key8, codes: ["Digit8", "Numpad8"], x: 416, y: 8, w: 40, h: 28, title: "*"},
+    {label: "9", code: key9, codes: ["Digit9", "Numpad9"], x: 460, y: 8, w: 40, h: 28, title: "("},
+    {label: "0", code: key0, codes: ["Digit0", "Numpad0"], x: 504, y: 8, w: 40, h: 28, title: ")"},
+    {label: "-", code: keyMinus, codes: ["Minus", "NumpadSubtract"], x: 548, y: 8, w: 40, h: 28, title: "_"},
+    {label: "=", code: keyEqual, codes: ["Equal"], x: 592, y: 8, w: 40, h: 28, title: "+"},
+    {label: "\u00A3", code: keyPound, codes: ["Backquote"], x: 636, y: 8, w: 40, h: 28, title: "~"},
+    {label: "\\", code: keyBackslash, codes: ["Backslash"], x: 680, y: 8, w: 40, h: 28, title: "|"},
 
     {label: "TAB", code: keyTab, codes: ["Tab"], x: 64, y: 42, w: 62, h: 28},
     {label: "Q", code: letterQ, codes: ["KeyQ"], x: 130, y: 42, w: 40, h: 28},
@@ -165,8 +166,8 @@ const overlayKeys = [
     {label: "I", code: letterI, codes: ["KeyI"], x: 438, y: 42, w: 40, h: 28},
     {label: "O", code: letterO, codes: ["KeyO"], x: 482, y: 42, w: 40, h: 28},
     {label: "P", code: letterP, codes: ["KeyP"], x: 526, y: 42, w: 40, h: 28},
-    {label: "[", code: keyLBracket, codes: ["BracketLeft"], x: 570, y: 42, w: 40, h: 28},
-    {label: "]", code: keyRBracket, codes: ["BracketRight"], x: 614, y: 42, w: 40, h: 28},
+    {label: "[", code: keyLBracket, codes: ["BracketLeft"], x: 570, y: 42, w: 40, h: 28, title: "{"},
+    {label: "]", code: keyRBracket, codes: ["BracketRight"], x: 614, y: 42, w: 40, h: 28, title: "}"},
 
     {label: "CAPS", code: keyCapsLock, codes: ["CapsLock"], x: 64, y: 76, w: 73, h: 28},
     {label: "A", code: letterA, codes: ["KeyA"], x: 141, y: 76, w: 40, h: 28},
@@ -178,8 +179,8 @@ const overlayKeys = [
     {label: "J", code: letterJ, codes: ["KeyJ"], x: 405, y: 76, w: 40, h: 28},
     {label: "K", code: letterK, codes: ["KeyK"], x: 449, y: 76, w: 40, h: 28},
     {label: "L", code: letterL, codes: ["KeyL"], x: 493, y: 76, w: 40, h: 28},
-    {label: ";", code: keySemicolon, codes: ["Semicolon"], x: 537, y: 76, w: 40, h: 28},
-    {label: "'", code: keyQuote, codes: ["Quote"], x: 581, y: 76, w: 40, h: 28},
+    {label: ";", code: keySemicolon, codes: ["Semicolon"], x: 537, y: 76, w: 40, h: 28, title: ":"},
+    {label: "'", code: keyQuote, codes: ["Quote"], x: 581, y: 76, w: 40, h: 28, title: "\""},
     {label: "ENTER", code: keyEnter, codes: ["Enter", "NumpadEnter"], x: 625, y: 76, w: 73, h: 28},
 
     {label: "SHIFT", code: -1, codes: ["ShiftLeft"], x: 64, y: 110, w: 95, h: 28},
@@ -190,9 +191,9 @@ const overlayKeys = [
     {label: "B", code: letterB, codes: ["KeyB"], x: 339, y: 110, w: 40, h: 28},
     {label: "N", code: letterN, codes: ["KeyN"], x: 383, y: 110, w: 40, h: 28},
     {label: "M", code: letterM, codes: ["KeyM"], x: 427, y: 110, w: 40, h: 28},
-    {label: ",", code: keyComma, codes: ["Comma"], x: 471, y: 110, w: 40, h: 28},
-    {label: ".", code: keyPeriod, codes: ["Period", "NumpadDecimal"], x: 515, y: 110, w: 40, h: 28},
-    {label: "/", code: keySlash, codes: ["Slash", "NumpadDivide"], x: 559, y: 110, w: 40, h: 28},
+    {label: ",", code: keyComma, codes: ["Comma"], x: 471, y: 110, w: 40, h: 28, title: "<"},
+    {label: ".", code: keyPeriod, codes: ["Period", "NumpadDecimal"], x: 515, y: 110, w: 40, h: 28, title: ">"},
+    {label: "/", code: keySlash, codes: ["Slash", "NumpadDivide"], x: 559, y: 110, w: 40, h: 28, title: "?"},
     {label: "SHIFT", code: -1, codes: ["ShiftRight"], x: 603, y: 110, w: 95, h: 28},
 
     {label: "CTRL", code: -2, codes: ["ControlLeft", "ControlRight"], x: 64, y: 144, w: 73, h: 28},
@@ -385,6 +386,9 @@ function makeHit(kbd, spec) {
     hit.style.width = (spec.w * 100 / keyArtW) + "%";
     hit.style.height = (spec.h * 100 / keyArtH) + "%";
     hit.textContent = spec.label;
+    if (spec.title !== undefined) {
+        hit.title = spec.title;
+    }
     kbd.overlayKeys.push({el: hit, code: spec.code});
     hit.oncontextmenu = function (e) {
         e.preventDefault();
