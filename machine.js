@@ -74,6 +74,7 @@ const qlayDataPreambleOffset = 44;
 const qlayDataOffset = 52;
 const qlayGapOffset = 566;
 const qlayFormatGapOffset = 652;
+const microdriveEmptyGapPairs = (qlaySectorSize - qlayGapOffset) / 2;
 const qlayBadFileId = 0xFF;
 const soundIpcTickHz = 22917;
 const soundPitchFractionScale = 10;
@@ -1825,6 +1826,10 @@ function microdriveAdvanceActive(m) {
             m.mdv.gapActive = false;
             return;
         }
+        // Treat sustained silence as a gap without interrupting a slow select chain.
+        if (m.cpu.cycleCount - m.mdv.cycleAnchor < m.mdv.pairCycles * microdriveEmptyGapPairs) {
+            return;
+        }
         if (!m.mdv.gapActive) {
             m.mdv.gapActive = true;
             microdriveRaiseGapInterrupt(m);
@@ -1997,11 +2002,8 @@ function microdriveControlWrite(m, data) {
             m.mdv.latchedTracks = 0;
             m.mdv.transmitFullUntil = 0;
             m.mdv.dataReady = false;
+            m.mdv.gapActive = false;
             m.mdv.cycleAnchor = m.cpu.cycleCount;
-            if (nextMask !== 0 && microdriveActiveUnit(m) < 0 && !m.mdv.gapActive) {
-                m.mdv.gapActive = true;
-                microdriveRaiseGapInterrupt(m);
-            }
         }
     }
     if (((m.mdv.control ^ data) & microdriveReadWriteBit) !== 0) {

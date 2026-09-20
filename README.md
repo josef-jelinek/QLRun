@@ -55,6 +55,7 @@ Missing or invalid parameters keep the normal defaults:
 | `ntsc` | `0` |
 | `ram` | `128` |
 | `turbo` | `1` |
+| `stretch` | `0` |
 
 For example, `?crt=0&keyboard=1&ntsc=1&ram=640&rom=jsu` starts with the CRT
 filter off, the onscreen keyboard shown, the US machine, and 640 KiB of RAM.
@@ -109,6 +110,9 @@ selects another.
   the second RAM expansion turns the card off; selecting either card with both
   expansions active turns +256K off, leaving 640 KiB. The selected card wins
   the same conflict during startup when its ROM is available.
+- Stretch - fill the entire available display area, disregarding aspect ratio
+  and integer scaling. It applies with CRT enabled or disabled and in both
+  fullscreen and windowed modes.
 - Fullscreen - show only the fullscreen emulator canvas (also F11).
 - MDV1 / MDV2 - each physical Microdrive has independent New, Load, Download,
   and Eject controls. Load inserts a raw QLAY `.mdv` without resetting the
@@ -170,8 +174,8 @@ display using integer-sized blocks of physical display pixels. Mode 4 pixels
 are twice as tall as they are wide; Mode 8's duplicate texture columns collapse
 back to its logical width and its logical pixels are square. Both modes use the
 same canvas size, so changing modes does not resize the display. The optional
-CRT mode fills the available 4:3 area. Palette bits are blue, red, green as on
-the QL.
+CRT mode fills the available 4:3 area. Stretch mode overrides both layouts and
+fills the complete display slot. Palette bits are blue, red, green as on the QL.
 
 ## Repository files
 

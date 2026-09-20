@@ -20,6 +20,7 @@ const crtViewH = 384;
  * @typedef {{
  *   gl: WebGL2RenderingContext,
  *   crtOn: boolean,
+ *   stretchOn: boolean,
  *   pixelRatio: number,
  *   crtLoc: WebGLUniformLocation,
  *   ntscLoc: WebGLUniformLocation,
@@ -77,7 +78,18 @@ export function setCrt(gfx, on) {
 }
 
 /**
- * Fit the canvas to its available slot using filtered or integer scaling.
+ * Enable or disable full-slot stretching and update the canvas dimensions.
+ *
+ * @param {Gfx} gfx
+ * @param {boolean} on
+ */
+export function setStretch(gfx, on) {
+    gfx.stretchOn = on;
+    resize(gfx);
+}
+
+/**
+ * Fit the canvas to its available slot using stretched, filtered, or integer scaling.
  *
  * @param {Gfx} gfx
  */
@@ -101,6 +113,22 @@ export function resize(gfx) {
         if (Number.isFinite(padY)) {
             slotH -= padY;
         }
+    }
+    if (gfx.stretchOn) {
+        const width = Math.max(slotW, 1);
+        const height = Math.max(slotH, 1);
+        canvas.style.width = width + "px";
+        canvas.style.height = height + "px";
+        const bufferWidth = Math.max(Math.round(width * pixelRatio), 1);
+        const bufferHeight = Math.max(Math.round(height * pixelRatio), 1);
+        if (canvas.width !== bufferWidth) {
+            canvas.width = bufferWidth;
+        }
+        if (canvas.height !== bufferHeight) {
+            canvas.height = bufferHeight;
+        }
+        gfx.gl.viewport(0, 0, bufferWidth, bufferHeight);
+        return;
     }
     if (gfx.crtOn) {
         let width = slotW;
@@ -213,7 +241,7 @@ function createGfx(canvas, vertGLSL, fragGLSL) {
     gl.uniform1i(crtLoc, 0);
     gl.uniform1i(ntscLoc, 0);
     gl.viewport(0, 0, frameW, frameH);
-    return {gl, crtOn: false, pixelRatio: 0, crtLoc, ntscLoc};
+    return {gl, crtOn: false, stretchOn: false, pixelRatio: 0, crtLoc, ntscLoc};
 }
 
 /**

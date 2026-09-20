@@ -67,6 +67,7 @@ const ui = {
     ram256:           /** @type {HTMLInputElement} */  (document.getElementById("ram-256")),
     ram512:           /** @type {HTMLInputElement} */  (document.getElementById("ram-512")),
     turbo:            /** @type {HTMLInputElement} */  (document.getElementById("turbo")),
+    stretch:          /** @type {HTMLInputElement} */  (document.getElementById("stretch")),
     fullscreenToggle: /** @type {HTMLButtonElement} */ (document.getElementById("fullscreen-toggle")),
 };
 
@@ -126,6 +127,7 @@ applySwitchParamValue(ui.crt, query.get("crt") ?? "");
 applyQsoundParamValue(query.get("qsound") ?? "");
 applySwitchParamValue(ui.stereo, query.get("stereo") ?? "");
 applySwitchParamValue(ui.turbo, query.get("turbo") ?? "");
+applySwitchParamValue(ui.stretch, query.get("stretch") ?? "");
 setKeyboardVisibility(ui.keyboardToggle.checked);
 
 ui.reset.onclick = function () {
@@ -174,6 +176,13 @@ ui.ram512.onchange = updateRamSize;
 
 ui.turbo.onchange = function () {
     updateUrlParam("turbo", ui.turbo.checked);
+};
+
+ui.stretch.onchange = function () {
+    updateUrlParam("stretch", ui.stretch.checked);
+    if (gfx !== null) {
+        screen.setStretch(gfx, ui.stretch.checked);
+    }
 };
 
 ui.fullscreenToggle.onclick = function () {
@@ -528,6 +537,7 @@ boot.loadShaders(function (err, shaders) {
                 return;
             }
             screen.setCrt(initializedGfx, ui.crt.checked);
+            screen.setStretch(initializedGfx, ui.stretch.checked);
             showInfo(ui.initInfo, "Ready.");
         },
     );
