@@ -6,7 +6,8 @@ QLRun is a browser emulator for the Sinclair QL. It loads a JS or JSU
 system ROM from `roms/` when those files are available, paints the ZX8301
 display, talks to the ZX8302 IPC for keyboard, beeper, and Microdrive, and
 emulates the original AY-3-8910 QSound card and the YM2203-compatible QSound2.
-It also mounts writable QLWA `.win` hard disk images as `WIN1_`.
+It also mounts writable QLWA `.win` hard disk images as `WIN1_` and read-only
+QL5A/QL5B `.img` floppy images as `FLP1_`.
 
 No build, package manager, or external library is required. The page uses
 plain JavaScript. `tsconfig.json` is only for optional static checking during
@@ -128,6 +129,10 @@ selects another.
   the external ROM port, or eject the current image. Short images are padded
   with zeroes. Loading or ejecting resets the machine so QDOS detects the
   change.
+- FLP1 - Load mounts a QL5A or QL5B floppy `.img` without resetting the
+  machine. The image is read-only to the guest. Download saves the mounted
+  copy; Eject discards it. The bundled JS and JSU ROMs expose it as `FLP1_`;
+  an unsupported ROM is reported in the media row.
 - WIN1 - Load mounts a QLWA `.win` hard disk image without resetting the
   machine. Guest file creation, deletion, truncation, and writes update its
   in-memory image. Download saves the current image and clears the
@@ -180,11 +185,12 @@ the QL.
 - `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, QSound/QSound2, and frame run.
 - `cpu.js` - MC68008 state and execution core.
 - `hdd.js` - writable QLWA hard disk image and QDOS `WIN1_` host driver.
+- `fdd.js` - read-only QL5A/QL5B floppy image and QDOS `FLP1_` host driver.
 - `ay.js` - AY-3-8910/YM2149 PSG synthesis used by the sound cards.
 - `fm.js` - YM2203 FM synthesis used by QSound2.
 - `keyboard.js` - host keyboard mapping and the overlay.
 - `zip.js` - ZIP listing and entry extraction.
-- `media.js` - Microdrive, hard disk, ROM, and junk file-name rules.
+- `media.js` - Microdrive, floppy, hard disk, ROM, and junk file-name rules.
 - `sound.js` - Web Audio host and worklet loader.
 - `sound.worklet.js` - mixes beeper and sound-card planes on the audio thread.
 - `audioworklet.d.ts` - check-only declarations for the AudioWorklet globals.

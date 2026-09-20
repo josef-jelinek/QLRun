@@ -48,6 +48,11 @@ const ui = {
     downloadHdd:      /** @type {HTMLButtonElement} */ (document.getElementById("download-hdd")),
     ejectHdd:         /** @type {HTMLButtonElement} */ (document.getElementById("eject-hdd")),
     hddInfo:          /** @type {HTMLElement} */       (document.getElementById("hdd-info")),
+    loadFdd:          /** @type {HTMLButtonElement} */ (document.getElementById("load-fdd")),
+    fileFdd:          /** @type {HTMLInputElement} */  (document.getElementById("file-fdd")),
+    downloadFdd:      /** @type {HTMLButtonElement} */ (document.getElementById("download-fdd")),
+    ejectFdd:         /** @type {HTMLButtonElement} */ (document.getElementById("eject-fdd")),
+    fddInfo:          /** @type {HTMLElement} */       (document.getElementById("fdd-info")),
     reset:            /** @type {HTMLButtonElement} */ (document.getElementById("reset")),
     screenSlot:       /** @type {HTMLElement} */       (document.getElementById("screen-slot")),
     screen:           /** @type {HTMLCanvasElement} */ (document.getElementById("screen")),
@@ -106,6 +111,7 @@ const mdvActivity = [
     {readCount: 0, writeCount: 0, until: 0, state: "idle", inserted: false, name: "", modified: false},
 ];
 const hddStatus = {inserted: false, name: "", modified: false, driverReady: false};
+const fddStatus = {inserted: false, name: "", driverReady: false};
 let keyboardVisible = false;
 let screenOnly = false;
 let screenOnlyFallback = false;
@@ -443,6 +449,60 @@ ui.downloadHdd.onclick = function () {
 ui.ejectHdd.onclick = function () {
     machine.ejectHdd(ql);
     refreshHddStatus();
+};
+
+ui.loadFdd.onclick = function () {
+    ui.fileFdd.click();
+};
+
+ui.fileFdd.onchange = function () {
+    const file = ui.fileFdd.files?.[0];
+    ui.fileFdd.value = "";
+    if (file === undefined) {
+        return;
+    }
+    io.readFile(file, "arraybuffer", function (err, buf) {
+        if (err !== null) {
+            showError(ui.fddInfo, err);
+            return;
+        }
+        if (!(buf instanceof ArrayBuffer)) {
+            showError(ui.fddInfo, "Empty read.");
+            return;
+        }
+        const fddErr = machine.insertFdd(ql, buf, file.name);
+        if (fddErr !== null) {
+            showError(ui.fddInfo, fddErr);
+            return;
+        }
+        refreshFddStatus();
+    });
+};
+
+ui.downloadFdd.onclick = function () {
+    const saved = machine.saveFdd(ql);
+    if (saved === null) {
+        return;
+    }
+    let name = saved.name.split("/").pop() ?? "";
+    name = name.split("\\").pop() ?? "";
+    if (name === "") {
+        name = "flp1.img";
+    } else if (!media.isImgName(name)) {
+        name += ".img";
+    }
+    const buffer = /** @type {ArrayBuffer} */ (saved.bytes.buffer);
+    const url = URL.createObjectURL(new Blob([buffer], {type: "application/octet-stream"}));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    URL.revokeObjectURL(url);
+};
+
+ui.ejectFdd.onclick = function () {
+    machine.ejectFdd(ql);
+    refreshFddStatus();
 };
 
 boot.loadShaders(function (err, shaders) {
@@ -888,6 +948,7 @@ function onFrame(now) {
     }
     refreshMdvActivity(now);
     refreshHddStatus();
+    refreshFddStatus();
     refreshSoundStatus(now);
     if (gfx !== null) {
         screen.draw(gfx, ql.pixels, ql.displayNtsc);
@@ -1028,6 +1089,31 @@ function refreshHddStatus() {
     hddStatus.name = info.name;
     hddStatus.modified = info.modified;
     hddStatus.driverReady = info.driverReady;
+}
+
+/** Keep floppy controls synchronized with the mounted QL5A/QL5B image. */
+function refreshFddStatus() {
+    const info = machine.fddInfo(ql);
+    if (
+        info.inserted === fddStatus.inserted &&
+        info.name === fddStatus.name &&
+        info.driverReady === fddStatus.driverReady
+    ) {
+        return;
+    }
+    let label = "No disk.";
+    if (info.inserted) {
+        label = info.name;
+        if (!info.driverReady) {
+            label += " (FLP1 unavailable)";
+        }
+    }
+    showInfo(ui.fddInfo, label);
+    ui.downloadFdd.disabled = !info.inserted;
+    ui.ejectFdd.disabled = !info.inserted;
+    fddStatus.inserted = info.inserted;
+    fddStatus.name = info.name;
+    fddStatus.driverReady = info.driverReady;
 }
 
 /** @param {number} now */

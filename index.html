@@ -249,9 +249,6 @@ body.keyboard-splitting {
     .media-group {
         flex-basis: 100%;
     }
-    .media-placeholder {
-        display: none;
-    }
 }
 </style>
 </head>
@@ -306,7 +303,14 @@ body.keyboard-splitting {
         </div>
     </div>
     <div class="rowbox media-row">
-        <div class="media-group media-placeholder"></div>
+        <div class="media-group">
+            <strong>FLP1</strong>
+            <button id="load-fdd">Load</button>
+            <input id="file-fdd" type="file" accept=".img" style="display: none">
+            <button id="download-fdd" disabled>Download</button>
+            <button id="eject-fdd" disabled>Eject</button>
+            <div id="fdd-info" class="media-info">No disk.</div>
+        </div>
         <div class="media-group media-group-right">
             <div id="hdd-info" class="media-info">No hard disk.</div>
             <button id="download-hdd" disabled>Download</button>

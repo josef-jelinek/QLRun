@@ -83,6 +83,7 @@ const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
  *   readHwLongClock: function(): number,
  *   writeHwByte: function(number, number): void,
  *   hdd: import("./hdd.js").State,
+ *   fdd: import("./fdd.js").State,
  *   afterInstruction: function(): void,
  *   resetHardware: function(): void,
  * }} CpuBus

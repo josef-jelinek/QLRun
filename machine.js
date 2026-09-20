@@ -1,5 +1,6 @@
 import * as ay from "./ay.js";
 import * as cpu from "./cpu.js";
+import * as fdd from "./fdd.js";
 import * as fm from "./fm.js";
 import * as hdd from "./hdd.js";
 
@@ -214,6 +215,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  *     fm: import("./fm.js").State,
  *   },
  *   hdd: import("./hdd.js").State,
+ *   fdd: import("./fdd.js").State,
  *   mdv: {
  *     cartridges: MicrodriveCartridge[],
  *     selectedMask: number,
@@ -243,6 +245,7 @@ export function create(keys) {
     const audioN = audioCap;
     const mem = new Uint8Array(cpu.addressSpaceBytes);
     const hddState = hdd.create();
+    const fddState = fdd.create();
     /** @type {MicrodriveCartridge[]} */
     const cartridges = [];
     for (let i = 0; i < microdriveUnitCount; i += 1) {
@@ -283,6 +286,7 @@ export function create(keys) {
                 writeHwByte(m, addr, d);
             },
             hdd: hddState,
+            fdd: fddState,
             afterInstruction: function () {
                 microdriveAdvanceActive(m);
             },
@@ -360,6 +364,7 @@ export function create(keys) {
             fm: fm.create(),
         },
         hdd: hddState,
+        fdd: fddState,
         mdv: {
             cartridges,
             selectedMask: 0,
@@ -401,6 +406,7 @@ export function reset(m) {
     m.theInt = 0;
     stopBeep(m);
     hdd.prepareReset(m.hdd, m.mem);
+    fdd.prepareReset(m.fdd, m.mem);
     cpu.reset(m.cpu, m.cpuBus);
     resetQsound(m);
     resetAudioClock(m);
@@ -455,6 +461,33 @@ export function ejectHdd(m) {
 /** @param {Machine} m @returns {{inserted: boolean, name: string, modified: boolean, driverReady: boolean}} */
 export function hddInfo(m) {
     return hdd.info(m.hdd);
+}
+
+/**
+ * Insert a QL5A or QL5B floppy dump as FLP1_. Does not reset the CPU.
+ *
+ * @param {Machine} m
+ * @param {ArrayBuffer | Uint8Array} bytes
+ * @param {string} name
+ * @returns {string | null}
+ */
+export function insertFdd(m, bytes, name) {
+    return fdd.insert(m.fdd, bytes, name);
+}
+
+/** @param {Machine} m @returns {{name: string, bytes: Uint8Array} | null} */
+export function saveFdd(m) {
+    return fdd.save(m.fdd);
+}
+
+/** @param {Machine} m */
+export function ejectFdd(m) {
+    fdd.eject(m.fdd);
+}
+
+/** @param {Machine} m @returns {{inserted: boolean, name: string, driverReady: boolean}} */
+export function fddInfo(m) {
+    return fdd.info(m.fdd);
 }
 
 /**

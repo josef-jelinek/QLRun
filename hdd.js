@@ -1,4 +1,5 @@
 import * as cpu from "./cpu.js";
+import * as fdd from "./fdd.js";
 
 const sectorSize = 512;
 const fileHeaderSize = 64;
@@ -64,6 +65,7 @@ const qerrOv = -18;
 const qerrNi = -19;
 const qerrRo = -20;
 const openDelete = -1;
+const openOld = 0;
 const openShare = 1;
 const openNew = 2;
 const openOverwrite = 3;
@@ -296,6 +298,7 @@ function romInit(c, bus) {
             state.driverReady = c.exception === 0 && c.reg[0] === 0;
         }
     }
+    fdd.linkDriver(c, bus);
     cpu.writePointerWord(bus.mem, qdosPollMaskAddr, savedPollMask);
     c.reg.set(saved);
     cpu.executeOpcode(c, bus, originalRomInitOpcode);
@@ -324,10 +327,10 @@ function driverOpen(c, bus) {
     }
     const name = readQdosName(bus.mem, data + channelNameOffset);
     let key = signed8(bus.mem[channelBase + 28]);
-    if (name === "" && key === openShare) {
+    if (name === "" && (key === openOld || key === openShare)) {
         key = openDirectory;
     }
-    if (name === null || (key !== openDelete && (key < openShare || key > openDirectory))) {
+    if (name === null || (key !== openDelete && (key < openOld || key > openDirectory))) {
         c.reg[0] = qerrBp;
         returnFromDriver(c, bus);
         return;
