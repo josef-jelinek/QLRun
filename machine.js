@@ -1317,7 +1317,7 @@ function startBeep(m, decoded) {
     if (beep.left !== 0 && (beep.pitchLeft === 0 || beep.pitchLeft > beep.left)) {
         beep.pitchLeft = beep.left;
     }
-    if (beep.fuzzAmount > soundSignedNibbleMax) {
+    if (beep.fuzzAmount !== 0) {
         beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
     }
     beep.halfCycle = beepHalfSampleCount(m, beep);
@@ -1430,7 +1430,7 @@ function renderBeepSample(m) {
     }
     if (beep.waveState === 0) {
         beep.waveState = -1;
-        if (beep.fuzzAmount > soundSignedNibbleMax) {
+        if (beep.fuzzAmount !== 0) {
             beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
             beep.halfCycle = beepHalfSampleCount(m, beep);
         }
@@ -1440,7 +1440,7 @@ function renderBeepSample(m) {
     beep.cyclePoint += 1;
     if (beep.cyclePoint >= beep.halfCycle) {
         beep.waveState *= -1;
-        if (beep.fuzzAmount > soundSignedNibbleMax) {
+        if (beep.fuzzAmount !== 0) {
             beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
             beep.halfCycle = beepHalfSampleCount(m, beep);
         }
@@ -1450,6 +1450,8 @@ function renderBeepSample(m) {
 }
 
 /**
+ * Step the IPC pitch. Wrap 0 holds the far end of the sweep; wrap 1-14 restarts; wrap 15 loops.
+ *
  * @param {Machine} m
  * @param {Machine["beep"]} beep
  */
@@ -1460,7 +1462,9 @@ function updateBeepPitch(m, beep) {
     } else if (change !== 0 && beep.direction !== 0) {
         const step = change * beep.direction;
         const tryPitch = beep.pitch + step;
-        if (tryPitch > beep.pitch1 && tryPitch < beep.pitch2) {
+        const lo = Math.min(beep.pitch1, beep.pitch2);
+        const hi = Math.max(beep.pitch1, beep.pitch2);
+        if (tryPitch >= lo && tryPitch <= hi) {
             beep.pitch = tryPitch;
         } else if (beep.wrapCount > 0) {
             beep.pitch = beep.pitch1;
@@ -1471,10 +1475,9 @@ function updateBeepPitch(m, beep) {
                 beep.wrapCount -= 1;
             }
         } else {
-            if (step < 0) {
-                beep.pitch = beep.pitch1;
-            } else {
-                beep.pitch = beep.pitch2;
+            beep.pitch = lo;
+            if (step > 0) {
+                beep.pitch = hi;
             }
             beep.direction = 0;
         }
@@ -1492,7 +1495,10 @@ function updateBeepPitch(m, beep) {
 
 /** @param {Machine} m @param {Machine["beep"]} beep @returns {number} */
 function beepHalfSampleCount(m, beep) {
-    const pitch = (beep.pitch + beep.random + beep.fuzz - 1) & 0xFF;
+    let pitch = beep.pitch + beep.random + beep.fuzz;
+    if (pitch < 0) {
+        pitch = 0;
+    }
     const units = pitch * soundPitchFractionScale + soundPitchBaseUnits;
     return Math.max(Math.round(m.sampleRate * units / soundPitchDivisor), 1);
 }
