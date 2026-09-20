@@ -269,7 +269,6 @@ export function create(keys) {
         cpu: cpu.create(),
         cpuBus: {
             mem,
-            zx8301ContentionEnabled: true,
             isUnmapped: function (addr) {
                 return isUnmapped(m, addr);
             },
@@ -285,8 +284,6 @@ export function create(keys) {
             writeHwByte: function (addr, d) {
                 writeHwByte(m, addr, d);
             },
-            hdd: hddState,
-            fdd: fddState,
             afterInstruction: function () {
                 microdriveAdvanceActive(m);
             },

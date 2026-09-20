@@ -76,14 +76,11 @@ const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
  *
  * @typedef {{
  *   mem: Uint8Array,
- *   zx8301ContentionEnabled: boolean,
  *   isUnmapped: function(number): boolean,
  *   isHw: function(number): boolean,
  *   readHwByte: function(number): number,
  *   readHwLongClock: function(): number,
  *   writeHwByte: function(number, number): void,
- *   hdd: import("./hdd.js").State,
- *   fdd: import("./fdd.js").State,
  *   afterInstruction: function(): void,
  *   resetHardware: function(): void,
  * }} CpuBus
@@ -838,7 +835,7 @@ function bitOpEaIsValid(operation, staticBit, mode, r) {
  */
 function zx8301ContendsAddress(c, bus, addr) {
     const address = addr & addrMask;
-    return bus.zx8301ContentionEnabled && address >= qdosUserRamBase && address < zx8301OnboardRamEnd;
+    return address >= qdosUserRamBase && address < zx8301OnboardRamEnd;
 }
 
 /**

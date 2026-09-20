@@ -70,8 +70,6 @@ const openShare = 1;
 const openNew = 2;
 const openOverwrite = 3;
 const openDirectory = 4;
-let handlersInstalled = false;
-
 /**
  * @typedef {import("./cpu.js").Cpu} Cpu
  * @typedef {import("./cpu.js").CpuBus} CpuBus
@@ -105,14 +103,16 @@ let handlersInstalled = false;
  * }} State
  */
 
+/** @type {State | null} */
+let attached = null;
+
 /**
- * Empty unmounted drive. Opcode handlers are installed once per page load.
+ * Empty unmounted drive.
  *
  * @returns {State}
  */
 export function create() {
-    installHandlers();
-    return {
+    attached = {
         image: new Uint8Array(0),
         name: "",
         inserted: false,
@@ -126,6 +126,7 @@ export function create() {
         mapSectors: 0,
         rootCluster: 0,
     };
+    return attached;
 }
 
 /**
@@ -252,10 +253,6 @@ export function info(state) {
 }
 
 function installHandlers() {
-    if (handlersInstalled) {
-        return;
-    }
-    handlersInstalled = true;
     cpu.setOpcode(romInitOpcode, romInit);
     cpu.setOpcode(driverIoOpcode, driverIo);
     cpu.setOpcode(driverOpenOpcode, driverOpen);
@@ -266,8 +263,8 @@ function installHandlers() {
 
 /** @param {Cpu} c @param {CpuBus} bus */
 function romInit(c, bus) {
-    const state = bus.hdd;
-    if (state.romInitAddr < 0) {
+    const state = attached;
+    if (state === null || state.romInitAddr < 0) {
         return;
     }
     cpu.writePointerWord(bus.mem, state.romInitAddr, originalRomInitOpcode);
@@ -306,8 +303,8 @@ function romInit(c, bus) {
 
 /** @param {Cpu} c @param {CpuBus} bus */
 function driverOpen(c, bus) {
-    const state = bus.hdd;
-    if (!state.inserted) {
+    const state = attached;
+    if (state === null || !state.inserted) {
         c.reg[0] = qerrNf;
         returnFromDriver(c, bus);
         return;
@@ -391,9 +388,11 @@ function driverOpen(c, bus) {
 
 /** @param {Cpu} c @param {CpuBus} bus */
 function driverClose(c, bus) {
-    const state = bus.hdd;
+    const state = attached;
     const channelBase = c.reg[8] & qdosChannelMask;
-    state.channels.delete(channelBase);
+    if (state !== null) {
+        state.channels.delete(channelBase);
+    }
     const data = channelBase + channelDataOffset;
     cpu.writePointerWord(bus.mem, data + channelOpenOffset, 0);
     cpu.writePointerLong(bus.mem, data + channelFileIdOffset, 0);
@@ -418,10 +417,10 @@ function driverClose(c, bus) {
 
 /** @param {Cpu} c @param {CpuBus} bus */
 function driverIo(c, bus) {
-    const state = bus.hdd;
+    const state = attached;
     const channelBase = c.reg[8] & qdosChannelMask;
-    const channel = state.channels.get(channelBase);
-    if (channel === undefined || channel.generation !== state.generation || !state.inserted) {
+    const channel = state === null ? undefined : state.channels.get(channelBase);
+    if (state === null || channel === undefined || channel.generation !== state.generation || !state.inserted) {
         c.reg[0] = qerrNo;
         returnFromDriver(c, bus);
         return;
@@ -1176,3 +1175,5 @@ function signed16(value) {
     }
     return value;
 }
+
+installHandlers();

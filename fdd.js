@@ -82,8 +82,6 @@ const defaultHdTrackMap = Uint8Array.of(
     0x86, 0x88, 0x8A, 0x8C, 0x8E, 0x90, 1, 3, 5, 7, 9, 11,
     13, 15, 17, 0x81, 0x83, 0x85, 0x87, 0x89, 0x8B, 0x8D, 0x8F, 0x91,
 );
-let handlersInstalled = false;
-
 /**
  * @typedef {import("./cpu.js").Cpu} Cpu
  * @typedef {import("./cpu.js").CpuBus} CpuBus
@@ -119,14 +117,17 @@ let handlersInstalled = false;
  * }} State
  */
 
+/** @type {State | null} */
+let attached = null;
+
 /**
- * Empty unmounted floppy. Opcode handlers are installed once per page load.
+ * Empty unmounted floppy.
  *
  * @returns {State}
  */
 export function create() {
-    installHandlers();
-    return emptyState();
+    attached = emptyState();
+    return attached;
 }
 
 /**
@@ -136,7 +137,10 @@ export function create() {
  * @param {CpuBus} bus
  */
 export function linkDriver(c, bus) {
-    const state = bus.fdd;
+    const state = attached;
+    if (state === null) {
+        return;
+    }
     const name = "FLP";
     const linkSize = 38;
     const saved = new Int32Array(c.reg);
@@ -255,22 +259,7 @@ export function info(state) {
     };
 }
 
-/**
- * Look up a root-relative QDOS name on the mounted image.
- *
- * @param {State} state
- * @param {string} name
- * @returns {boolean}
- */
-export function hasFile(state, name) {
-    return findFile(state, name, false) !== null;
-}
-
 function installHandlers() {
-    if (handlersInstalled) {
-        return;
-    }
-    handlersInstalled = true;
     cpu.setOpcode(driverIoOpcode, driverIo);
     cpu.setOpcode(driverOpenOpcode, driverOpen);
     cpu.setOpcode(driverCloseOpcode, driverClose);
@@ -280,8 +269,8 @@ function installHandlers() {
 
 /** @param {Cpu} c @param {CpuBus} bus */
 function driverOpen(c, bus) {
-    const state = bus.fdd;
-    if (!state.inserted) {
+    const state = attached;
+    if (state === null || !state.inserted) {
         c.reg[0] = qerrNf;
         returnFromDriver(c, bus);
         return;
@@ -354,9 +343,11 @@ function driverOpen(c, bus) {
 
 /** @param {Cpu} c @param {CpuBus} bus */
 function driverClose(c, bus) {
-    const state = bus.fdd;
+    const state = attached;
     const channelBase = c.reg[8] & qdosChannelMask;
-    state.channels.delete(channelBase);
+    if (state !== null) {
+        state.channels.delete(channelBase);
+    }
     const data = channelBase + channelDataOffset;
     cpu.writePointerWord(bus.mem, data + channelOpenOffset, 0);
     cpu.writePointerLong(bus.mem, data + channelFileIdOffset, 0);
@@ -381,10 +372,10 @@ function driverClose(c, bus) {
 
 /** @param {Cpu} c @param {CpuBus} bus */
 function driverIo(c, bus) {
-    const state = bus.fdd;
+    const state = attached;
     const channelBase = c.reg[8] & qdosChannelMask;
-    const channel = state.channels.get(channelBase);
-    if (channel === undefined || channel.generation !== state.generation || !state.inserted) {
+    const channel = state === null ? undefined : state.channels.get(channelBase);
+    if (state === null || channel === undefined || channel.generation !== state.generation || !state.inserted) {
         c.reg[0] = qerrNo;
         returnFromDriver(c, bus);
         return;
@@ -931,3 +922,5 @@ function signed16(value) {
     }
     return value;
 }
+
+installHandlers();
