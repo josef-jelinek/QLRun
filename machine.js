@@ -1,23 +1,23 @@
 import * as ay from "./ay.js";
 import * as cpu from "./cpu.js";
-import * as fdd from "./fdd.js";
+import * as disk from "./disk.js";
 import * as fm from "./fm.js";
-import * as hdd from "./hdd.js";
 
 export const sysRomSize = 0xC000;
-export const romCartridgeSize = 0x4000;
 export const qsoundRomSize = 0x2000;
 export const qsoundOff = 0;
 export const qsoundOriginal = 1;
 export const qsound2 = 2;
 export const defaultRamKb = 128;
-export const frameW = 512;
-export const frameH = 256;
-export const screenLineBytes = 128;
-export const screenBytes = screenLineBytes * frameH;
-export const screenBase = cpu.qdosUserRamBase;
-export const secondScreenBase = screenBase + screenBytes;
-export const qdosUnixEpochDelta = 283996800;
+
+const romCartridgeSize = 0x4000;
+const frameW = 512;
+const frameH = 256;
+const screenLineBytes = 128;
+const screenBytes = screenLineBytes * frameH;
+const screenBase = cpu.qdosUserRamBase;
+const secondScreenBase = screenBase + screenBytes;
+const qdosUnixEpochDelta = 283996800;
 
 const qdosClockBaseAddr = cpu.internalIoBase;
 const ipcWriteAddr = qdosClockBaseAddr + 3;
@@ -215,8 +215,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  *     ay: import("./ay.js").State,
  *     fm: import("./fm.js").State,
  *   },
- *   hdd: import("./hdd.js").State,
- *   fdd: import("./fdd.js").State,
+ *   disks: import("./disk.js").Disks,
  *   mdv: {
  *     cartridges: MicrodriveCartridge[],
  *     selectedMask: number,
@@ -245,24 +244,10 @@ for (let ink = 0; ink < 16; ink += 1) {
 export function create(keys) {
     const audioN = audioCap;
     const mem = new Uint8Array(cpu.addressSpaceBytes);
-    const hddState = hdd.create();
-    const fddState = fdd.create();
     /** @type {MicrodriveCartridge[]} */
     const cartridges = [];
     for (let i = 0; i < microdriveUnitCount; i += 1) {
-        cartridges.push({
-            image: new Uint8Array(0),
-            imageLen: 0,
-            byteOffset: 0,
-            inserted: false,
-            name: "",
-            unformatted: false,
-            formatVerifying: false,
-            formatVerified: false,
-            modified: false,
-            readCount: 0,
-            writeCount: 0,
-        });
+        cartridges.push(emptyCartridge());
     }
     /** @type {Machine} */
     const m = {
@@ -279,9 +264,7 @@ export function create(keys) {
             readHwByte: function (addr) {
                 return readHwByte(m, addr);
             },
-            readHwLongClock: function () {
-                return readQdosClock(m);
-            },
+            readHwLongClock: readQdosClock,
             writeHwByte: function (addr, d) {
                 writeHwByte(m, addr, d);
             },
@@ -361,8 +344,7 @@ export function create(keys) {
             ay: ay.create(qsoundAyTickCycles),
             fm: fm.create(),
         },
-        hdd: hddState,
-        fdd: fddState,
+        disks: disk.create(),
         mdv: {
             cartridges,
             selectedMask: 0,
@@ -381,7 +363,7 @@ export function create(keys) {
         },
         romLoaded: false,
     };
-    applyTiming(m);
+    setNtsc(m, false);
     fillRam(m);
     resetAudioClock(m);
     return m;
@@ -403,8 +385,7 @@ export function reset(m) {
     m.audio.n = 0;
     m.theInt = 0;
     stopBeep(m);
-    hdd.prepareReset(m.hdd, m.mem);
-    fdd.prepareReset(m.fdd, m.mem);
+    disk.prepareReset(m.disks, m.mem);
     cpu.reset(m.cpu, m.cpuBus);
     resetQsound(m);
     resetAudioClock(m);
@@ -430,62 +411,8 @@ export function setSysRom(m, bytes) {
     m.mem.fill(0, 0, sysRomSize);
     m.mem.set(src, 0);
     m.romLoaded = true;
-    hdd.patchRom(m.hdd, m.mem);
+    disk.patchRom(m.disks, m.mem);
     return null;
-}
-
-/**
- * Insert a writable QLWA hard disk image as WIN1_.
- *
- * @param {Machine} m
- * @param {ArrayBuffer | Uint8Array} bytes
- * @param {string} name
- * @returns {string | null}
- */
-export function insertHdd(m, bytes, name) {
-    return hdd.insert(m.hdd, bytes, name);
-}
-
-/** @param {Machine} m @returns {{name: string, bytes: Uint8Array} | null} */
-export function saveHdd(m) {
-    return hdd.save(m.hdd);
-}
-
-/** @param {Machine} m */
-export function ejectHdd(m) {
-    hdd.eject(m.hdd);
-}
-
-/** @param {Machine} m @returns {{inserted: boolean, name: string, modified: boolean, driverReady: boolean}} */
-export function hddInfo(m) {
-    return hdd.info(m.hdd);
-}
-
-/**
- * Insert a QL5A or QL5B floppy dump as FLP1_. Does not reset the CPU.
- *
- * @param {Machine} m
- * @param {ArrayBuffer | Uint8Array} bytes
- * @param {string} name
- * @returns {string | null}
- */
-export function insertFdd(m, bytes, name) {
-    return fdd.insert(m.fdd, bytes, name);
-}
-
-/** @param {Machine} m @returns {{name: string, bytes: Uint8Array} | null} */
-export function saveFdd(m) {
-    return fdd.save(m.fdd);
-}
-
-/** @param {Machine} m */
-export function ejectFdd(m) {
-    fdd.eject(m.fdd);
-}
-
-/** @param {Machine} m @returns {{inserted: boolean, name: string, driverReady: boolean}} */
-export function fddInfo(m) {
-    return fdd.info(m.fdd);
 }
 
 /**
@@ -577,13 +504,16 @@ export function setQsoundModel(m, model) {
 
 /**
  * Select PAL or US machine clocks without changing the current display field.
+ * Microdrive pair timing follows the CPU clock and the sound card is reset so
+ * its PSG divider follows it too.
  *
  * @param {Machine} m
  * @param {boolean} ntsc
  */
 export function setNtsc(m, ntsc) {
     m.ntscMachine = ntsc;
-    applyTiming(m);
+    m.mdv.pairCycles = Math.round(cpuClockHz(m) / microdriveBitRateHz * microdriveBitsPerPair);
+    resetQsound(m);
 }
 
 /**
@@ -651,16 +581,6 @@ export function runFrame(m) {
 }
 
 /**
- * Enable or suppress display decoding after each emulated field.
- *
- * @param {Machine} m
- * @param {boolean} on
- */
-export function setVideoOn(m, on) {
-    m.videoOn = on;
-}
-
-/**
  * Enable or suppress sample generation while the CPU runs.
  *
  * @param {Machine} m
@@ -685,25 +605,6 @@ export function setSoundRate(m, sampleRate) {
 }
 
 /**
- * Transfer accumulated audio out of the machine and install an empty buffer.
- *
- * @param {Machine} m
- * @returns {AudioChunk}
- */
-export function takeAudio(m) {
-    const chunk = m.audio;
-    m.audio = {
-        n: 0,
-        beep: chunk.beep,
-        a: chunk.a,
-        b: chunk.b,
-        c: chunk.c,
-        fm: chunk.fm,
-    };
-    return chunk;
-}
-
-/**
  * Insert a QLAY image. Does not reset the CPU or the MDV select chain.
  *
  * @param {Machine} m
@@ -723,18 +624,12 @@ export function insertMdv(m, drive, bytes, name) {
     if (src.byteLength === 0 || src.byteLength > microdriveMaxImageBytes || src.byteLength % qlaySectorSize !== 0) {
         return "Not a QLAY .mdv image (need a multiple of " + qlaySectorSize + " bytes).";
     }
-    const cart = m.mdv.cartridges[drive];
+    const cart = emptyCartridge();
     cart.image = new Uint8Array(src);
     cart.imageLen = src.byteLength;
-    cart.byteOffset = 0;
     cart.inserted = true;
     cart.name = name;
-    cart.unformatted = false;
-    cart.formatVerifying = false;
-    cart.formatVerified = false;
-    cart.modified = false;
-    cart.readCount = 0;
-    cart.writeCount = 0;
+    m.mdv.cartridges[drive] = cart;
     microdriveOnMediumChange(m);
     return null;
 }
@@ -785,18 +680,7 @@ export function ejectMdv(m, drive) {
     if (drive < 0 || drive >= microdriveUnitCount) {
         return;
     }
-    const cart = m.mdv.cartridges[drive];
-    cart.image = new Uint8Array(0);
-    cart.imageLen = 0;
-    cart.byteOffset = 0;
-    cart.inserted = false;
-    cart.name = "";
-    cart.unformatted = false;
-    cart.formatVerifying = false;
-    cart.formatVerified = false;
-    cart.modified = false;
-    cart.readCount = 0;
-    cart.writeCount = 0;
+    m.mdv.cartridges[drive] = emptyCartridge();
     microdriveOnMediumChange(m);
 }
 
@@ -833,13 +717,21 @@ export function mdvInfo(m, drive) {
     };
 }
 
-/**
- * Consume the per-field read flag so Turbo does not stay on after the last transfer.
- *
- * @param {Machine} m
- */
-export function clearMdvReading(m) {
-    m.mdv.readingMask = 0;
+/** @returns {MicrodriveCartridge} */
+function emptyCartridge() {
+    return {
+        image: new Uint8Array(0),
+        imageLen: 0,
+        byteOffset: 0,
+        inserted: false,
+        name: "",
+        unformatted: false,
+        formatVerifying: false,
+        formatVerified: false,
+        modified: false,
+        readCount: 0,
+        writeCount: 0,
+    };
 }
 
 /** @param {Machine} m */
@@ -908,11 +800,8 @@ function resetIpc(m) {
     m.ipcKeyboardRowPending = false;
 }
 
-/**
- * @param {Machine} m
- * @returns {number}
- */
-function readQdosClock(m) {
+/** @returns {number} */
+function readQdosClock() {
     const unix = Math.floor(Date.now() / 1000);
     const zone = -new Date().getTimezoneOffset() * 60;
     return (unix + qdosUnixEpochDelta + zone) >>> 0;
@@ -946,10 +835,7 @@ function ipcAppendBits(buffer, maxBytes, bitPos, value, count) {
  * @param {number} bits
  */
 function ipcBeginResponse(m, bytes, length, bits) {
-    let n = length;
-    if (n > m.ipcResponse.length) {
-        n = m.ipcResponse.length;
-    }
+    const n = Math.min(length, m.ipcResponse.length);
     m.ipcResponse.fill(0);
     for (let i = 0; i < n; i += 1) {
         m.ipcResponse[i] = bytes[i];
@@ -1003,20 +889,7 @@ function keyboardRow(m, row) {
     if (row < 0 || row >= 8) {
         return 0;
     }
-    let value = m.keys.rows[row];
-    if (row !== 7) {
-        return value;
-    }
-    if (m.keys.shift) {
-        value |= 1;
-    }
-    if (m.keys.ctrl) {
-        value |= 2;
-    }
-    if (m.keys.alt) {
-        value |= 4;
-    }
-    return value;
+    return m.keys.rows[row];
 }
 
 /**
@@ -1101,7 +974,8 @@ function ipcWrite(m, d) {
         m.ipcWait = true;
         break;
     case ipcWireKillSoundCommand:
-        killBeep(m);
+        renderAudioTo(m, m.cpu.cycleCount);
+        stopBeep(m);
         m.ipcWait = true;
         break;
     case ipcWireNoResponseCommand:
@@ -1169,7 +1043,7 @@ function readHwByte(m, addr) {
     case qdosClockBaseAddr + 1:
     case qdosClockBaseAddr + 2:
     case qdosClockBaseAddr + 3: {
-        const t = readQdosClock(m);
+        const t = readQdosClock();
         const shift = (qdosClockBaseAddr + 3 - addr) * 8;
         return (t >>> shift) & 0xFF;
     }
@@ -1331,12 +1205,6 @@ function startBeep(m, decoded) {
         beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
     }
     beep.halfCycle = beepHalfSampleCount(m, beep);
-}
-
-/** @param {Machine} m */
-function killBeep(m) {
-    renderAudioTo(m, m.cpu.cycleCount);
-    stopBeep(m);
 }
 
 /** @param {Machine} m */
@@ -1528,16 +1396,6 @@ function activeRandomNibble(beep, value) {
 /** @param {Machine} m @param {number} addr @returns {boolean} */
 function qsoundContains(m, addr) {
     return m.qsound.model !== qsoundOff && addr >= qsoundBase && addr < qsoundBase + qsoundBytes;
-}
-
-/**
- * PAL/NTSC clocks for Microdrive pair timing and the selected card's PSG divider.
- *
- * @param {Machine} m
- */
-function applyTiming(m) {
-    m.mdv.pairCycles = Math.round(cpuClockHz(m) / microdriveBitRateHz * microdriveBitsPerPair);
-    m.qsound.ay.tickT = qsoundTickCycles(m);
 }
 
 /** @param {Machine} m */

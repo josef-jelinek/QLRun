@@ -1,7 +1,7 @@
 import * as io from "./io.js";
 
 const maxShaderSize = 65536;
-const qsoundRomUrl = "roms/Qsound_V1.94.rom";
+export const qsoundRomUrl = "roms/Qsound_V1.94.rom";
 
 /**
  * Load the display vertex and fragment shader sources.
@@ -49,74 +49,20 @@ export function loadShaders(onDone) {
 }
 
 /**
- * Fetch a system ROM from `roms/<name>.rom`. Empty `name` uses `js`. Invalid
- * names fail synchronously and return no abort. The image may be shorter than
- * `maxBytes` and is padded with zeros by the machine; it must not be larger.
+ * Fetch a ROM image. It may be shorter than `maxBytes` and is padded with
+ * zeros by the machine; it must not be empty or larger.
  *
- * @param {string} name
+ * @param {string} url
  * @param {number} maxBytes
- * @param {function(string | null, string, ArrayBuffer | null): void} onDone
+ * @param {function(string | null, ArrayBuffer | null): void} onDone
  * @returns {(function(): void) | null} abort
  */
-export function loadStartupRom(name, maxBytes, onDone) {
-    if (name === "") {
-        name = "js";
-    }
-    if (!/^[A-Za-z0-9]+$/.test(name)) {
-        onDone("Invalid ROM name.", "", null);
-        return null;
-    }
-
-    const romName = name + ".rom";
-    const url = "roms/" + romName;
-    let done = false;
-    const abortLoad = io.httpGet(
+export function loadRom(url, maxBytes, onDone) {
+    return io.httpGet(
         url,
         "arraybuffer",
         maxBytes,
         function (err, buf) {
-            if (done) {
-                return;
-            }
-            done = true;
-            if (err !== null) {
-                onDone(err, romName, null);
-                return;
-            }
-            if (!(buf instanceof ArrayBuffer) || buf.byteLength === 0 || buf.byteLength > maxBytes) {
-                const s = "Expected 1 to " + maxBytes + ", got " + (buf?.byteLength ?? 0) + " bytes.";
-                onDone("Could not load \"" + url + "\": " + s, romName, null);
-                return;
-            }
-            onDone(null, romName, buf);
-        },
-    );
-
-    return function () {
-        if (!done) {
-            abortLoad?.();
-        }
-    };
-}
-
-/**
- * Fetch the bundled QSound extension ROM shared by both card models.
- *
- * @param {number} maxBytes
- * @param {function(string | null, ArrayBuffer | null): void} onDone
- * @returns {function(): void}
- */
-export function loadQsoundRom(maxBytes, onDone) {
-    let done = false;
-    const abortLoad = io.httpGet(
-        qsoundRomUrl,
-        "arraybuffer",
-        maxBytes,
-        function (err, buf) {
-            if (done) {
-                return;
-            }
-            done = true;
             if (err !== null) {
                 onDone(err, null);
                 return;
@@ -124,15 +70,10 @@ export function loadQsoundRom(maxBytes, onDone) {
             if (!(buf instanceof ArrayBuffer) || buf.byteLength === 0 || buf.byteLength > maxBytes) {
                 const length = buf?.byteLength ?? 0;
                 const detail = "Expected 1 to " + maxBytes + ", got " + length + " bytes.";
-                onDone("Could not load \"" + qsoundRomUrl + "\": " + detail, null);
+                onDone("Could not load \"" + url + "\": " + detail, null);
                 return;
             }
             onDone(null, buf);
         },
     );
-    return function () {
-        if (!done) {
-            abortLoad?.();
-        }
-    };
 }

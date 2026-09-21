@@ -47,7 +47,6 @@ const qdosTrap0Vector = 32;
 const qdosTrap4Vector = 36;
 const qdosTrap15Vector = 47;
 const qdosExceptionStateSysvarAddr = 0x28050;
-const dataRegisterCount = 8;
 const addressRegisterBase = 8;
 const registerCount = 16;
 const stackRegisterIndex = 15;
@@ -56,7 +55,6 @@ const operandByte = 0;
 const operandWord = 1;
 const operandLong = 2;
 const sizeFieldShift = 6;
-const sizeFieldCount = 4;
 const sizeFieldMask = 3;
 const invalidSizeField = 3;
 const opcodeBitCount = 16;
@@ -183,8 +181,6 @@ const opcodeTable = new Array(opcodeTableEntries);
 const opcodeBaseCycles = new Int16Array(opcodeTableEntries);
 let opcodeTableReady = false;
 
-const conditionTrue = 0;
-const conditionFalse = 1;
 const branchConditionAlways = 0;
 const branchConditionSubroutine = 1;
 const conditionCodeMask = 15;
@@ -197,8 +193,6 @@ const bitOperationMask = 3;
 
 const immediateLogicalOrOp = 0;
 const immediateLogicalAndOp = 1;
-const immediateSubtractOp = 2;
-const immediateAddOp = 3;
 const immediateLogicalEorOp = 5;
 const immediateCompareOp = 6;
 const immediateLogicalOperationMask = (1 << immediateLogicalOrOp) | (1 << immediateLogicalAndOp) | (1 << immediateLogicalEorOp);
@@ -246,22 +240,6 @@ const exgDataAddressForm = 0x0088;
  * @param {number} value
  * @returns {number}
  */
-function asI32(value) {
-    return value | 0;
-}
-
-/**
- * @param {number} value
- * @returns {number}
- */
-function asU32(value) {
-    return value >>> 0;
-}
-
-/**
- * @param {number} value
- * @returns {number}
- */
 function asI8(value) {
     return (value << 24) >> 24;
 }
@@ -280,7 +258,7 @@ function asI16(value) {
  * @returns {number}
  */
 function addressOffset(base, offset) {
-    return asI32(asU32(base) + asU32(offset));
+    return ((base >>> 0) + (offset >>> 0)) | 0;
 }
 
 /**
@@ -329,11 +307,10 @@ function opcodeQuickValue(opcode) {
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} condition
  * @returns {boolean}
  */
-function conditionIsTrue(c, bus, condition) {
+function conditionIsTrue(c, condition) {
     switch (condition) {
     case 0:
         return true;
@@ -373,11 +350,10 @@ function conditionIsTrue(c, bus, condition) {
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} value
  * @param {number} size
  */
-function setNzClearCv(c, bus, value, size) {
+function setNzClearCv(c, value, size) {
     const info = operandSizes[size];
     const masked = value & info.valueMask;
     c.negative = (masked & info.signBit) !== 0;
@@ -388,13 +364,12 @@ function setNzClearCv(c, bus, value, size) {
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} target
  * @param {number} source
  * @param {number} result
  * @param {number} size
  */
-function setCompareFlagsResult(c, bus, target, source, result, size) {
+function setCompareFlagsResult(c, target, source, result, size) {
     const info = operandSizes[size];
     const signBit = info.signBit;
     const valueMask = info.valueMask;
@@ -409,16 +384,15 @@ function setCompareFlagsResult(c, bus, target, source, result, size) {
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {boolean} subtract
  * @param {number} target
  * @param {number} source
  * @param {number} result
  * @param {number} size
  */
-function setAddSubtractFlags(c, bus, subtract, target, source, result, size) {
+function setAddSubtractFlags(c, subtract, target, source, result, size) {
     if (subtract) {
-        setCompareFlagsResult(c, bus, target, source, result, size);
+        setCompareFlagsResult(c, target, source, result, size);
         c.xflag = c.carry;
         return;
     }
@@ -436,14 +410,13 @@ function setAddSubtractFlags(c, bus, subtract, target, source, result, size) {
 }
 
 /**
+ * Low `width` bits set, for widths of 1 to 32.
+ *
  * @param {number} width
  * @returns {number}
  */
 function bitWidthMask(width) {
-    if (width >= 32) {
-        return 0xFFFFFFFF;
-    }
-    return (1 << width) - 1;
+    return 0xFFFFFFFF >>> (32 - width);
 }
 
 /**
@@ -453,9 +426,7 @@ function bitWidthMask(width) {
  * @returns {number}
  */
 function arithmeticShiftRight(value, count, width) {
-    if (width > 32) {
-        width = 32;
-    }
+    width = Math.min(width, 32);
     const valueMask = bitWidthMask(width);
     value &= valueMask;
     if (count === 0 || width === 0) {
@@ -470,7 +441,7 @@ function arithmeticShiftRight(value, count, width) {
     }
     let shifted = value >>> count;
     if ((value & signBit) !== 0) {
-        shifted |= (valueMask << (width - count));
+        shifted |= valueMask << (width - count);
     }
     return shifted & valueMask;
 }
@@ -482,9 +453,7 @@ function arithmeticShiftRight(value, count, width) {
  * @returns {{value: number, flag: boolean}}
  */
 function arithmeticShiftLeft(value, count, width) {
-    if (width > 32) {
-        width = 32;
-    }
+    width = Math.min(width, 32);
     const valueMask = bitWidthMask(width);
     value &= valueMask;
     if (count === 0) {
@@ -513,9 +482,7 @@ function arithmeticShiftLeft(value, count, width) {
  * @returns {number}
  */
 function rotateBits(value, count, width, left) {
-    if (width > 32) {
-        width = 32;
-    }
+    width = Math.min(width, 32);
     const valueMask = bitWidthMask(width);
     value &= valueMask;
     if (width === 0) {
@@ -541,9 +508,7 @@ function rotateBits(value, count, width, left) {
  * @returns {{value: number, flag: boolean}}
  */
 function rotateExtend(value, count, width, oldX, left) {
-    if (width > 32) {
-        width = 32;
-    }
+    width = Math.min(width, 32);
     const valueMask = bitWidthMask(width);
     let signBit = 1 << (width - 1);
     if (width === 32) {
@@ -577,9 +542,7 @@ function rotateExtend(value, count, width, oldX, left) {
  * @returns {number}
  */
 function logicalShift(value, count, width, left) {
-    if (width > 32) {
-        width = 32;
-    }
+    width = Math.min(width, 32);
     if (count >= width) {
         return 0;
     }
@@ -595,10 +558,9 @@ function logicalShift(value, count, width, left) {
  * Pack the current supervisor, interrupt-mask, and condition flags into SR.
  *
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @returns {number}
  */
-function getSr(c, bus) {
+function getSr(c) {
     let sr = (c.interruptMask & 7) << 8;
     if (c.trace) {
         sr |= 0x8000;
@@ -628,10 +590,9 @@ function getSr(c, bus) {
  * Replace the condition-code flags from the low byte of a status value.
  *
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} cc
  */
-function putCcr(c, bus, cc) {
+function putCcr(c, cc) {
     c.xflag = (cc & 0x0010) !== 0;
     c.negative = (cc & 0x0008) !== 0;
     c.zero = (cc & 0x0004) !== 0;
@@ -643,10 +604,9 @@ function putCcr(c, bus, cc) {
  * Apply SR and swap active stack pointers when supervisor state changes.
  *
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} sr
  */
-function putSr(c, bus, sr) {
+function putSr(c, sr) {
     const oldSuper = c.supervisor;
     c.trace = (sr & 0x8000) !== 0;
     c.extraFlag = c.doTrace || c.trace || c.exception !== 0;
@@ -655,7 +615,7 @@ function putSr(c, bus, sr) {
         c.nInst = 0;
     }
     c.supervisor = (sr & 0x2000) !== 0;
-    putCcr(c, bus, sr);
+    putCcr(c, sr);
     c.interruptMask = (sr >> 8) & interruptLevelMask;
     if (oldSuper !== c.supervisor) {
         if (c.supervisor) {
@@ -672,10 +632,9 @@ function putSr(c, bus, sr) {
  * Stop the current instruction chunk and schedule a CPU exception vector.
  *
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} vector
  */
-function coreRaiseException(c, bus, vector) {
+function coreRaiseException(c, vector) {
     c.exception = vector;
     c.extraFlag = true;
     c.nInst2 = c.nInst;
@@ -684,15 +643,14 @@ function coreRaiseException(c, bus, vector) {
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} vector
  */
-function raiseInstructionException(c, bus, vector) {
+function raiseInstructionException(c, vector) {
     c.exceptionPc = c.pc;
     if (c.currentInstructionPc >= 0) {
         c.exceptionPc = c.currentInstructionPc;
     }
-    coreRaiseException(c, bus, vector);
+    coreRaiseException(c, vector);
 }
 
 /**
@@ -700,19 +658,18 @@ function raiseInstructionException(c, bus, vector) {
  * @param {CpuBus} bus
  */
 function raiseIllegalInstruction(c, bus) {
-    raiseInstructionException(c, bus, illegalInstructionVector);
+    raiseInstructionException(c, illegalInstructionVector);
 }
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} vector
  * @param {number} addr
  * @param {boolean} readAccess
  * @param {boolean} instructionAccess
  */
-function raiseBusOrAddressError(c, bus, vector, addr, readAccess, instructionAccess) {
-    coreRaiseException(c, bus, vector);
+function raiseBusOrAddressError(c, vector, addr, readAccess, instructionAccess) {
+    coreRaiseException(c, vector);
     c.badReadAccess = readAccess;
     c.badAddress = addr;
     c.badCodeAddress = instructionAccess;
@@ -720,12 +677,11 @@ function raiseBusOrAddressError(c, bus, vector, addr, readAccess, instructionAcc
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} addr
  */
-function setPc(c, bus, addr) {
+function setPc(c, addr) {
     if ((addr & 1) !== 0) {
-        raiseBusOrAddressError(c, bus, addressErrorVector, addr, true, true);
+        raiseBusOrAddressError(c, addressErrorVector, addr, true, true);
         return;
     }
     c.pc = addr & addrMask;
@@ -741,20 +697,19 @@ function ensureEa(c, bus, valid) {
     if (valid) {
         return true;
     }
-    raiseInstructionException(c, bus, illegalInstructionVector);
+    raiseIllegalInstruction(c, bus);
     return false;
 }
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @returns {boolean}
  */
-function ensureSupervisor(c, bus) {
+function ensureSupervisor(c) {
     if (c.supervisor) {
         return true;
     }
-    raiseInstructionException(c, bus, privilegeViolationVector);
+    raiseInstructionException(c, privilegeViolationVector);
     return false;
 }
 
@@ -828,21 +783,18 @@ function bitOpEaIsValid(operation, staticBit, mode, r) {
 }
 
 /**
- * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} addr
  * @returns {boolean}
  */
-function zx8301ContendsAddress(c, bus, addr) {
+function zx8301ContendsAddress(addr) {
     const address = addr & addrMask;
     return address >= qdosUserRamBase && address < zx8301OnboardRamEnd;
 }
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  */
-function zx8301WaitForCpuRamSlot(c, bus) {
+function zx8301WaitForCpuRamSlot(c) {
     const alignment = c.cycleCount % busCycleClocks;
     if (alignment !== 0) {
         c.cycleCount += busCycleClocks - alignment;
@@ -858,17 +810,16 @@ function zx8301WaitForCpuRamSlot(c, bus) {
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} addr
  * @param {number} busCycles
  */
-function addCpuBusCycles(c, bus, addr, busCycles) {
+function addCpuBusCycles(c, addr, busCycles) {
     if (!c.accessActive) {
         return;
     }
     for (let i = 0; i < busCycles; i += 1) {
-        if (zx8301ContendsAddress(c, bus, addressOffset(addr, i))) {
-            zx8301WaitForCpuRamSlot(c, bus);
+        if (zx8301ContendsAddress(addressOffset(addr, i))) {
+            zx8301WaitForCpuRamSlot(c);
         }
         c.cycleCount += busCycleClocks;
     }
@@ -961,34 +912,11 @@ function cpuEaWriteCycles(mode, r, size) {
 
 /**
  * @param {number} opcode
+ * @param {number} count
  * @returns {number}
  */
-function cpuShiftCycles(opcode) {
-    const size = operandSizeFromBits(opcode >> sizeFieldShift);
-    let count = opcodeQuickValue(opcode);
-    if ((opcode & dataRegisterShiftCountRegisterBit) !== 0) {
-        // Dynamic count is resolved later; static table marks these dynamic.
-        count = opcodeQuickValue(opcode);
-    }
-    if (size === operandLong) {
-        return 12 + 2 * count;
-    }
-    return 10 + 2 * count;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} opcode
- * @returns {number}
- */
-function cpuShiftCyclesDynamic(c, bus, opcode) {
-    const size = operandSizeFromBits(opcode >> sizeFieldShift);
-    let count = opcodeQuickValue(opcode);
-    if ((opcode & dataRegisterShiftCountRegisterBit) !== 0) {
-        count = c.reg[(opcode >> 9) & 7] & 63;
-    }
-    if (size === operandLong) {
+function cpuShiftCycles(opcode, count) {
+    if (operandSizeFromBits(opcode >> sizeFieldShift) === operandLong) {
         return 12 + 2 * count;
     }
     return 10 + 2 * count;
@@ -1213,7 +1141,7 @@ function mc68008StaticInstructionCycles(opcode) {
         if ((opcode & dataRegisterShiftCountRegisterBit) !== 0) {
             return opcodeDynamicCycles;
         }
-        return cpuShiftCycles(opcode);
+        return cpuShiftCycles(opcode, opcodeQuickValue(opcode));
     }
     const opcodeFfc0 = opcode & 0xFFC0;
     if (opcodeFfc0 === 0x40C0) {
@@ -1305,18 +1233,17 @@ function mc68008StaticInstructionCycles(opcode) {
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} opcode
  * @returns {number}
  */
-function mc68008DynamicInstructionCycles(c, bus, opcode) {
+function mc68008DynamicInstructionCycles(c, opcode) {
     const opcodeClass = opcode & 0xF000;
     if (opcodeClass === 0x6000) {
         const condition = (opcode >> 8) & conditionCodeMask;
         if (condition === branchConditionAlways || condition === branchConditionSubroutine) {
             return 0;
         }
-        if (conditionIsTrue(c, bus, condition)) {
+        if (conditionIsTrue(c, condition)) {
             return 18;
         }
         if ((opcode & 0xFF) === 0) {
@@ -1331,7 +1258,7 @@ function mc68008DynamicInstructionCycles(c, bus, opcode) {
         }
         const condition = (opcode >> 8) & conditionCodeMask;
         if (opcode00f8 === 0x00C8) {
-            if (conditionIsTrue(c, bus, condition)) {
+            if (conditionIsTrue(c, condition)) {
                 return 20;
             }
             const eaReg = opcode & 7;
@@ -1340,35 +1267,24 @@ function mc68008DynamicInstructionCycles(c, bus, opcode) {
             }
             return 18;
         }
-        if (conditionIsTrue(c, bus, condition)) {
+        if (conditionIsTrue(c, condition)) {
             return 10;
         }
         return 8;
     }
     if (opcodeClass === 0xE000) {
-        return cpuShiftCyclesDynamic(c, bus, opcode);
+        return cpuShiftCycles(opcode, c.reg[(opcode >> 9) & 7] & 63);
     }
     return 0;
 }
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} addr
- * @returns {boolean}
- */
-function isHw(c, bus, addr) {
-    return bus.isHw(addr >>> 0);
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} addr
  * @param {boolean} readAccess
  * @returns {boolean}
  */
-function cpuWordOrLongFaultIfNeeded(c, bus, addr, readAccess) {
+function cpuWordOrLongFaultIfNeeded(c, addr, readAccess) {
     if (!c.accessActive) {
         return false;
     }
@@ -1376,25 +1292,24 @@ function cpuWordOrLongFaultIfNeeded(c, bus, addr, readAccess) {
         return true;
     }
     if ((addr & 1) !== 0) {
-        raiseBusOrAddressError(c, bus, addressErrorVector, addr, readAccess, false);
+        raiseBusOrAddressError(c, addressErrorVector, addr, readAccess, false);
         return true;
     }
     return false;
 }
 
 /**
- * @param {Cpu} c
  * @param {CpuBus} bus
  * @param {number} addr
  * @param {number} lowAddr
  * @returns {boolean}
  */
-function isDirectRamLongAccess(c, bus, addr, lowAddr) {
+function isDirectRamLongAccess(bus, addr, lowAddr) {
     return addr <= maxLinearLongAddr &&
         !bus.isUnmapped(addr) &&
         !bus.isUnmapped(lowAddr) &&
-        !isHw(c, bus, addr) &&
-        !isHw(c, bus, lowAddr);
+        !bus.isHw(addr >>> 0) &&
+        !bus.isHw(lowAddr >>> 0);
 }
 
 /**
@@ -1438,16 +1353,15 @@ export function writePointerLong(mem, addr, v) {
 }
 
 /**
- * @param {Cpu} c
  * @param {CpuBus} bus
  * @param {number} addr
  * @returns {number}
  */
-function readDecodedWord(c, bus, addr) {
+function readDecodedWord(bus, addr) {
     if (bus.isUnmapped(addr)) {
         return 0;
     }
-    if (isHw(c, bus, addr)) {
+    if (bus.isHw(addr >>> 0)) {
         const highByte = bus.readHwByte(addr);
         const lowByte = bus.readHwByte(addr + 1);
         return ((highByte << 8) | lowByte) & 0xFFFF;
@@ -1456,16 +1370,15 @@ function readDecodedWord(c, bus, addr) {
 }
 
 /**
- * @param {Cpu} c
  * @param {CpuBus} bus
  * @param {number} addr
  * @param {number} d
  */
-function writeDecodedWord(c, bus, addr, d) {
+function writeDecodedWord(bus, addr, d) {
     if (bus.isUnmapped(addr)) {
         return;
     }
-    if (isHw(c, bus, addr)) {
+    if (bus.isHw(addr >>> 0)) {
         bus.writeHwByte(addr, (d >> 8) & 0xFF);
         bus.writeHwByte(addr + 1, d & 0xFF);
         return;
@@ -1482,7 +1395,7 @@ function writeDecodedWord(c, bus, addr, d) {
  * @returns {number}
  */
 function readByte(c, bus, addr) {
-    addCpuBusCycles(c, bus, addr, byteBusCycles);
+    addCpuBusCycles(c, addr, byteBusCycles);
     if (c.accessActive && c.exception !== 0) {
         return 0;
     }
@@ -1490,7 +1403,7 @@ function readByte(c, bus, addr) {
     if (bus.isUnmapped(addr)) {
         return 0;
     }
-    if (isHw(c, bus, addr)) {
+    if (bus.isHw(addr >>> 0)) {
         return bus.readHwByte(addr);
     }
     return bus.mem[addr];
@@ -1503,12 +1416,12 @@ function readByte(c, bus, addr) {
  * @returns {number}
  */
 function readWord(c, bus, addr) {
-    addCpuBusCycles(c, bus, addr, wordBusCycles);
-    if (cpuWordOrLongFaultIfNeeded(c, bus, addr, true)) {
+    addCpuBusCycles(c, addr, wordBusCycles);
+    if (cpuWordOrLongFaultIfNeeded(c, addr, true)) {
         return 0;
     }
     addr &= addrMask;
-    return readDecodedWord(c, bus, addr);
+    return readDecodedWord(bus, addr);
 }
 
 /**
@@ -1518,8 +1431,8 @@ function readWord(c, bus, addr) {
  * @returns {number}
  */
 function readLong(c, bus, addr) {
-    addCpuBusCycles(c, bus, addr, longBusCycles);
-    if (cpuWordOrLongFaultIfNeeded(c, bus, addr, true)) {
+    addCpuBusCycles(c, addr, longBusCycles);
+    if (cpuWordOrLongFaultIfNeeded(c, addr, true)) {
         return 0;
     }
     addr &= addrMask;
@@ -1527,11 +1440,11 @@ function readLong(c, bus, addr) {
         return bus.readHwLongClock();
     }
     const lowAddr = (addr + qdosWordSize) & addrMask;
-    if (isDirectRamLongAccess(c, bus, addr, lowAddr)) {
+    if (isDirectRamLongAccess(bus, addr, lowAddr)) {
         return readPointerLong(bus.mem, addr);
     }
-    const highWord = readDecodedWord(c, bus, addr);
-    const lowWord = readDecodedWord(c, bus, lowAddr);
+    const highWord = readDecodedWord(bus, addr);
+    const lowWord = readDecodedWord(bus, lowAddr);
     return ((highWord << 16) | lowWord) >>> 0;
 }
 
@@ -1542,7 +1455,7 @@ function readLong(c, bus, addr) {
  * @param {number} d
  */
 function writeByte(c, bus, addr, d) {
-    addCpuBusCycles(c, bus, addr, byteBusCycles);
+    addCpuBusCycles(c, addr, byteBusCycles);
     if (c.accessActive && c.exception !== 0) {
         return;
     }
@@ -1550,7 +1463,7 @@ function writeByte(c, bus, addr, d) {
     if (bus.isUnmapped(addr)) {
         return;
     }
-    if (isHw(c, bus, addr)) {
+    if (bus.isHw(addr >>> 0)) {
         bus.writeHwByte(addr, d & 0xFF);
         return;
     }
@@ -1566,12 +1479,12 @@ function writeByte(c, bus, addr, d) {
  * @param {number} d
  */
 function writeWord(c, bus, addr, d) {
-    addCpuBusCycles(c, bus, addr, wordBusCycles);
-    if (cpuWordOrLongFaultIfNeeded(c, bus, addr, false)) {
+    addCpuBusCycles(c, addr, wordBusCycles);
+    if (cpuWordOrLongFaultIfNeeded(c, addr, false)) {
         return;
     }
     addr &= addrMask;
-    writeDecodedWord(c, bus, addr, d);
+    writeDecodedWord(bus, addr, d);
 }
 
 /**
@@ -1581,13 +1494,13 @@ function writeWord(c, bus, addr, d) {
  * @param {number} d
  */
 function writeLong(c, bus, addr, d) {
-    addCpuBusCycles(c, bus, addr, longBusCycles);
-    if (cpuWordOrLongFaultIfNeeded(c, bus, addr, false)) {
+    addCpuBusCycles(c, addr, longBusCycles);
+    if (cpuWordOrLongFaultIfNeeded(c, addr, false)) {
         return;
     }
     addr &= addrMask;
     const lowAddr = (addr + qdosWordSize) & addrMask;
-    if (isDirectRamLongAccess(c, bus, addr, lowAddr)) {
+    if (isDirectRamLongAccess(bus, addr, lowAddr)) {
         if (addr >= qdosUserRamBase) {
             writePointerLong(bus.mem, addr, d);
             return;
@@ -1597,8 +1510,8 @@ function writeLong(c, bus, addr, d) {
         }
         return;
     }
-    writeDecodedWord(c, bus, addr, (d >>> 16) & 0xFFFF);
-    writeDecodedWord(c, bus, lowAddr, d & 0xFFFF);
+    writeDecodedWord(bus, addr, (d >>> 16) & 0xFFFF);
+    writeDecodedWord(bus, lowAddr, d & 0xFFFF);
 }
 
 /**
@@ -1614,7 +1527,7 @@ function readPcWord(c, bus) {
     if (c.exception !== 0) {
         return 0;
     }
-    c.pc = asI32(cpuAddressOffset(c.pc, qdosWordSize));
+    c.pc = cpuAddressOffset(c.pc, qdosWordSize) | 0;
     return value;
 }
 
@@ -1650,17 +1563,16 @@ function readPcImmediateSized(c, bus, size) {
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} index
  * @param {number} size
  * @param {number} value
  */
-function writeDataRegisterSized(c, bus, index, size, value) {
+function writeDataRegisterSized(c, index, size, value) {
     if (c.exception !== 0) {
         return;
     }
     const valueMask = operandSizes[size].valueMask;
-    c.reg[index] = asI32((asU32(c.reg[index]) & ~valueMask) | (value & valueMask));
+    c.reg[index] = (((c.reg[index] >>> 0) & ~valueMask) | (value & valueMask)) | 0;
 }
 
 /**
@@ -1701,12 +1613,11 @@ function writeMemorySized(c, bus, size, addr, value) {
 
 /**
  * @param {Cpu} c
- * @param {CpuBus} bus
  * @param {number} baseAddr
  * @param {number} extension
  * @returns {number}
  */
-function indexedAddress(c, bus, baseAddr, extension) {
+function indexedAddress(c, baseAddr, extension) {
     let index = c.reg[(extension >> 12) & 0x0F];
     if ((extension & 0x0800) === 0) {
         index = asI16(index);
@@ -1725,17 +1636,17 @@ function getEaM7(c, bus, r) {
     case 0:
         return asI16(readPcWord(c, bus));
     case 1:
-        return asI32(readPcLong(c, bus));
+        return readPcLong(c, bus) | 0;
     case 2: {
         const base = c.pc;
         return addressOffset(base, asI16(readPcWord(c, bus)));
     }
     case 3: {
         const base = c.pc;
-        return indexedAddress(c, bus, base, readPcWord(c, bus));
+        return indexedAddress(c, base, readPcWord(c, bus));
     }
     }
-    raiseInstructionException(c, bus, illegalInstructionVector);
+    raiseInstructionException(c, illegalInstructionVector);
     return 0;
 }
 
@@ -1753,11 +1664,11 @@ function getEa(c, bus, mode, r) {
     case 5:
         return addressOffset(c.reg[addressRegisterBase + r], asI16(readPcWord(c, bus)));
     case 6:
-        return indexedAddress(c, bus, c.reg[addressRegisterBase + r], readPcWord(c, bus));
+        return indexedAddress(c, c.reg[addressRegisterBase + r], readPcWord(c, bus));
     case 7:
         return getEaM7(c, bus, r);
     default:
-        raiseInstructionException(c, bus, illegalInstructionVector);
+        raiseInstructionException(c, illegalInstructionVector);
         return 0;
     }
 }
@@ -1793,15 +1704,15 @@ function memoryEaAddr(c, bus, mode, r, byteCount, mode7Count) {
     case 5:
         return addressOffset(c.reg[addressRegisterBase + r], asI16(readPcWord(c, bus)));
     case 6:
-        return indexedAddress(c, bus, c.reg[addressRegisterBase + r], readPcWord(c, bus));
+        return indexedAddress(c, c.reg[addressRegisterBase + r], readPcWord(c, bus));
     case 7:
         if (r >= mode7Count) {
-            raiseInstructionException(c, bus, illegalInstructionVector);
+            raiseInstructionException(c, illegalInstructionVector);
             return 0;
         }
         return getEaM7(c, bus, r);
     default:
-        raiseInstructionException(c, bus, illegalInstructionVector);
+        raiseInstructionException(c, illegalInstructionVector);
         return 0;
     }
 }
@@ -1870,7 +1781,7 @@ function rewriteEaSized(c, bus, size, value) {
         return false;
     }
     if (target >= rewriteRegisterTargetBase) {
-        writeDataRegisterSized(c, bus, target - rewriteRegisterTargetBase, size, value);
+        writeDataRegisterSized(c, target - rewriteRegisterTargetBase, size, value);
         return c.exception === 0;
     }
     writeMemorySized(c, bus, size, target, value);
@@ -1890,7 +1801,7 @@ function putToEaSized(c, bus, size, mode, r, value) {
         return;
     }
     if (mode === 0) {
-        writeDataRegisterSized(c, bus, r, size, value);
+        writeDataRegisterSized(c, r, size, value);
         return;
     }
     const addr = memoryEaAddr(c, bus, mode, r, operandSizes[size].byteCount, eaMode7AbsoluteCount);
@@ -1911,7 +1822,7 @@ function pushLongToStack(c, bus, value) {
         return false;
     }
     c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -qdosLongSize);
-    writeLong(c, bus, c.reg[stackRegisterIndex], asU32(value));
+    writeLong(c, bus, c.reg[stackRegisterIndex], value >>> 0);
     return c.exception === 0;
 }
 
@@ -1926,8 +1837,8 @@ function pushCpuExceptionFrame(c, bus, stackedPc) {
         c.reg[stackRegisterIndex] = c.ssp;
     }
     c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -exceptionFrameSize);
-    writeLong(c, bus, addressOffset(c.reg[stackRegisterIndex], exceptionFramePcOffset), asU32(stackedPc));
-    writeWord(c, bus, c.reg[stackRegisterIndex], getSr(c, bus));
+    writeLong(c, bus, addressOffset(c.reg[stackRegisterIndex], exceptionFramePcOffset), stackedPc >>> 0);
+    writeWord(c, bus, c.reg[stackRegisterIndex], getSr(c));
 }
 
 /**
@@ -1945,7 +1856,7 @@ function processInterrupts(c, bus) {
         c.accessActive = true;
         pushCpuExceptionFrame(c, bus, c.pc);
         const vectorAddr = (autovectorBase + c.pendingInterrupt) * qdosLongSize;
-        setPc(c, bus, asI32(readLong(c, bus, vectorAddr)));
+        setPc(c, readLong(c, bus, vectorAddr) | 0);
         c.interruptMask = c.pendingInterrupt;
         c.pendingInterrupt = 0;
         c.supervisor = true;
@@ -1987,13 +1898,13 @@ function exceptionProcessing(c, bus) {
             stackedPc = c.exceptionPc;
         }
         const vector = c.exception;
-        const handlerPc = asI32(readPointerLong(bus.mem, vector * qdosLongSize));
+        const handlerPc = readPointerLong(bus.mem, vector * qdosLongSize) | 0;
         pushCpuExceptionFrame(c, bus, stackedPc);
-        setPc(c, bus, handlerPc);
+        setPc(c, handlerPc);
         if (vector === busErrorVector || vector === addressErrorVector) {
             c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -busErrorFrameSize);
             writeWord(c, bus, addressOffset(c.reg[stackRegisterIndex], busErrorFrameOpcodeOffset), c.code);
-            writeLong(c, bus, addressOffset(c.reg[stackRegisterIndex], exceptionFramePcOffset), asU32(c.badAddress));
+            writeLong(c, bus, addressOffset(c.reg[stackRegisterIndex], exceptionFramePcOffset), c.badAddress >>> 0);
             let busErrorFrame = 9 + 16 * Number(c.badReadAccess) + Number(c.badCodeAddress) + 4 * Number(c.supervisor);
             writeWord(c, bus, c.reg[stackRegisterIndex], busErrorFrame);
             c.badCodeAddress = false;
@@ -2006,7 +1917,7 @@ function exceptionProcessing(c, bus) {
     }
     if (c.doTrace) {
         pushCpuExceptionFrame(c, bus, c.pc);
-        setPc(c, bus, asI32(readPointerLong(bus.mem, traceVector * qdosLongSize)));
+        setPc(c, readPointerLong(bus.mem, traceVector * qdosLongSize) | 0);
         if (c.nInst === 0) {
             c.exception = traceVector;
         }
@@ -2067,7 +1978,7 @@ function executeLoadedOpcode(c, bus, opcode, instructionCycleStart) {
             expectedCycles = -expectedCycles - opcodeHostCycleBias;
         }
         if (expectedCycles === opcodeDynamicCycles) {
-            expectedCycles = mc68008DynamicInstructionCycles(c, bus, opcode);
+            expectedCycles = mc68008DynamicInstructionCycles(c, opcode);
         }
     }
     if (expectedCycles > 0) {
@@ -2091,9 +2002,9 @@ function executeTimedPcInstruction(c, bus) {
     const instructionCycleStart = c.cycleCount;
     c.currentInstructionPc = c.pc;
     c.accessActive = true;
-    addCpuBusCycles(c, bus, c.pc, wordBusCycles);
-    const opcode = readDecodedWord(c, bus, c.pc);
-    c.pc = asI32(cpuAddressOffset(c.pc, qdosWordSize));
+    addCpuBusCycles(c, c.pc, wordBusCycles);
+    const opcode = readDecodedWord(bus, c.pc);
+    c.pc = cpuAddressOffset(c.pc, qdosWordSize) | 0;
     executeLoadedOpcode(c, bus, opcode, instructionCycleStart);
 }
 
@@ -2227,9 +2138,9 @@ export function reset(c, bus) {
     for (let i = 0; i < registerCount; i += 1) {
         c.reg[i] = 0;
     }
-    c.reg[stackRegisterIndex] = asI32(readPointerLong(bus.mem, 0));
+    c.reg[stackRegisterIndex] = readPointerLong(bus.mem, 0) | 0;
     c.ssp = c.reg[stackRegisterIndex];
-    setPc(c, bus, asI32(readPointerLong(bus.mem, qdosLongSize)));
+    setPc(c, readPointerLong(bus.mem, qdosLongSize) | 0);
     c.code = 0;
     c.usp = 0;
     c.interruptMask = interruptLevelMask;
@@ -2459,7 +2370,7 @@ export function callSubroutine(c, bus, address, instructionLimit) {
     if (!pushLongToStack(c, bus, returnPc)) {
         return;
     }
-    setPc(c, bus, asI32(address));
+    setPc(c, address | 0);
     c.extraFlag = false;
     c.exception = 0;
     runGuestCall(c, bus, returnPc, instructionLimit);
@@ -2571,7 +2482,7 @@ function bcdOp(c, bus) {
             return;
         }
     } else {
-        writeDataRegisterSized(c, bus, dx, operandByte, resultByte);
+        writeDataRegisterSized(c, dx, operandByte, resultByte);
     }
     c.carry = newCarry;
     c.xflag = c.carry;
@@ -2590,7 +2501,7 @@ function addSubtractOp(c, bus) {
     const eaReg = code & 7;
     const index = (code >> 9) & 7;
     const size = operandSizeFromBits(code >> sizeFieldShift);
-    let source = asU32(c.reg[index]);
+    let source = c.reg[index] >>> 0;
     let target = source;
     const eaDestination = (code & eaDestinationBit) !== 0;
     if (eaDestination) {
@@ -2616,9 +2527,9 @@ function addSubtractOp(c, bus) {
             return;
         }
     } else {
-        writeDataRegisterSized(c, bus, index, size, result);
+        writeDataRegisterSized(c, index, size, result);
     }
-    setAddSubtractFlags(c, bus, subtract, target, source, result, size);
+    setAddSubtractFlags(c, subtract, target, source, result, size);
 }
 
 /**
@@ -2636,7 +2547,7 @@ function addressArithmeticOp(c, bus) {
     if ((code & addressArithmeticLongBit) !== 0) {
         size = operandLong;
     }
-    let source = asI32(getFromEaSized(c, bus, size, eaMode, eaReg));
+    let source = getFromEaSized(c, bus, size, eaMode, eaReg) | 0;
     if (size === operandWord) {
         source = asI16(source);
     }
@@ -2648,7 +2559,7 @@ function addressArithmeticOp(c, bus) {
         c.reg[addressIndex] = addressOffset(c.reg[addressIndex], source);
         return;
     }
-    c.reg[addressIndex] = asI32(asU32(c.reg[addressIndex]) - asU32(source));
+    c.reg[addressIndex] = ((c.reg[addressIndex] >>> 0) - (source >>> 0)) | 0;
 }
 
 /**
@@ -2676,7 +2587,7 @@ function immediateAddSubtractOp(c, bus) {
     if (!rewriteEaSized(c, bus, size, result)) {
         return;
     }
-    setAddSubtractFlags(c, bus, subtract, target, source, result, size);
+    setAddSubtractFlags(c, subtract, target, source, result, size);
 }
 
 /**
@@ -2704,7 +2615,7 @@ function quickDataAlterable(c, bus) {
     if (!rewriteEaSized(c, bus, size, result)) {
         return;
     }
-    setAddSubtractFlags(c, bus, subtract, target, source, result, size);
+    setAddSubtractFlags(c, subtract, target, source, result, size);
 }
 
 /**
@@ -2733,8 +2644,8 @@ function extendArithmeticOp(c, bus) {
     const subtract = (code & extendArithmeticAddBit) === 0;
     const memoryMode = (code & extendArithmeticMemoryBit) !== 0;
     const oldZero = c.zero;
-    let source = asU32(c.reg[sourceReg]);
-    let target = asU32(c.reg[destReg]);
+    let source = c.reg[sourceReg] >>> 0;
+    let target = c.reg[destReg] >>> 0;
     if (memoryMode) {
         source = getFromEaSized(c, bus, size, 4, sourceReg);
         if (c.exception !== 0) {
@@ -2754,9 +2665,9 @@ function extendArithmeticOp(c, bus) {
             return;
         }
     } else {
-        writeDataRegisterSized(c, bus, destReg, size, result);
+        writeDataRegisterSized(c, destReg, size, result);
     }
-    setAddSubtractFlags(c, bus, subtract, target, source, result, size);
+    setAddSubtractFlags(c, subtract, target, source, result, size);
     c.zero = oldZero && c.zero;
 }
 
@@ -2773,7 +2684,7 @@ function logicalRegisterOp(c, bus) {
     const eaReg = code & 7;
     const index = (code >> 9) & 7;
     const size = operandSizeFromBits(code >> sizeFieldShift);
-    let source = asU32(c.reg[index]);
+    let source = c.reg[index] >>> 0;
     let target = source;
     const eaDestination = exclusiveOr || (code & eaDestinationBit) !== 0;
     if (eaDestination) {
@@ -2805,9 +2716,9 @@ function logicalRegisterOp(c, bus) {
             return;
         }
     } else {
-        writeDataRegisterSized(c, bus, index, size, result);
+        writeDataRegisterSized(c, index, size, result);
     }
-    setNzClearCv(c, bus, result, size);
+    setNzClearCv(c, result, size);
 }
 
 /**
@@ -2818,16 +2729,16 @@ function immediateLogicalOp(c, bus) {
     const code = c.code;
     const statusDestination = (code & immediateStatusOpcodeMask) === immediateStatusOpcode;
     const statusRegister = (code & immediateStatusSrBit) !== 0;
-    if (statusDestination && statusRegister && !ensureSupervisor(c, bus)) {
+    if (statusDestination && statusRegister && !ensureSupervisor(c)) {
         return;
     }
     const operation = (code >> 9) & 7;
     if ((immediateLogicalOperationMask & (1 << operation)) === 0) {
-        raiseInstructionException(c, bus, illegalInstructionVector);
+        raiseInstructionException(c, illegalInstructionVector);
         return;
     }
     if (statusDestination) {
-        const target = getSr(c, bus);
+        const target = getSr(c);
         const source = readPcWord(c, bus);
         if (c.exception !== 0) {
             return;
@@ -2845,10 +2756,10 @@ function immediateLogicalOp(c, bus) {
             break;
         }
         if (statusRegister) {
-            putSr(c, bus, result);
+            putSr(c, result);
             return;
         }
-        putCcr(c, bus, result);
+        putCcr(c, result);
         return;
     }
     const eaMode = (code >> 3) & 7;
@@ -2877,7 +2788,7 @@ function immediateLogicalOp(c, bus) {
     if (!rewriteEaSized(c, bus, size, result)) {
         return;
     }
-    setNzClearCv(c, bus, result, size);
+    setNzClearCv(c, result, size);
 }
 
 /**
@@ -2901,11 +2812,11 @@ function branchOp(c, bus) {
         if (!pushLongToStack(c, bus, returnPc)) {
             return;
         }
-        setPc(c, bus, addressOffset(base, displ));
+        setPc(c, addressOffset(base, displ));
         return;
     }
-    if (conditionIsTrue(c, bus, condition)) {
-        setPc(c, bus, addressOffset(base, displ));
+    if (conditionIsTrue(c, condition)) {
+        setPc(c, addressOffset(base, displ));
     }
 }
 
@@ -2931,8 +2842,8 @@ function bitOp(c, bus) {
     }
     if (eaMode === 0) {
         const mask = (1 << (bit & 31)) >>> 0;
-        c.zero = (asU32(c.reg[eaReg]) & mask) === 0;
-        let value = asU32(c.reg[eaReg]);
+        c.zero = ((c.reg[eaReg] >>> 0) & mask) === 0;
+        let value = c.reg[eaReg] >>> 0;
         switch (operation) {
         case bitOpTest:
             return;
@@ -2946,7 +2857,7 @@ function bitOp(c, bus) {
             value |= mask;
             break;
         }
-        c.reg[eaReg] = asI32(value);
+        c.reg[eaReg] = value | 0;
         return;
     }
     const mask = 1 << (bit & 7);
@@ -2998,12 +2909,12 @@ function chkOp(c, bus) {
     }
     if (d < 0) {
         c.negative = true;
-        coreRaiseException(c, bus, chkVector);
+        coreRaiseException(c, chkVector);
         return;
     }
     if (d > ea) {
         c.negative = false;
-        coreRaiseException(c, bus, chkVector);
+        coreRaiseException(c, chkVector);
     }
 }
 
@@ -3023,7 +2934,7 @@ function clrOp(c, bus) {
     if (c.exception !== 0 || !rewriteEaSized(c, bus, size, 0)) {
         return;
     }
-    setNzClearCv(c, bus, 0, size);
+    setNzClearCv(c, 0, size);
 }
 
 /**
@@ -3050,17 +2961,17 @@ function cmpOp(c, bus) {
     }
     let source = getFromEaSized(c, bus, size, eaMode, eaReg);
     if (addressRegisterTarget && size === operandWord) {
-        source = asU32(asI16(source));
+        source = asI16(source) >>> 0;
     }
     if (c.exception !== 0) {
         return;
     }
-    let target = asU32(c.reg[index]);
+    let target = c.reg[index] >>> 0;
     if (addressRegisterTarget) {
-        target = asU32(c.reg[addressRegisterBase + index]);
+        target = c.reg[addressRegisterBase + index] >>> 0;
         size = operandLong;
     }
-    setCompareFlagsResult(c, bus, target, source, target - source, size);
+    setCompareFlagsResult(c, target, source, target - source, size);
 }
 
 /**
@@ -3083,7 +2994,7 @@ function cmpiOp(c, bus) {
     if (c.exception !== 0) {
         return;
     }
-    setCompareFlagsResult(c, bus, target, source, target - source, size);
+    setCompareFlagsResult(c, target, source, target - source, size);
 }
 
 /**
@@ -3103,7 +3014,7 @@ function cmpmOp(c, bus) {
     if (c.exception !== 0) {
         return;
     }
-    setCompareFlagsResult(c, bus, target, source, target - source, size);
+    setCompareFlagsResult(c, target, source, target - source, size);
 }
 
 /**
@@ -3113,7 +3024,7 @@ function cmpmOp(c, bus) {
 function dbccOp(c, bus) {
     const code = c.code;
     const condition = (code >> 8) & conditionCodeMask;
-    if (conditionIsTrue(c, bus, condition)) {
+    if (conditionIsTrue(c, condition)) {
         readPcWord(c, bus);
         return;
     }
@@ -3124,9 +3035,9 @@ function dbccOp(c, bus) {
     }
     const counterReg = code & 7;
     const oldCounter = c.reg[counterReg] & 0xFFFF;
-    writeDataRegisterSized(c, bus, counterReg, operandWord, oldCounter - 1);
+    writeDataRegisterSized(c, counterReg, operandWord, oldCounter - 1);
     if (oldCounter !== 0) {
-        setPc(c, bus, addressOffset(base, displ));
+        setPc(c, addressOffset(base, displ));
     }
 }
 
@@ -3147,7 +3058,7 @@ function divideOp(c, bus) {
         return;
     }
     if (source === 0) {
-        coreRaiseException(c, bus, divideByZeroVector);
+        coreRaiseException(c, divideByZeroVector);
         return;
     }
     if ((code & divideSignedBit) !== 0) {
@@ -3160,12 +3071,12 @@ function divideOp(c, bus) {
             return;
         }
         const quotientWord = quotient & 0xFFFF;
-        setNzClearCv(c, bus, quotientWord, operandWord);
+        setNzClearCv(c, quotientWord, operandWord);
         const remainder = dividend - quotient * signedSource;
-        c.reg[index] = asI32(((remainder & 0xFFFF) << 16) | quotientWord);
+        c.reg[index] = (((remainder & 0xFFFF) << 16) | quotientWord) | 0;
         return;
     }
-    const dividend = asU32(c.reg[index]);
+    const dividend = c.reg[index] >>> 0;
     const quotient = Math.floor(dividend / source);
     if (quotient > 0xFFFF) {
         c.carry = false;
@@ -3173,9 +3084,9 @@ function divideOp(c, bus) {
         return;
     }
     const quotientWord = quotient & 0xFFFF;
-    setNzClearCv(c, bus, quotientWord, operandWord);
+    setNzClearCv(c, quotientWord, operandWord);
     const remainder = dividend - quotient * source;
-    c.reg[index] = asI32(((remainder & 0xFFFF) << 16) | quotientWord);
+    c.reg[index] = (((remainder & 0xFFFF) << 16) | quotientWord) | 0;
 }
 
 /**
@@ -3198,7 +3109,7 @@ function exgOp(c, bus) {
     case exgDataDataForm:
         break;
     default:
-        raiseInstructionException(c, bus, illegalInstructionVector);
+        raiseInstructionException(c, illegalInstructionVector);
         return;
     }
     const value = c.reg[leftIndex];
@@ -3214,14 +3125,14 @@ function extOp(c, bus) {
     const code = c.code;
     const index = code & 7;
     if ((code & extLongBit) === 0) {
-        const value = asU32(asI8(c.reg[index]));
-        writeDataRegisterSized(c, bus, index, operandWord, value);
-        setNzClearCv(c, bus, value, operandWord);
+        const value = asI8(c.reg[index]) >>> 0;
+        writeDataRegisterSized(c, index, operandWord, value);
+        setNzClearCv(c, value, operandWord);
         return;
     }
     const signedValue = asI16(c.reg[index]);
     c.reg[index] = signedValue;
-    setNzClearCv(c, bus, asU32(signedValue), operandLong);
+    setNzClearCv(c, signedValue >>> 0, operandLong);
 }
 
 /**
@@ -3242,7 +3153,7 @@ function jumpOp(c, bus) {
     if ((code & jumpWithoutReturnBit) === 0 && !pushLongToStack(c, bus, c.pc)) {
         return;
     }
-    setPc(c, bus, ea);
+    setPc(c, ea);
 }
 
 /**
@@ -3290,7 +3201,7 @@ function moveOp(c, bus) {
     const destReg = (code >> 9) & 7;
     const sizeCode = (code >> 12) & sizeFieldMask;
     if (sizeCode === 0) {
-        raiseInstructionException(c, bus, illegalInstructionVector);
+        raiseInstructionException(c, illegalInstructionVector);
         return;
     }
     const size = moveOperandSizes[sizeCode];
@@ -3305,7 +3216,7 @@ function moveOp(c, bus) {
     if (c.exception !== 0) {
         return;
     }
-    setNzClearCv(c, bus, value, size);
+    setNzClearCv(c, value, size);
 }
 
 /**
@@ -3315,7 +3226,7 @@ function moveOp(c, bus) {
 function moveToStatus(c, bus) {
     const code = c.code;
     const moveToSr = (code & moveToStatusSrBit) !== 0;
-    if (moveToSr && !ensureSupervisor(c, bus)) {
+    if (moveToSr && !ensureSupervisor(c)) {
         return;
     }
     const eaMode = (code >> 3) & 7;
@@ -3328,10 +3239,10 @@ function moveToStatus(c, bus) {
         return;
     }
     if (moveToSr) {
-        putSr(c, bus, x);
+        putSr(c, x);
         return;
     }
-    putCcr(c, bus, x);
+    putCcr(c, x);
 }
 
 /**
@@ -3345,7 +3256,7 @@ function moveFromSr(c, bus) {
     if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
-    putToEaSized(c, bus, operandWord, eaMode, eaReg, getSr(c, bus));
+    putToEaSized(c, bus, operandWord, eaMode, eaReg, getSr(c));
 }
 
 /**
@@ -3354,7 +3265,7 @@ function moveFromSr(c, bus) {
  */
 function moveUsp(c, bus) {
     const code = c.code;
-    if (!ensureSupervisor(c, bus)) {
+    if (!ensureSupervisor(c)) {
         return;
     }
     const index = addressRegisterBase + (code & 7);
@@ -3381,7 +3292,7 @@ function moveaOp(c, bus) {
     if ((code & moveaWordBit) !== 0) {
         size = operandWord;
     }
-    let d = asI32(getFromEaSized(c, bus, size, sourceMode, sourceReg));
+    let d = getFromEaSized(c, bus, size, sourceMode, sourceReg) | 0;
     if (size === operandWord) {
         d = asI16(d);
     }
@@ -3409,7 +3320,7 @@ function movemOp(c, bus) {
         return;
     }
     if (!load && eaMode !== 4 && (!eaIsControl(eaMode, eaReg) || (eaMode === 7 && eaReg > 1))) {
-        raiseInstructionException(c, bus, illegalInstructionVector);
+        raiseInstructionException(c, illegalInstructionVector);
         return;
     }
     let mask = readPcWord(c, bus);
@@ -3449,7 +3360,7 @@ function movemOp(c, bus) {
             if ((mask & 1) !== 0) {
                 let value;
                 if (size === operandLong) {
-                    value = asI32(readLong(c, bus, ea));
+                    value = readLong(c, bus, ea) | 0;
                 } else {
                     value = readWord(c, bus, ea);
                 }
@@ -3481,7 +3392,7 @@ function movemOp(c, bus) {
             if ((mask & 1) !== 0) {
                 ea = addressOffset(ea, -step);
                 if (size === operandLong) {
-                    writeLong(c, bus, ea, asU32(c.reg[i]));
+                    writeLong(c, bus, ea, c.reg[i] >>> 0);
                 } else {
                     writeWord(c, bus, ea, c.reg[i] & 0xFFFF);
                 }
@@ -3510,7 +3421,7 @@ function movemOp(c, bus) {
     for (let i = 0; mask !== 0; i += 1) {
         if ((mask & 1) !== 0) {
             if (size === operandLong) {
-                writeLong(c, bus, ea, asU32(c.reg[i]));
+                writeLong(c, bus, ea, c.reg[i] >>> 0);
             } else {
                 writeWord(c, bus, ea, c.reg[i] & 0xFFFF);
             }
@@ -3543,13 +3454,13 @@ function movepOp(c, bus) {
             const high2 = readByte(c, bus, addressOffset(ea, 2 * qdosWordSize));
             const low2 = readByte(c, bus, addressOffset(ea, 3 * qdosWordSize));
             value = (value << 16) | (high2 << 8) | low2;
-            writeDataRegisterSized(c, bus, dataIndex, operandLong, value);
+            writeDataRegisterSized(c, dataIndex, operandLong, value);
             return;
         }
-        writeDataRegisterSized(c, bus, dataIndex, operandWord, value);
+        writeDataRegisterSized(c, dataIndex, operandWord, value);
         return;
     }
-    const value = asU32(c.reg[dataIndex]);
+    const value = c.reg[dataIndex] >>> 0;
     if ((code & movepLongBit) !== 0) {
         writeByte(c, bus, ea, value >>> 24);
         writeByte(c, bus, addressOffset(ea, qdosWordSize), value >>> 16);
@@ -3570,7 +3481,7 @@ function moveqOp(c, bus) {
     const index = (code >> 9) & 7;
     const signedValue = asI8(code);
     c.reg[index] = signedValue;
-    setNzClearCv(c, bus, asU32(signedValue), operandLong);
+    setNzClearCv(c, signedValue >>> 0, operandLong);
 }
 
 /**
@@ -3597,12 +3508,12 @@ function multiplyOp(c, bus) {
     c.instructionCycleOverride = 42 + 2 * popcount(cycleBits) + cpuEaReadCycles(eaMode, eaReg, operandWord);
     let result;
     if (signedMultiply) {
-        result = asU32(asI16(c.reg[index]) * asI16(source));
+        result = (asI16(c.reg[index]) * asI16(source)) >>> 0;
     } else {
         result = ((c.reg[index] & 0xFFFF) * source) >>> 0;
     }
-    c.reg[index] = asI32(result);
-    setNzClearCv(c, bus, result, operandLong);
+    c.reg[index] = result | 0;
+    setNzClearCv(c, result, operandLong);
 }
 
 /**
@@ -3665,7 +3576,7 @@ function negOp(c, bus) {
     if (!rewriteEaSized(c, bus, size, result)) {
         return;
     }
-    setCompareFlagsResult(c, bus, 0, target, result, size);
+    setCompareFlagsResult(c, 0, target, result, size);
     c.xflag = c.carry;
     if (extend) {
         c.zero = chainedZero && c.zero;
@@ -3698,7 +3609,7 @@ function notOp(c, bus) {
     if (!rewriteEaSized(c, bus, size, ~target)) {
         return;
     }
-    setNzClearCv(c, bus, ~target, size);
+    setNzClearCv(c, ~target, size);
 }
 
 /**
@@ -3710,7 +3621,7 @@ function lineEmulatorException(c, bus) {
     if ((c.code & opcodeClassSelectBit) !== 0) {
         vector = line1111Vector;
     }
-    raiseInstructionException(c, bus, vector);
+    raiseInstructionException(c, vector);
 }
 
 /**
@@ -3735,7 +3646,7 @@ function peaOp(c, bus) {
  * @param {CpuBus} bus
  */
 function resetOp(c, bus) {
-    if (!ensureSupervisor(c, bus)) {
+    if (!ensureSupervisor(c)) {
         return;
     }
     bus.resetHardware();
@@ -3812,7 +3723,7 @@ function shiftRotateMemoryWord(c, bus) {
  * @param {CpuBus} bus
  */
 function rteOp(c, bus) {
-    if (!ensureSupervisor(c, bus)) {
+    if (!ensureSupervisor(c)) {
         return;
     }
     const stack = c.reg[stackRegisterIndex];
@@ -3820,16 +3731,16 @@ function rteOp(c, bus) {
     if (c.exception !== 0) {
         return;
     }
-    const returnPc = asI32(readLong(c, bus, addressOffset(stack, exceptionFramePcOffset)));
+    const returnPc = readLong(c, bus, addressOffset(stack, exceptionFramePcOffset)) | 0;
     if (c.exception !== 0) {
         return;
     }
-    setPc(c, bus, returnPc);
+    setPc(c, returnPc);
     if (c.exception !== 0) {
         return;
     }
     c.reg[stackRegisterIndex] = addressOffset(stack, exceptionFrameSize);
-    putSr(c, bus, sr);
+    putSr(c, sr);
 }
 
 /**
@@ -3842,16 +3753,16 @@ function rtrOp(c, bus) {
     if (c.exception !== 0) {
         return;
     }
-    const returnPc = asI32(readLong(c, bus, addressOffset(stack, exceptionFramePcOffset)));
+    const returnPc = readLong(c, bus, addressOffset(stack, exceptionFramePcOffset)) | 0;
     if (c.exception !== 0) {
         return;
     }
-    setPc(c, bus, returnPc);
+    setPc(c, returnPc);
     if (c.exception !== 0) {
         return;
     }
     c.reg[stackRegisterIndex] = addressOffset(stack, exceptionFrameSize);
-    putCcr(c, bus, cc);
+    putCcr(c, cc);
 }
 
 /**
@@ -3860,11 +3771,11 @@ function rtrOp(c, bus) {
  */
 function rtsOp(c, bus) {
     const stack = c.reg[stackRegisterIndex];
-    const returnAddr = asI32(readLong(c, bus, stack));
+    const returnAddr = readLong(c, bus, stack) | 0;
     if (c.exception !== 0) {
         return;
     }
-    setPc(c, bus, returnAddr);
+    setPc(c, returnAddr);
     if (c.exception !== 0) {
         return;
     }
@@ -3884,7 +3795,7 @@ function sccOp(c, bus) {
     }
     let conditionValue = 0;
     const condition = (code >> 8) & conditionCodeMask;
-    if (conditionIsTrue(c, bus, condition)) {
+    if (conditionIsTrue(c, condition)) {
         conditionValue = 0xFF;
     }
     putToEaSized(c, bus, operandByte, eaMode, eaReg, conditionValue);
@@ -3895,14 +3806,14 @@ function sccOp(c, bus) {
  * @param {CpuBus} bus
  */
 function stopOp(c, bus) {
-    if (!ensureSupervisor(c, bus)) {
+    if (!ensureSupervisor(c)) {
         return;
     }
     const sr = readPcWord(c, bus);
     if (c.exception !== 0) {
         return;
     }
-    putSr(c, bus, sr);
+    putSr(c, sr);
     if (c.exception !== 0) {
         return;
     }
@@ -3917,10 +3828,10 @@ function stopOp(c, bus) {
  */
 function swapOp(c, bus) {
     const index = c.code & 7;
-    let value = asU32(c.reg[index]);
+    let value = c.reg[index] >>> 0;
     value = ((value << 16) | (value >>> 16)) >>> 0;
-    c.reg[index] = asI32(value);
-    setNzClearCv(c, bus, value, operandLong);
+    c.reg[index] = value | 0;
+    setNzClearCv(c, value, operandLong);
 }
 
 /**
@@ -3938,7 +3849,7 @@ function tasOp(c, bus) {
     if (c.exception !== 0 || !rewriteEaSized(c, bus, operandByte, value | 0x80)) {
         return;
     }
-    setNzClearCv(c, bus, value, operandByte);
+    setNzClearCv(c, value, operandByte);
 }
 
 /**
@@ -3946,7 +3857,7 @@ function tasOp(c, bus) {
  * @param {CpuBus} bus
  */
 function trapOp(c, bus) {
-    coreRaiseException(c, bus, qdosTrapVectorBase + (c.code & 15));
+    coreRaiseException(c, qdosTrapVectorBase + (c.code & 15));
 }
 
 /**
@@ -3955,7 +3866,7 @@ function trapOp(c, bus) {
  */
 function trapvOp(c, bus) {
     if (c.overflow) {
-        coreRaiseException(c, bus, trapvVector);
+        coreRaiseException(c, trapvVector);
     }
 }
 
@@ -3975,7 +3886,7 @@ function tstOp(c, bus) {
     if (c.exception !== 0) {
         return;
     }
-    setNzClearCv(c, bus, value, size);
+    setNzClearCv(c, value, size);
 }
 
 /**
@@ -3986,7 +3897,7 @@ function unlkOp(c, bus) {
     const index = addressRegisterBase + (c.code & 7);
     const stack = c.reg[index];
     c.reg[stackRegisterIndex] = stack;
-    const restored = asI32(readLong(c, bus, stack));
+    const restored = readLong(c, bus, stack) | 0;
     if (c.exception !== 0) {
         return;
     }
@@ -4003,7 +3914,7 @@ function shiftRotateDataRegister(c, bus) {
     const left = (code & shiftRotateLeftBit) !== 0;
     const sizeField = (code >> sizeFieldShift) & sizeFieldMask;
     if (sizeField === invalidSizeField) {
-        raiseInstructionException(c, bus, illegalInstructionVector);
+        raiseInstructionException(c, illegalInstructionVector);
         return;
     }
     const size = operandSizeFromBits(sizeField);
@@ -4014,7 +3925,7 @@ function shiftRotateDataRegister(c, bus) {
     const width = 8 << size;
     const operation = (code >> dataRegisterShiftOperationShift) & shiftOperationMask;
     const index = code & 7;
-    let value = asU32(c.reg[index]) & operandSizes[size].valueMask;
+    let value = (c.reg[index] >>> 0) & operandSizes[size].valueMask;
     const signBit = (1 << (width - 1)) >>> 0;
     c.carry = false;
     let newOverflow = false;
@@ -4062,7 +3973,7 @@ function shiftRotateDataRegister(c, bus) {
     } else if (operation === shiftOperationRotateExtend) {
         c.carry = c.xflag;
     }
-    writeDataRegisterSized(c, bus, index, size, value);
+    writeDataRegisterSized(c, index, size, value);
     c.negative = (value & signBit) !== 0;
     c.zero = value === 0;
     c.overflow = newOverflow;

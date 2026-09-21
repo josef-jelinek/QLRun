@@ -56,9 +56,16 @@
  * }} Keyboard
  */
 
-export const keyModAlt = 1;
-export const keyModCtrl = 2;
-export const keyModShift = 4;
+// Modifiers as they travel in the IPC read-keys reply.
+const keyModAlt = 1;
+const keyModCtrl = 2;
+const keyModShift = 4;
+
+// Overlay pseudo-codes for the modifiers, which have no matrix code of their
+// own and are held in the same pressed set as the character keys.
+const keyShift = -1;
+const keyCtrl = -2;
+const keyAlt = -3;
 
 const letterA = 0x1C;
 const letterB = 0x2C;
@@ -183,7 +190,7 @@ const overlayKeys = [
     {label: "'", code: keyQuote, codes: ["Quote"], x: 581, y: 76, w: 40, h: 28, title: "\""},
     {label: "ENTER", code: keyEnter, codes: ["Enter", "NumpadEnter"], x: 625, y: 76, w: 73, h: 28},
 
-    {label: "SHIFT", code: -1, codes: ["ShiftLeft"], x: 64, y: 110, w: 95, h: 28},
+    {label: "SHIFT", code: keyShift, codes: ["ShiftLeft"], x: 64, y: 110, w: 95, h: 28},
     {label: "Z", code: letterZ, codes: ["KeyZ"], x: 163, y: 110, w: 40, h: 28},
     {label: "X", code: letterX, codes: ["KeyX"], x: 207, y: 110, w: 40, h: 28},
     {label: "C", code: letterC, codes: ["KeyC"], x: 251, y: 110, w: 40, h: 28},
@@ -194,42 +201,46 @@ const overlayKeys = [
     {label: ",", code: keyComma, codes: ["Comma"], x: 471, y: 110, w: 40, h: 28, title: "<"},
     {label: ".", code: keyPeriod, codes: ["Period", "NumpadDecimal"], x: 515, y: 110, w: 40, h: 28, title: ">"},
     {label: "/", code: keySlash, codes: ["Slash", "NumpadDivide"], x: 559, y: 110, w: 40, h: 28, title: "?"},
-    {label: "SHIFT", code: -1, codes: ["ShiftRight"], x: 603, y: 110, w: 95, h: 28},
+    {label: "SHIFT", code: keyShift, codes: ["ShiftRight"], x: 603, y: 110, w: 95, h: 28},
 
-    {label: "CTRL", code: -2, codes: ["ControlLeft", "ControlRight"], x: 64, y: 144, w: 73, h: 28},
+    {label: "CTRL", code: keyCtrl, codes: ["ControlLeft", "ControlRight"], x: 64, y: 144, w: 73, h: 28},
     {label: "\u2190", code: keyLeft, codes: ["ArrowLeft"], x: 141, y: 144, w: 40, h: 28},
     {label: "\u2192", code: keyRight, codes: ["ArrowRight"], x: 185, y: 144, w: 40, h: 28},
     {label: "SPACE", code: keySpace, codes: ["Space"], x: 229, y: 144, w: 304, h: 28},
     {label: "\u2191", code: keyUp, codes: ["ArrowUp"], x: 537, y: 144, w: 40, h: 28},
     {label: "\u2193", code: keyDown, codes: ["ArrowDown"], x: 581, y: 144, w: 40, h: 28},
-    {label: "ALT", code: -3, codes: ["AltLeft", "AltRight"], x: 625, y: 144, w: 73, h: 28},
+    {label: "ALT", code: keyAlt, codes: ["AltLeft", "AltRight"], x: 625, y: 144, w: 73, h: 28},
 ];
 
-/** @type {Object<string, number>} */
-const hostCodes = {};
+/**
+ * Host key codes to QL matrix codes: every overlay key plus host-only keys
+ * that map onto QL cursor combinations.
+ *
+ * @type {Object<string, number>}
+ */
+const hostCodes = {
+    Backspace: keyLeft,
+    Delete: keyRight,
+    Home: keyLeft,
+    End: keyRight,
+    PageUp: keyUp,
+    PageDown: keyDown,
+    NumpadAdd: keyEqual,
+    NumpadMultiply: key8,
+};
 for (let i = 0; i < overlayKeys.length; i += 1) {
     const spec = overlayKeys[i];
     for (let c = 0; c < spec.codes.length; c += 1) {
         hostCodes[spec.codes[c]] = spec.code;
     }
 }
-hostCodes.Backspace = keyLeft;
-hostCodes.Delete = keyRight;
-hostCodes.Home = keyLeft;
-hostCodes.End = keyRight;
-hostCodes.PageUp = keyUp;
-hostCodes.PageDown = keyDown;
-hostCodes.NumpadAdd = keyEqual;
-hostCodes.NumpadMultiply = key8;
 
 /**
- * Extra QL modifiers forced by a host key, ORed with held Shift/Ctrl/Alt.
+ * Extra QL modifier pseudo-code forced by a host key, held with Shift/Ctrl/Alt.
  *
  * @type {Object<string, number>}
  */
-const hostForcedMods = {};
-hostForcedMods.Backspace = keyModCtrl;
-hostForcedMods.Delete = keyModCtrl;
+const hostForcedMods = {Backspace: keyCtrl, Delete: keyCtrl};
 
 /**
  * Bind host and pointer input to the QL matrix and onscreen keyboard.
@@ -268,26 +279,6 @@ export function init(el, keys) {
     return kbd;
 }
 
-/**
- * 1 is one image pixel per CSS pixel.
- *
- * @param {HTMLElement} el
- * @param {number} scale
- */
-export function setScale(el, scale) {
-    const face = el.querySelector(".keyboard-face");
-    if (!(face instanceof HTMLElement)) {
-        return;
-    }
-    let s = scale;
-    if (s < 0.25) {
-        s = 0.25;
-    }
-    if (s > 8) {
-        s = 8;
-    }
-    face.style.width = (keyArtW * s) + "px";
-}
 
 /**
  * Set scale from a vertical drag of the bar above the keyboard.
@@ -371,6 +362,20 @@ export function handleBlur(kbd) {
         kbd.pulseRaf = 0;
     }
     syncKeys(kbd);
+}
+
+/**
+ * 1 is one image pixel per CSS pixel.
+ *
+ * @param {HTMLElement} el
+ * @param {number} scale
+ */
+function setScale(el, scale) {
+    const face = el.querySelector(".keyboard-face");
+    if (!(face instanceof HTMLElement)) {
+        return;
+    }
+    face.style.width = (keyArtW * Math.min(Math.max(scale, 0.25), 8)) + "px";
 }
 
 /**
@@ -485,29 +490,20 @@ function addPressed(pressed, code) {
 }
 
 /**
- * Include a host key's QL code and any forced modifiers in the pressed set.
+ * Include a host key's QL code and any forced modifier in the pressed set.
  *
  * @param {number[]} pressed
  * @param {string} hostCode
  */
 function addHostHeld(pressed, hostCode) {
     addPressed(pressed, hostCodes[hostCode]);
-    const extraMods = hostForcedMods[hostCode];
-    if (extraMods === undefined) {
-        return;
-    }
-    if ((extraMods & keyModShift) !== 0) {
-        addPressed(pressed, -1);
-    }
-    if ((extraMods & keyModCtrl) !== 0) {
-        addPressed(pressed, -2);
-    }
-    if ((extraMods & keyModAlt) !== 0) {
-        addPressed(pressed, -3);
-    }
+    addPressed(pressed, hostForcedMods[hostCode]);
 }
 
 /**
+ * Set the matrix bits and modifier flags for the pressed set. Row 7 holds the
+ * modifiers in bits 0-2, which is also where the machine reads them.
+ *
  * @param {KeyState} keys
  * @param {number[]} pressed
  */
@@ -515,28 +511,22 @@ function applyPressed(keys, pressed) {
     for (let i = 0; i < pressed.length; i += 1) {
         const code = pressed[i];
         switch (code) {
-        case -1:
+        case keyShift:
             keys.shift = true;
-            continue;
-        case -2:
+            keys.rows[7] |= 1;
+            break;
+        case keyCtrl:
             keys.ctrl = true;
-            continue;
-        case -3:
+            keys.rows[7] |= 2;
+            break;
+        case keyAlt:
             keys.alt = true;
-            continue;
+            keys.rows[7] |= 4;
+            break;
         default:
             setMatrixBit(keys, code, true);
             break;
         }
-    }
-    if (keys.shift) {
-        keys.rows[7] |= 1;
-    }
-    if (keys.ctrl) {
-        keys.rows[7] |= 2;
-    }
-    if (keys.alt) {
-        keys.rows[7] |= 4;
     }
 }
 

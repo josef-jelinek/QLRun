@@ -1,4 +1,5 @@
 import * as boot from "./boot.js";
+import * as disk from "./disk.js";
 import * as io from "./io.js";
 import * as keyboard from "./keyboard.js";
 import * as load from "./load.js";
@@ -122,13 +123,15 @@ ui.ntsc.checked = ntscOn;
 machine.setNtsc(ql, ntscOn);
 let frameMs = 1000 / machine.frameHz(ql);
 
-applySwitchParamValue(ui.keyboardToggle, query.get("keyboard") ?? "");
-applySwitchParamValue(ui.crt, query.get("crt") ?? "");
-applyQsoundParamValue(query.get("qsound") ?? "");
-applySwitchParamValue(ui.stereo, query.get("stereo") ?? "");
-applySwitchParamValue(ui.turbo, query.get("turbo") ?? "");
-applySwitchParamValue(ui.stretch, query.get("stretch") ?? "");
-setKeyboardVisibility(ui.keyboardToggle.checked);
+applySwitchParam(ui.keyboardToggle, "keyboard", "1", "01");
+applySwitchParam(ui.crt, "crt", "1", "01");
+applySwitchParam(ui.qsound, "qsound", "1", "012");
+applySwitchParam(ui.qsound2, "qsound", "2", "012");
+applySwitchParam(ui.stereo, "stereo", "1", "01");
+applySwitchParam(ui.turbo, "turbo", "1", "01");
+applySwitchParam(ui.stretch, "stretch", "1", "01");
+keyboardVisible = ui.keyboardToggle.checked;
+applyVisibility();
 
 ui.reset.onclick = function () {
     resetSystem();
@@ -136,7 +139,8 @@ ui.reset.onclick = function () {
 
 ui.keyboardToggle.onchange = function () {
     updateUrlParam("keyboard", ui.keyboardToggle.checked);
-    setKeyboardVisibility(ui.keyboardToggle.checked);
+    keyboardVisible = ui.keyboardToggle.checked;
+    applyVisibility();
 };
 
 ui.crt.onchange = function () {
@@ -196,16 +200,13 @@ ui.keyboardSplit.onpointerdown = function (/** @type {PointerEvent} */ e) {
     e.preventDefault();
     document.body.classList.add("keyboard-splitting");
     keyboard.scaleFromY(ui.keyboard, ui.keyboardSplit, e.clientY);
-    resize();
     ui.keyboardSplit.setPointerCapture(e.pointerId);
 };
 
 ui.keyboardSplit.onpointermove = function (/** @type {PointerEvent} */ e) {
-    if (!ui.keyboardSplit.hasPointerCapture(e.pointerId)) {
-        return;
+    if (ui.keyboardSplit.hasPointerCapture(e.pointerId)) {
+        keyboard.scaleFromY(ui.keyboard, ui.keyboardSplit, e.clientY);
     }
-    keyboard.scaleFromY(ui.keyboard, ui.keyboardSplit, e.clientY);
-    resize();
 };
 
 ui.keyboardSplit.onpointerup = function (/** @type {PointerEvent} */ e) {
@@ -217,11 +218,14 @@ ui.keyboardSplit.onpointercancel = function (/** @type {PointerEvent} */ e) {
 };
 
 new ResizeObserver(function () {
-    resize();
+    if (gfx !== null) {
+        screen.resize(gfx);
+    }
 }).observe(ui.screenSlot);
 
 document.onfullscreenchange = function () {
-    setScreenOnly(document.fullscreenElement !== null || screenOnlyFallback);
+    screenOnly = document.fullscreenElement !== null || screenOnlyFallback;
+    applyVisibility();
 };
 
 window.onkeydown = function (e) {
@@ -285,7 +289,7 @@ for (let drive = 0; drive < ui.mdv.length; drive += 1) {
             updateUrlParam("url", null);
             cancelStartupFile();
         }
-        io.readFile(file, "arraybuffer", function (err, buf) {
+        io.readFile(file, function (err, buf) {
             if (err !== null) {
                 showError(controls.info, err);
                 return;
@@ -348,7 +352,7 @@ ui.fileRom.onchange = function () {
         return;
     }
     updateUrlParam("rom", null);
-    io.readFile(file, "arraybuffer", function (err, buf) {
+    io.readFile(file, function (err, buf) {
         if (err !== null) {
             showError(ui.romInfo, err);
             return;
@@ -378,7 +382,7 @@ ui.fileRomCartridge.onchange = function () {
     if (file === undefined) {
         return;
     }
-    io.readFile(file, "arraybuffer", function (err, buf) {
+    io.readFile(file, function (err, buf) {
         if (err !== null) {
             showError(ui.romCartridgeInfo, err);
             return;
@@ -415,7 +419,7 @@ ui.fileHdd.onchange = function () {
     if (file === undefined) {
         return;
     }
-    io.readFile(file, "arraybuffer", function (err, buf) {
+    io.readFile(file, function (err, buf) {
         if (err !== null) {
             showError(ui.hddInfo, err);
             return;
@@ -424,7 +428,7 @@ ui.fileHdd.onchange = function () {
             showError(ui.hddInfo, "Empty read.");
             return;
         }
-        const hddErr = machine.insertHdd(ql, buf, file.name);
+        const hddErr = disk.insert(ql.disks.win, buf, file.name);
         if (hddErr !== null) {
             showError(ui.hddInfo, hddErr);
             return;
@@ -434,7 +438,7 @@ ui.fileHdd.onchange = function () {
 };
 
 ui.downloadHdd.onclick = function () {
-    const saved = machine.saveHdd(ql);
+    const saved = disk.save(ql.disks.win);
     if (saved === null) {
         return;
     }
@@ -456,7 +460,7 @@ ui.downloadHdd.onclick = function () {
 };
 
 ui.ejectHdd.onclick = function () {
-    machine.ejectHdd(ql);
+    disk.eject(ql.disks.win);
     refreshHddStatus();
 };
 
@@ -470,7 +474,7 @@ ui.fileFdd.onchange = function () {
     if (file === undefined) {
         return;
     }
-    io.readFile(file, "arraybuffer", function (err, buf) {
+    io.readFile(file, function (err, buf) {
         if (err !== null) {
             showError(ui.fddInfo, err);
             return;
@@ -479,7 +483,7 @@ ui.fileFdd.onchange = function () {
             showError(ui.fddInfo, "Empty read.");
             return;
         }
-        const fddErr = machine.insertFdd(ql, buf, file.name);
+        const fddErr = disk.insert(ql.disks.flp, buf, file.name);
         if (fddErr !== null) {
             showError(ui.fddInfo, fddErr);
             return;
@@ -489,7 +493,7 @@ ui.fileFdd.onchange = function () {
 };
 
 ui.downloadFdd.onclick = function () {
-    const saved = machine.saveFdd(ql);
+    const saved = disk.save(ql.disks.flp);
     if (saved === null) {
         return;
     }
@@ -510,7 +514,7 @@ ui.downloadFdd.onclick = function () {
 };
 
 ui.ejectFdd.onclick = function () {
-    machine.ejectFdd(ql);
+    disk.eject(ql.disks.flp);
     refreshFddStatus();
 };
 
@@ -543,26 +547,29 @@ boot.loadShaders(function (err, shaders) {
     );
 });
 
-sound.init(machine.frameHz(ql), function (err, initializedSfx) {
-    if (err !== null) {
-        showError(ui.soundInfo, "No sound: " + err);
-        return;
-    }
-    if (initializedSfx === null) {
-        showError(ui.soundInfo, "No sound.");
-        return;
-    }
-    sfx = initializedSfx;
-    sound.setNeedCallback(initializedSfx, fillSoundQueue);
-    sound.setStereo(initializedSfx, ui.stereo.checked);
-    machine.setSoundRate(ql, initializedSfx.context.sampleRate);
-    sound.setStateCallback(initializedSfx, function (running) {
+sound.init(
+    machine.frameHz(ql),
+    fillSoundQueue,
+    function (running) {
         machine.enableSound(ql, running);
-    });
-    machine.enableSound(ql, sound.isRunning(initializedSfx));
-});
+    },
+    function (err, initializedSfx) {
+        if (err !== null) {
+            showError(ui.soundInfo, "No sound: " + err);
+            return;
+        }
+        if (initializedSfx === null) {
+            showError(ui.soundInfo, "No sound.");
+            return;
+        }
+        sfx = initializedSfx;
+        sound.setStereo(initializedSfx, ui.stereo.checked);
+        machine.setSoundRate(ql, initializedSfx.context.sampleRate);
+        machine.enableSound(ql, initializedSfx.context.state === "running");
+    },
+);
 
-boot.loadQsoundRom(machine.qsoundRomSize, function (err, rom) {
+boot.loadRom(boot.qsoundRomUrl, machine.qsoundRomSize, function (err, rom) {
     if (rom === null) {
         ui.qsound.checked = false;
         ui.qsound2.checked = false;
@@ -625,28 +632,35 @@ function loadSystemRom() {
             romName = "jsu";
         }
     }
-    abortLoadRom = boot.loadStartupRom(
-        romName,
-        machine.sysRomSize,
-        function (err, name, rom) {
-            abortLoadRom = null;
-            startupRomReady = true;
-            if (rom !== null) {
-                const romErr = machine.setSysRom(ql, rom);
-                if (romErr === null) {
-                    resetSystem();
-                    showInfo(ui.romInfo, name);
-                } else {
-                    showError(ui.romInfo, romErr);
-                }
-            } else if (err !== null) {
-                showError(ui.romInfo, err);
+    const name = romName + ".rom";
+    if (!/^[A-Za-z0-9]+$/.test(romName)) {
+        onRom("Invalid ROM name.", null);
+        return;
+    }
+    abortLoadRom = boot.loadRom("roms/" + name, machine.sysRomSize, onRom);
+
+    /**
+     * @param {string | null} err
+     * @param {ArrayBuffer | null} rom
+     */
+    function onRom(err, rom) {
+        abortLoadRom = null;
+        startupRomReady = true;
+        if (rom !== null) {
+            const romErr = machine.setSysRom(ql, rom);
+            if (romErr === null) {
+                resetSystem();
+                showInfo(ui.romInfo, name);
+            } else {
+                showError(ui.romInfo, romErr);
             }
-            if (startupFileName !== null && startupFileBytes !== null) {
-                applyStartupFile(startupFileName, startupFileBytes);
-            }
-        },
-    );
+        } else if (err !== null) {
+            showError(ui.romInfo, err);
+        }
+        if (startupFileName !== null && startupFileBytes !== null) {
+            applyStartupFile(startupFileName, startupFileBytes);
+        }
+    }
 }
 
 /**
@@ -672,41 +686,18 @@ function showError(el, text) {
 }
 
 /**
- * Apply a valid URL switch value while leaving invalid values unchanged.
+ * Set a switch from its URL parameter: `on` selects it, any other digit in
+ * `values` clears it, and an absent or invalid value keeps the page default.
  *
  * @param {HTMLInputElement} input
- * @param {string} value
+ * @param {string} name
+ * @param {string} on
+ * @param {string} values
  */
-function applySwitchParamValue(input, value) {
-    switch (value) {
-    case "0":
-        input.checked = false;
-        break;
-    case "1":
-        input.checked = true;
-        break;
-    }
-}
-
-/**
- * Apply the three-valued sound-card URL option while retaining its default.
- *
- * @param {string} value
- */
-function applyQsoundParamValue(value) {
-    switch (value) {
-    case "0":
-        ui.qsound.checked = false;
-        ui.qsound2.checked = false;
-        break;
-    case "1":
-        ui.qsound.checked = true;
-        ui.qsound2.checked = false;
-        break;
-    case "2":
-        ui.qsound.checked = false;
-        ui.qsound2.checked = true;
-        break;
+function applySwitchParam(input, name, on, values) {
+    const value = query.get(name) ?? "";
+    if (value.length === 1 && values.includes(value)) {
+        input.checked = value === on;
     }
 }
 
@@ -721,14 +712,7 @@ function updateUrlParam(name, value) {
     if (value === null) {
         url.searchParams.delete(name);
     } else {
-        let encoded = String(value);
-        if (typeof value === "boolean") {
-            encoded = "0";
-            if (value) {
-                encoded = "1";
-            }
-        }
-        url.searchParams.set(name, encoded);
+        url.searchParams.set(name, String(Number(value)));
     }
     window.history.replaceState(null, "", url);
 }
@@ -849,13 +833,6 @@ function applyStartupFile(name, bytes) {
     showError(ui.startupFileInfo, "Unsupported startup file type: " + name + ".");
 }
 
-/** @param {boolean} visible */
-function setKeyboardVisibility(visible) {
-    keyboardVisible = visible;
-    ui.keyboardToggle.checked = visible;
-    applyVisibility();
-}
-
 function toggleCanvasFullscreen() {
     if (document.fullscreenElement !== null || screenOnlyFallback) {
         screenOnlyFallback = false;
@@ -863,36 +840,39 @@ function toggleCanvasFullscreen() {
             document.exitFullscreen().then(
                 function () {},
                 function () {
-                    setScreenOnly(false);
+                    screenOnly = false;
+                    applyVisibility();
                 },
             );
             return;
         }
-        setScreenOnly(false);
+        screenOnly = false;
+        applyVisibility();
         return;
     }
 
     const slot = ui.screen.parentElement;
     if (slot === null || slot.requestFullscreen === undefined) {
         screenOnlyFallback = true;
-        setScreenOnly(true);
+        screenOnly = true;
+        applyVisibility();
         return;
     }
     slot.requestFullscreen().then(
         function () {},
         function () {
             screenOnlyFallback = true;
-            setScreenOnly(true);
+            screenOnly = true;
+            applyVisibility();
         },
     );
 }
 
-/** @param {boolean} on */
-function setScreenOnly(on) {
-    screenOnly = on;
-    applyVisibility();
-}
-
+/**
+ * Hide or show the page chrome and keyboard. Clearing the inline display
+ * lets the stylesheet rule apply again; the screen slot's ResizeObserver
+ * refits the canvas.
+ */
 function applyVisibility() {
     let chromeDisplay = "";
     if (screenOnly) {
@@ -905,7 +885,6 @@ function applyVisibility() {
     ui.pageHeader.style.display = chromeDisplay;
     ui.keyboardSplit.style.display = keyboardDisplay;
     ui.keyboard.style.display = keyboardDisplay;
-    resize();
 }
 
 /** @param {number} pointerId */
@@ -914,12 +893,6 @@ function endKeyboardSplit(pointerId) {
         ui.keyboardSplit.releasePointerCapture(pointerId);
     }
     document.body.classList.remove("keyboard-splitting");
-}
-
-function resize() {
-    if (gfx !== null) {
-        screen.resize(gfx);
-    }
 }
 
 /** Follow the current PAL or US ZX8301 field rate. */
@@ -934,25 +907,20 @@ function syncFrameTiming() {
 /** @param {number} now */
 function onFrame(now) {
     requestAnimationFrame(onFrame);
-    syncFrameTiming();
     if (lastNow === 0) {
         lastNow = now;
         carryMs = frameMs;
     }
-    let dt = now - lastNow;
+    const dt = Math.min(now - lastNow, 80);
     lastNow = now;
-    if (dt > 80) {
-        dt = 80;
-    }
     carryMs += dt;
     let ran = 0;
     while (carryMs >= frameMs && ran < 4) {
-        const period = frameMs;
         stepTurboGroup();
-        syncFrameTiming();
-        carryMs -= period;
+        carryMs -= frameMs;
         ran += 1;
     }
+    syncFrameTiming();
     if (ran < 4) {
         fillSoundQueue();
     }
@@ -966,40 +934,29 @@ function onFrame(now) {
 }
 
 function fillSoundQueue() {
-    if (sfx === null || !sound.isRunning(sfx)) {
+    if (sfx === null || sfx.context.state !== "running") {
         return;
     }
     for (let ran = 0; ran < 4 && sound.wantsFrame(sfx); ran += 1) {
-        const period = frameMs;
         stepTurboGroup();
-        syncFrameTiming();
-        carryMs = Math.max(carryMs - period, carryFloorMs);
+        carryMs = Math.max(carryMs - frameMs, carryFloorMs);
     }
 }
 
-/** Run hidden fields while either Microdrive remains in an active read, then one visible field. */
+/**
+ * Run hidden fields while either Microdrive remains in an active read, then
+ * one visible field. The per-field read flag is consumed so Turbo does not
+ * stay on after the last transfer.
+ */
 function stepTurboGroup() {
-    const burst = turboReading();
-    machine.clearMdvReading(ql);
+    const burst = ui.turbo.checked && (machine.mdvInfo(ql, 0).reading || machine.mdvInfo(ql, 1).reading);
+    ql.mdv.readingMask = 0;
     if (burst) {
         for (let frame = 1; frame < turboMultiplier; frame += 1) {
             stepMachine(false);
         }
     }
     stepMachine(true);
-}
-
-/** @returns {boolean} */
-function turboReading() {
-    if (!ui.turbo.checked) {
-        return false;
-    }
-    for (let drive = 0; drive < ui.mdv.length; drive += 1) {
-        if (machine.mdvInfo(ql, drive).reading) {
-            return true;
-        }
-    }
-    return false;
 }
 
 /**
@@ -1074,7 +1031,7 @@ function refreshMdvActivity(now) {
 
 /** Keep hard disk controls synchronized with the mounted writable image. */
 function refreshHddStatus() {
-    const info = machine.hddInfo(ql);
+    const info = disk.info(ql.disks.win);
     if (
         info.inserted === hddStatus.inserted &&
         info.name === hddStatus.name &&
@@ -1104,7 +1061,7 @@ function refreshHddStatus() {
 
 /** Keep floppy controls synchronized with the mounted QL5A/QL5B image. */
 function refreshFddStatus() {
-    const info = machine.fddInfo(ql);
+    const info = disk.info(ql.disks.flp);
     if (
         info.inserted === fddStatus.inserted &&
         info.name === fddStatus.name &&
@@ -1141,7 +1098,7 @@ function refreshSoundStatus(now) {
     if (span < statsWindowMs) {
         return;
     }
-    const stats = sound.stats(sfx);
+    const stats = sfx.stats;
     const fps = framesRun * 1000 / span;
     const cut = Math.round(stats.cut - statsCut);
     const gap = Math.round(stats.gap - statsGap);
@@ -1158,16 +1115,17 @@ function refreshSoundStatus(now) {
  * @param {boolean} visible
  */
 function stepMachine(visible) {
-    machine.setVideoOn(ql, visible);
+    ql.videoOn = visible;
     let hasSound = false;
     if (visible && sfx !== null) {
-        hasSound = sound.isRunning(sfx);
+        hasSound = sfx.context.state === "running";
     }
     machine.enableSound(ql, hasSound);
     machine.runFrame(ql);
     framesRun += 1;
-    const chunk = machine.takeAudio(ql);
-    if (chunk.n > 0 && sfx !== null && (sound.isRunning(sfx) || sound.wantsFrame(sfx))) {
+    const chunk = ql.audio;
+    if (chunk.n > 0 && sfx !== null && (sfx.context.state === "running" || sound.wantsFrame(sfx))) {
         sound.push(sfx, chunk);
     }
+    chunk.n = 0;
 }

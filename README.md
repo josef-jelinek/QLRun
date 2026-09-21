@@ -189,13 +189,12 @@ fills the complete display slot. Palette bits are blue, red, green as on the QL.
 - `io.js` - HTTP GET and local file reads.
 - `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, QSound/QSound2, and frame run.
 - `cpu.js` - MC68008 state and execution core.
-- `hdd.js` - writable QLWA hard disk image and QDOS `WIN1_` host driver.
-- `fdd.js` - read-only QL5A/QL5B floppy image and QDOS `FLP1_` host driver.
+- `disk.js` - writable QLWA hard disk and read-only QL5A/QL5B floppy images with their QDOS `WIN1_` and `FLP1_` host drivers.
 - `ay.js` - AY-3-8910/YM2149 PSG synthesis used by the sound cards.
 - `fm.js` - YM2203 FM synthesis used by QSound2.
 - `keyboard.js` - host keyboard mapping and the overlay.
 - `zip.js` - ZIP listing and entry extraction.
-- `media.js` - Microdrive, floppy, hard disk, ROM, and junk file-name rules.
+- `media.js` - Microdrive, floppy, hard disk, ZIP, and junk file-name rules.
 - `sound.js` - Web Audio host and worklet loader.
 - `sound.worklet.js` - mixes beeper and sound-card planes on the audio thread.
 - `audioworklet.d.ts` - check-only declarations for the AudioWorklet globals.

@@ -28,8 +28,8 @@ const bufferPoolSize = 8;
  *   sentSamples: number,
  *   pool: Float32Array[],
  *   stats: SoundStats,
- *   onNeed: (function(): void) | null,
- *   onStateChange: (function(boolean): void) | null,
+ *   onNeed: function(): void,
+ *   onStateChange: function(boolean): void,
  * }} Sfx
  */
 
@@ -37,7 +37,8 @@ const bufferPoolSize = 8;
  * Audio the queue has lost since the page loaded, in milliseconds. `cut` is
  * what an overrun discarded, which means the producer ran ahead of the device;
  * `gap` is what an underrun filled with silence, which means it fell behind.
- * Both stay at zero while the producer keeps pace.
+ * Both stay at zero while the producer keeps pace. Updated about once a
+ * second in place, so read the fields rather than holding on to the record.
  *
  * @typedef {{
  *   cut: number,
@@ -47,12 +48,17 @@ const bufferPoolSize = 8;
 
 /**
  * Frames per second is passed in rather than read from the emulator core, so
- * the audio host stays usable without it.
+ * the audio host stays usable without it. `onNeed` runs the producer as soon
+ * as the audio thread asks for data, without waiting for the next display
+ * refresh; `onStateChange` reports whether the context is rendering after a
+ * browser audio lifecycle change.
  *
  * @param {number} framesPerSecond
+ * @param {function(): void} onNeed
+ * @param {function(boolean): void} onStateChange
  * @param {function(string | null, Sfx | null): void} onDone
  */
-export function init(framesPerSecond, onDone) {
+export function init(framesPerSecond, onNeed, onStateChange, onDone) {
     let context = null;
     try {
         context = new AudioContext();
@@ -89,8 +95,8 @@ export function init(framesPerSecond, onDone) {
                 sentSamples: 0,
                 pool: [],
                 stats: {cut: 0, gap: 0},
-                onNeed: null,
-                onStateChange: null,
+                onNeed,
+                onStateChange,
             };
 
             sfx.node.port.onmessage = function (e) {
@@ -108,9 +114,7 @@ export function init(framesPerSecond, onDone) {
                         const queued = data.remain + sfx.sentSamples - data.received - waited * context.sampleRate;
                         sfx.queuedSamples = Math.max(queued, 0);
                         sfx.queuedAt = performance.now();
-                        if (sfx.onNeed !== null) {
-                            sfx.onNeed();
-                        }
+                        sfx.onNeed();
                     }
                     return;
                 case "spent":
@@ -133,9 +137,7 @@ export function init(framesPerSecond, onDone) {
             });
             context.onstatechange = function () {
                 reset(sfx);
-                if (sfx.onStateChange !== null) {
-                    sfx.onStateChange(isRunning(sfx));
-                }
+                sfx.onStateChange(context.state === "running");
             };
             onDone(null, sfx);
         },
@@ -162,52 +164,10 @@ export function init(framesPerSecond, onDone) {
  */
 export function wantsFrame(sfx) {
     let played = 0;
-    if (isRunning(sfx)) {
+    if (sfx.context.state === "running") {
         played = (performance.now() - sfx.queuedAt) * sfx.context.sampleRate / 1000;
     }
     return Math.max(sfx.queuedSamples - played, 0) < sfx.lowSamples;
-}
-
-/**
- * Live counters, updated about once a second. The record is reused, so read the
- * fields rather than holding on to it.
- *
- * @param {Sfx} sfx
- * @returns {SoundStats}
- */
-export function stats(sfx) {
-    return sfx.stats;
-}
-
-/**
- * Report whether the browser audio context is actively rendering.
- *
- * @param {Sfx} sfx
- * @returns {boolean}
- */
-export function isRunning(sfx) {
-    return sfx.context.state === "running";
-}
-
-/**
- * Run the producer as soon as the audio thread asks for data, without waiting
- * for the next display refresh.
- *
- * @param {Sfx} sfx
- * @param {function(): void} onNeed
- */
-export function setNeedCallback(sfx, onNeed) {
-    sfx.onNeed = onNeed;
-}
-
-/**
- * Keep emulated synthesis aligned with browser audio lifecycle changes.
- *
- * @param {Sfx} sfx
- * @param {function(boolean): void} onStateChange
- */
-export function setStateCallback(sfx, onStateChange) {
-    sfx.onStateChange = onStateChange;
 }
 
 /**
@@ -270,9 +230,10 @@ export function setStereo(sfx, on) {
 }
 
 /**
- * One frame of mixed planes the worklet will interleave, exactly as takeAudio
- * hands it over. Aliased rather than copied so the shape stays checked against
- * its producer. This is a type-only import and pulls in no code.
+ * One frame of mixed planes the worklet will interleave, exactly as the
+ * machine's `audio` record accumulates it. Aliased rather than copied so the
+ * shape stays checked against its producer. This is a type-only import and
+ * pulls in no code.
  *
  * @typedef {import("./machine.js").AudioChunk} AudioChunk
  */

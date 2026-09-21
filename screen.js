@@ -96,7 +96,7 @@ export function setStretch(gfx, on) {
 export function resize(gfx) {
     const canvas = /** @type {HTMLCanvasElement} */ (gfx.gl.canvas);
     const workspace = canvas.parentElement;
-    const pixelRatio = displayPixelRatio();
+    const pixelRatio = window.devicePixelRatio;
     gfx.pixelRatio = pixelRatio;
     // Fit the content box so padding on the slot stays around the canvas.
     let slotW = crtViewW;
@@ -114,54 +114,31 @@ export function resize(gfx) {
             slotH -= padY;
         }
     }
-    if (gfx.stretchOn) {
-        const width = Math.max(slotW, 1);
-        const height = Math.max(slotH, 1);
-        canvas.style.width = width + "px";
-        canvas.style.height = height + "px";
-        const bufferWidth = Math.max(Math.round(width * pixelRatio), 1);
-        const bufferHeight = Math.max(Math.round(height * pixelRatio), 1);
-        if (canvas.width !== bufferWidth) {
-            canvas.width = bufferWidth;
-        }
-        if (canvas.height !== bufferHeight) {
-            canvas.height = bufferHeight;
-        }
-        gfx.gl.viewport(0, 0, bufferWidth, bufferHeight);
-        return;
-    }
-    if (gfx.crtOn) {
-        let width = slotW;
-        let height = Math.floor(width * crtViewH / crtViewW);
+    let width = Math.max(slotW, 1);
+    let height = Math.max(slotH, 1);
+    let bufferWidth = Math.max(Math.round(width * pixelRatio), 1);
+    let bufferHeight = Math.max(Math.round(height * pixelRatio), 1);
+    if (gfx.crtOn && !gfx.stretchOn) {
+        height = Math.floor(width * crtViewH / crtViewW);
         if (height > slotH) {
             height = slotH;
             width = Math.floor(height * crtViewW / crtViewH);
         }
         width = Math.max(width, 1);
         height = Math.max(height, 1);
-        canvas.style.width = width + "px";
-        canvas.style.height = height + "px";
         const crtPixelRatio = Math.max(pixelRatio, 1);
-        const bufferWidth = Math.max(Math.round(width * crtPixelRatio), 1);
-        const bufferHeight = Math.max(Math.round(height * crtPixelRatio), 1);
-        if (canvas.width !== bufferWidth) {
-            canvas.width = bufferWidth;
-        }
-        if (canvas.height !== bufferHeight) {
-            canvas.height = bufferHeight;
-        }
-        gfx.gl.viewport(0, 0, canvas.width, canvas.height);
-        return;
+        bufferWidth = Math.max(Math.round(width * crtPixelRatio), 1);
+        bufferHeight = Math.max(Math.round(height * crtPixelRatio), 1);
+    } else if (!gfx.stretchOn) {
+        const fitX = Math.floor(Math.floor(slotW * pixelRatio) / frameW);
+        const fitY = Math.floor(Math.floor(slotH * pixelRatio) / frameW);
+        bufferWidth = frameW * Math.max(1, Math.min(fitX, fitY));
+        bufferHeight = bufferWidth;
+        width = bufferWidth / pixelRatio;
+        height = bufferHeight / pixelRatio;
     }
-    const slotDeviceWidth = Math.floor(slotW * pixelRatio);
-    const slotDeviceHeight = Math.floor(slotH * pixelRatio);
-    const fitX = Math.floor(slotDeviceWidth / frameW);
-    const fitY = Math.floor(slotDeviceHeight / frameW);
-    const scale = Math.max(1, Math.min(fitX, fitY));
-    const bufferWidth = frameW * scale;
-    const bufferHeight = frameW * scale;
-    canvas.style.width = bufferWidth / pixelRatio + "px";
-    canvas.style.height = bufferHeight / pixelRatio + "px";
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
     if (canvas.width !== bufferWidth) {
         canvas.width = bufferWidth;
     }
@@ -179,22 +156,13 @@ export function resize(gfx) {
  * @param {boolean} ntsc
  */
 export function draw(gfx, pixels, ntsc) {
-    if (gfx.pixelRatio !== displayPixelRatio()) {
+    if (gfx.pixelRatio !== window.devicePixelRatio) {
         resize(gfx);
     }
     const gl = gfx.gl;
     gl.uniform1i(gfx.ntscLoc, Number(ntsc));
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frameW, frameH, gl.RED_INTEGER, gl.UNSIGNED_BYTE, pixels);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-}
-
-/** @returns {number} */
-function displayPixelRatio() {
-    const pixelRatio = window.devicePixelRatio;
-    if (Number.isFinite(pixelRatio) && pixelRatio > 0) {
-        return pixelRatio;
-    }
-    return 1;
 }
 
 /**

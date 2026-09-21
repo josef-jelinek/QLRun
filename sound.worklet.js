@@ -121,10 +121,9 @@ registerProcessor("qlrun-out", QLRunProcessor);
 function handleMessage(p, data) {
     switch (data.type) {
     case "reset":
-        releaseChunks(p, p.chunks.length);
-        p.chunks = [];
-        p.head = 0;
-        p.offset = 0;
+        // Everything queued counts as played.
+        p.head = p.chunks.length;
+        dropPlayed(p);
         p.waiting = false;
         beginTransition(p);
         p.fadeInPending = true;
@@ -168,7 +167,9 @@ function process(p, output) {
                 beginTransition(p);
                 p.fadeInPending = true;
             }
-            fillSilence(p, ol, or, i, n);
+            for (let j = i; j < n; j += 1) {
+                writeSample(p, ol, or, j, 0, 0);
+            }
             p.gapSamples += n - i;
             break;
         }
@@ -204,13 +205,7 @@ function process(p, output) {
         if (p.offset >= chunkLength) {
             p.head += 1;
             p.offset = 0;
-            if (p.head >= p.chunks.length) {
-                releaseChunks(p, p.chunks.length);
-                p.chunks = [];
-                p.head = 0;
-            } else if (p.head > 8) {
-                compact(p);
-            }
+            dropPlayed(p);
         }
         i += take;
     }
@@ -286,6 +281,17 @@ function trimOldAudio(p) {
             p.offset = 0;
         }
     }
+    dropPlayed(p);
+}
+
+/**
+ * Hand played chunks back to the producer: all of them once the queue has
+ * drained, otherwise only once enough have piled up in front of the head to be
+ * worth shifting the rest down.
+ *
+ * @param {WorkletProc} p
+ */
+function dropPlayed(p) {
     if (p.head >= p.chunks.length) {
         releaseChunks(p, p.chunks.length);
         p.chunks = [];
@@ -293,9 +299,16 @@ function trimOldAudio(p) {
         p.offset = 0;
         return;
     }
-    if (p.head > 8) {
-        compact(p);
+    if (p.head <= 8) {
+        return;
     }
+    releaseChunks(p, p.head);
+    const remain = p.chunks.length - p.head;
+    for (let i = 0; i < remain; i += 1) {
+        p.chunks[i] = p.chunks[p.head + i];
+    }
+    p.chunks.length = remain;
+    p.head = 0;
 }
 
 /** @param {WorkletProc} p */
@@ -341,17 +354,6 @@ function writeSample(p, ol, or, at, sampleL, sampleR) {
     p.lastR = outR;
 }
 
-/** @param {WorkletProc} p */
-function compact(p) {
-    releaseChunks(p, p.head);
-    const remain = p.chunks.length - p.head;
-    for (let i = 0; i < remain; i += 1) {
-        p.chunks[i] = p.chunks[p.head + i];
-    }
-    p.chunks.length = remain;
-    p.head = 0;
-}
-
 /**
  * Hand the buffers of the chunks below `upto` back for refilling. The producer
  * transfers one away per frame, so without this the page allocates a buffer
@@ -364,18 +366,5 @@ function releaseChunks(p, upto) {
     for (let i = 0; i < upto; i += 1) {
         const samples = p.chunks[i].samples;
         p.port.postMessage({type: "spent", samples}, [samples.buffer]);
-    }
-}
-
-/**
- * @param {WorkletProc} p
- * @param {Float32Array} ol
- * @param {Float32Array | undefined} or
- * @param {number} from
- * @param {number} to
- */
-function fillSilence(p, ol, or, from, to) {
-    for (let j = from; j < to; j += 1) {
-        writeSample(p, ol, or, j, 0, 0);
     }
 }
