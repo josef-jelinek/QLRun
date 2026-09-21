@@ -1327,7 +1327,7 @@ function startBeep(m, decoded) {
     if (beep.left !== 0 && (beep.pitchLeft === 0 || beep.pitchLeft > beep.left)) {
         beep.pitchLeft = beep.left;
     }
-    if (beep.fuzzAmount !== 0) {
+    if (beep.fuzzAmount > soundSignedNibbleMax) {
         beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
     }
     beep.halfCycle = beepHalfSampleCount(m, beep);
@@ -1440,7 +1440,7 @@ function renderBeepSample(m) {
     }
     if (beep.waveState === 0) {
         beep.waveState = -1;
-        if (beep.fuzzAmount !== 0) {
+        if (beep.fuzzAmount > soundSignedNibbleMax) {
             beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
             beep.halfCycle = beepHalfSampleCount(m, beep);
         }
@@ -1450,7 +1450,7 @@ function renderBeepSample(m) {
     beep.cyclePoint += 1;
     if (beep.cyclePoint >= beep.halfCycle) {
         beep.waveState *= -1;
-        if (beep.fuzzAmount !== 0) {
+        if (beep.fuzzAmount > soundSignedNibbleMax) {
             beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
             beep.halfCycle = beepHalfSampleCount(m, beep);
         }
