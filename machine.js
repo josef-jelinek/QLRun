@@ -565,12 +565,9 @@ export function runFrame(m) {
         return;
     }
     const frameClocks = clocksPerFrame(m);
-    const start = m.cpu.cycleCount;
+    // The cumulative CPU budget carries complete-instruction overshoot into
+    // the next field, keeping guest time aligned with the display raster.
     cpu.executeCycleBudget(m.cpu, m.cpuBus, frameClocks);
-    if (m.cpu.cycleCount < start + frameClocks) {
-        m.cpu.cycleCount = start + frameClocks;
-        m.cpu.cycleBudget = m.cpu.cycleCount;
-    }
     if (m.videoOn) {
         decodeScreen(m);
     }
