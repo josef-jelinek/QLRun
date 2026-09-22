@@ -96,6 +96,7 @@ const qsoundDataWrite = 0x04;
 const qsoundSelectMask = 0x05;
 const qsoundAyTickCycles = 80;
 const qsound2SsgTickHz = 125000;
+const qsound2SsgDefaultGain = 0.5;
 const qsoundRegisterMasks = Uint8Array.of(
     0xFF, 0x0F, 0xFF, 0x0F, 0xFF, 0x0F, 0x1F, 0xFF,
     0x1F, 0x1F, 0x1F, 0xFF, 0xFF, 0x0F, 0xFF, 0xFF,
@@ -209,6 +210,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  *     model: number,
  *     rom: Uint8Array,
  *     selectedRegister: number,
+ *     ssgGainHigh: number,
  *     pia: Uint8Array,
  *     dataDirectionA: number,
  *     dataDirectionB: number,
@@ -338,6 +340,7 @@ export function create(keys) {
             model: qsoundOff,
             rom: new Uint8Array(qsoundRomSize),
             selectedRegister: 0,
+            ssgGainHigh: 0,
             pia: new Uint8Array(4),
             dataDirectionA: 0,
             dataDirectionB: 0,
@@ -1399,11 +1402,15 @@ function qsoundContains(m, addr) {
 function resetQsound(m) {
     const qsound = m.qsound;
     qsound.selectedRegister = 0;
+    qsound.ssgGainHigh = 0;
     qsound.pia.fill(0);
     qsound.dataDirectionA = 0;
     qsound.dataDirectionB = 0;
     ay.configure(qsound.ay, qsoundTickCycles(m), qsound.model === qsound2, m.cpu.cycleCount);
     fm.reset(qsound.fm);
+    if (qsound.model === qsound2) {
+        ay.setGain(qsound.ay, qsound2SsgDefaultGain);
+    }
 }
 
 /**
@@ -1513,13 +1520,14 @@ function readQsound2Direct(m, addr) {
         return 0;
     }
     if (((addr - qsound2DirectBase) & 2) === 0) {
-        return 0;
+        renderAudioTo(m, m.cpu.cycleCount);
+        return fm.readStatus(m.qsound.fm);
     }
     const reg = m.qsound.selectedRegister;
     if (reg < 16) {
         return ay.readReg(m.qsound.ay, reg);
     }
-    return fm.readReg(m.qsound.fm, reg);
+    return 0;
 }
 
 /** @param {Machine} m @param {number} addr @param {number} value */
@@ -1528,13 +1536,30 @@ function writeQsound2Direct(m, addr, value) {
         return;
     }
     if (((addr - qsound2DirectBase) & 2) === 0) {
+        if (value >= 0x2D && value <= 0x2F) {
+            renderAudioTo(m, m.cpu.cycleCount);
+        }
         m.qsound.selectedRegister = value;
+        fm.writeAddress(m.qsound.fm, value);
+        if (value >= 0x2D && value <= 0x2F) {
+            const tickT = cpuClockHz(m) / fm.getSsgTickRate(m.qsound.fm);
+            ay.setTickPeriod(m.qsound.ay, tickT, m.cpu.cycleCount);
+        }
         return;
     }
     renderAudioTo(m, m.cpu.cycleCount);
     const reg = m.qsound.selectedRegister;
     if (reg < 16) {
         ay.writeReg(m.qsound.ay, reg, value & qsoundRegisterMasks[reg]);
+        return;
+    }
+    if (reg === fm.ssgGainHighRegister) {
+        m.qsound.ssgGainHigh = value;
+        return;
+    }
+    if (reg === fm.ssgGainLowRegister) {
+        const fixedGain = (m.qsound.ssgGainHigh << 8) | value;
+        ay.setGain(m.qsound.ay, fixedGain / 256);
         return;
     }
     fm.writeReg(m.qsound.fm, reg, value);

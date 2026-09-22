@@ -17,7 +17,16 @@ const ayVolume = Float64Array.of(
     1.0000,
 );
 
-const ymVolume = createYmVolume();
+const ymVolume = Float64Array.of(
+    0x00 / 0xFF, 0x01 / 0xFF, 0x01 / 0xFF, 0x02 / 0xFF,
+    0x02 / 0xFF, 0x03 / 0xFF, 0x03 / 0xFF, 0x04 / 0xFF,
+    0x05 / 0xFF, 0x06 / 0xFF, 0x07 / 0xFF, 0x09 / 0xFF,
+    0x0B / 0xFF, 0x0D / 0xFF, 0x0F / 0xFF, 0x12 / 0xFF,
+    0x16 / 0xFF, 0x1A / 0xFF, 0x1F / 0xFF, 0x25 / 0xFF,
+    0x2D / 0xFF, 0x35 / 0xFF, 0x3F / 0xFF, 0x4C / 0xFF,
+    0x5A / 0xFF, 0x6A / 0xFF, 0x7F / 0xFF, 0x97 / 0xFF,
+    0xB4 / 0xFF, 0xD6 / 0xFF, 0xFF / 0xFF, 0xFF / 0xFF,
+);
 
 const regNoise = 6;
 const regMixer = 7;
@@ -35,6 +44,7 @@ const ampEnvMode = 0x10;
  *   tickT: number,
  *   ymStyle: boolean,
  *   levelMax: number,
+ *   outputGain: number,
  *   t: number,
  *   nextTickT: number,
  *   regs: Uint8Array,
@@ -70,6 +80,7 @@ export function create(tickT) {
         tickT,
         ymStyle: false,
         levelMax: 15,
+        outputGain: 1,
         t: 0,
         nextTickT: tickT,
         regs: new Uint8Array(16),
@@ -100,11 +111,35 @@ export function create(tickT) {
 export function configure(state, tickT, ymStyle, t) {
     state.tickT = tickT;
     state.ymStyle = ymStyle;
+    state.outputGain = 1;
     state.levelMax = 15;
     if (ymStyle) {
         state.levelMax = 31;
     }
     reset(state, t);
+}
+
+/**
+ * Change the PSG output gain after advancing it to the write cycle.
+ *
+ * @param {State} state
+ * @param {number} gain
+ */
+export function setGain(state, gain) {
+    state.outputGain = gain;
+    refreshLevels(state);
+}
+
+/**
+ * Re-anchor the internal divider after a YM2203 prescaler selection.
+ *
+ * @param {State} state
+ * @param {number} tickT
+ * @param {number} t
+ */
+export function setTickPeriod(state, tickT, t) {
+    state.tickT = tickT;
+    state.nextTickT = t + tickT;
 }
 
 /**
@@ -282,12 +317,12 @@ function refreshLevels(state) {
         if ((ampReg & ampEnvMode) !== 0) {
             amp = state.env.level;
         } else if (state.ymStyle && amp > 0) {
-            amp = amp * 2 + 1;
+            amp *= 2;
         }
         if (state.ymStyle) {
-            state.out[channel] = ymVolume[amp];
+            state.out[channel] = ymVolume[amp] * state.outputGain;
         } else {
-            state.out[channel] = ayVolume[amp];
+            state.out[channel] = ayVolume[amp] * state.outputGain;
         }
     }
 }
@@ -358,21 +393,4 @@ function noisePeriod(state) {
 /** @param {State} state @returns {number} */
 function envelopePeriod(state) {
     return Math.max(state.regs[regEnvFine] | state.regs[regEnvCoarse] << 8, 1);
-}
-
-/** Build the YM2149 32-step DAC curve around the measured AY ladder. */
-function createYmVolume() {
-    const levels = new Float64Array(32);
-    for (let level = 1; level < levels.length; level += 1) {
-        if (level === 1) {
-            levels[level] = ayVolume[1] * ayVolume[1] / ayVolume[2];
-        } else if (level === 2) {
-            levels[level] = ayVolume[1] * Math.sqrt(ayVolume[1] / ayVolume[2]);
-        } else if ((level & 1) !== 0) {
-            levels[level] = ayVolume[level >> 1];
-        } else {
-            levels[level] = Math.sqrt(ayVolume[(level >> 1) - 1] * ayVolume[level >> 1]);
-        }
-    }
-    return levels;
 }
