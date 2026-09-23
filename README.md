@@ -158,13 +158,11 @@ beeper implements both pitches, gradient timing, wrapping, random pitch, fuzz,
 finite duration, and continuous sounds. QSound follows the QL E clock: 750 kHz
 on PAL machines and 755,244.5 Hz on NTSC machines. QSound2 provides a
 YM2149-style PSG clocked at 1 MHz and centred three-channel YM2203 FM audio
-from its 2 MHz master clock. Its SSG uses the YM2149 DAC curve and the paired
-YM2203 half-volume balance used by libvgm. Direct-register writes to `$F1`
-then `$F0` can replace that balance with an unsigned 8.8 gain; QLVGM uses this
-extension to retain VGM 1.70 paired-chip volume metadata. The FM core runs at
-the selected native prescaler rate and implements the OPN feedback, MEM,
-envelope, SSG-EG, timer, CSM, channel-3, and status-port behaviour. A click or
-key may be required before anything is audible.
+from its 2 MHz master clock. Its SSG uses the YM2149 DAC curve and is mixed with
+the FM output at unity gain, matching the fixed QSound2 hardware path. The FM
+core runs at the selected native prescaler rate and implements the OPN feedback,
+MEM, envelope, SSG-EG, timer, CSM, channel-3, and status-port behaviour. A click
+or key may be required before anything is audible.
 
 Two to three video frames of samples are kept queued: the audio thread asks for
 one more whenever the queue falls below two, and the machine runs a frame only

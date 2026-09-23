@@ -31,9 +31,6 @@ const envelopeDecay = 2;
 const envelopeSustain = 3;
 const envelopeRelease = 4;
 
-export const ssgGainLowRegister = 0xF0;
-export const ssgGainHighRegister = 0xF1;
-
 const keycodeNote = Uint8Array.of(
     0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 3, 3, 3, 3, 3, 3,
 );

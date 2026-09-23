@@ -44,7 +44,6 @@ const ampEnvMode = 0x10;
  *   tickT: number,
  *   ymStyle: boolean,
  *   levelMax: number,
- *   outputGain: number,
  *   t: number,
  *   nextTickT: number,
  *   regs: Uint8Array,
@@ -80,7 +79,6 @@ export function create(tickT) {
         tickT,
         ymStyle: false,
         levelMax: 15,
-        outputGain: 1,
         t: 0,
         nextTickT: tickT,
         regs: new Uint8Array(16),
@@ -111,23 +109,11 @@ export function create(tickT) {
 export function configure(state, tickT, ymStyle, t) {
     state.tickT = tickT;
     state.ymStyle = ymStyle;
-    state.outputGain = 1;
     state.levelMax = 15;
     if (ymStyle) {
         state.levelMax = 31;
     }
     reset(state, t);
-}
-
-/**
- * Change the PSG output gain after advancing it to the write cycle.
- *
- * @param {State} state
- * @param {number} gain
- */
-export function setGain(state, gain) {
-    state.outputGain = gain;
-    refreshLevels(state);
 }
 
 /**
@@ -320,9 +306,9 @@ function refreshLevels(state) {
             amp *= 2;
         }
         if (state.ymStyle) {
-            state.out[channel] = ymVolume[amp] * state.outputGain;
+            state.out[channel] = ymVolume[amp];
         } else {
-            state.out[channel] = ayVolume[amp] * state.outputGain;
+            state.out[channel] = ayVolume[amp];
         }
     }
 }
