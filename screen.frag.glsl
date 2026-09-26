@@ -29,6 +29,12 @@ float gaussian_weight(float offset, float inv_sigma_squared) {
     return exp(-0.5 * offset * offset * inv_sigma_squared);
 }
 
+vec3 linear_to_srgb(vec3 color) {
+    vec3 low = color * 12.92;
+    vec3 high = 1.055 * pow(color, vec3(1.0 / 2.4)) - 0.055;
+    return mix(high, low, lessThanEqual(color, vec3(0.0031308)));
+}
+
 void main() {
     if (!u_crt) {
         uint color_index = texture(u_tex, v_uv).r;
@@ -60,5 +66,5 @@ void main() {
     float weight = m_weight + l_weight + r_weight;
     vec3 color = (m * m_weight + l * l_weight + r * r_weight) / weight;
     float beam = 0.25 + 0.75 * beam_phase;
-    o_color = vec4(color * beam, 1.0);
+    o_color = vec4(linear_to_srgb(color * beam), 1.0);
 }

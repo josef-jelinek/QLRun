@@ -38,8 +38,8 @@ The machine initializes 128 KiB of RAM by default and starts without a ROM,
 then tries `roms/<name>.rom` (up to 48 KiB). The default `<name>` is `js`, or
 `jsu` when `?ntsc=1` selects US timing; an explicit `?rom=` overrides that
 choice. If a ROM fetch fails, **Load ROM** still accepts a raw `.rom` or `.bin`
-file. An optional external ROM cartridge occupies the standard 16 KiB ROM-port
-window at `0x0C000`.
+file. Three optional 16 KiB extension-ROM slots are available: the cartridge
+window at `0x0C000`, I/O ROM 1 at `0x10000`, and I/O ROM 2 at `0x14000`.
 
 The UI controls can also be initialized through URL parameters. Use `0` to
 disable a switch and `1` to enable it. `qsound` accepts `0` for no card, `1`
@@ -99,10 +99,11 @@ selects another.
 - NTSC - US QL clocks (7.552445 MHz CPU from a 15.10489 MHz crystal). The
   312-line monitor field stays near 50.4 Hz; JSU TV mode (F2) sets ZX8301
   bit 6 for the 262-line field at about 60.05 Hz. CRT output then displays its
-  192 active scan lines; non-CRT output keeps exposing the complete 256-line
-  framebuffer. Starting with `?ntsc=1` loads `roms/jsu.rom` unless `?rom=` is
-  set. While using the automatic ROM, changing the switch reloads `js.rom` or
-  `jsu.rom`; an explicit or locally loaded ROM stays selected.
+  192 active scan lines; non-CRT output also exposes rows 192–255 as an
+  end-of-field diagnostic memory view, not scanned TV output. Field geometry
+  is latched at field start. Starting with `?ntsc=1` loads `roms/jsu.rom` unless
+  `?rom=` is set. While using the automatic ROM, changing the switch reloads
+  `js.rom` or `jsu.rom`; an explicit or locally loaded ROM stays selected.
 - +256K / +512K - independently add either RAM expansion to the stock 128 KiB.
   Selecting both provides 896 KiB. Changing either switch initializes the
   selected memory and resets the machine. Because either sound card occupies
@@ -126,14 +127,19 @@ selects another.
   and writes.
 - Turbo - run the machine at up to four times normal speed while either
   Microdrive is transferring a read in the current field. It is enabled by
-  default. Intermediate video and audio fields are discarded. A motor left
-  spinning after the last read, writes, and other execution stay at normal
-  speed.
+  default. Intermediate video fields are assembled but not presented or
+  uploaded, and their audio samples are not collected. A motor left spinning
+  after the last read, writes, and other execution stay at normal speed.
 - Load ROM - replace the 48 KiB system ROM and reset.
-- Load cart / Eject - load a raw `.rom` or `.bin` image of up to 16 KiB into
-  the external ROM port, or eject the current image. Short images are padded
-  with zeroes. Loading or ejecting resets the machine so QDOS detects the
-  change.
+- Cart / IO 1 / IO 2 - select one ROM slot; tooltips show its full name and
+  address (`0x0C000`, `0x10000`, or `0x14000`). Load accepts a raw `.rom` or
+  `.bin` image of 1 to 16 KiB; Eject removes that slot's image. Short images
+  are padded with zeroes. Each slot retains its own image and filename.
+  Changing the selection does not reset the machine; loading or ejecting
+  does, so QDOS detects the change. Images survive resets and system-ROM
+  replacement.
+  These slots provide ROM storage only, not any additional peripheral
+  hardware a particular expansion ROM may require.
 - FLP1 - Load mounts a QL5A or QL5B floppy `.img` without resetting the
   machine. The image is read-only to the guest. Download saves the mounted
   copy; Eject discards it. The bundled JS and JSU ROMs expose it as `FLP1_`;
@@ -155,14 +161,32 @@ Ctrl+Left; Delete is Ctrl+Right.
 
 The ZX8302 IPC beeper and the selected card are mixed in the browser. The
 beeper implements both pitches, gradient timing, wrapping, random pitch, fuzz,
-finite duration, and continuous sounds. QSound follows the QL E clock: 750 kHz
-on PAL machines and 755,244.5 Hz on NTSC machines. QSound2 provides a
+finite duration, and continuous sounds. Its oscillator uses fractional periods
+and time-averaged transitions within output samples. QSound follows the QL E
+clock: 750 kHz on PAL machines and 755,244.5 Hz on NTSC machines. QSound2 provides a
 YM2149-style PSG clocked at 1 MHz and centred three-channel YM2203 FM audio
 from its 2 MHz master clock. Its SSG uses the YM2149 DAC curve and is mixed with
 the FM output at unity gain, matching the fixed QSound2 hardware path. The FM
 core runs at the selected native prescaler rate and implements the OPN feedback,
-MEM, envelope, SSG-EG, timer, CSM, channel-3, and status-port behaviour. A click
-or key may be required before anything is audible.
+MEM, envelope, SSG-EG, timer, CSM, channel-3, and status-port behaviour, including
+a prescaler-aware BUSY flag timed in CPU cycles. Writes issued while busy are
+still accepted immediately. A click or key may be required before anything is
+audible.
+
+Enabled sound-card ROM, PIA, and direct-port accesses use phase-dependent
+MC68008 E/VPA synchronization. Their word/long transfers have individual byte
+timestamps, and peripheral waits are additional to instruction timing.
+E remains free-running at CPU/10; the deterministic model places its falling
+edges half a CPU clock before multiples of ten after reset. PIA direction
+registers govern driven pins and input readback. Original QSound follows Port A
+changes while the AY address/write controls remain asserted; QSound2 uses
+separate CPU-data-strobe-qualified chip accesses. PSG volume changes retain
+their time-weighted contribution within each output sample.
+
+This is a digital bus/interface model, not a fully cycle-exact CPU or chip.
+CPU prefetch/internal sequencing, chip-internal write timing, propagation and
+setup/hold effects, full PIA handshakes/interrupts, and analogue response remain
+approximate. The model has not been calibrated against physical bus traces.
 
 Two to three video frames of samples are kept queued: the audio thread asks for
 one more whenever the queue falls below two, and the machine runs a frame only
@@ -171,14 +195,25 @@ suspended, so envelopes and finite sounds do not pause with the host device.
 
 ## Display
 
+Video follows guest CPU time in 16-column, 12-clock chunks. Screen-memory,
+mode, blanking, and screen-base writes preserve chunks already sampled, so
+within-field raster changes and tearing are visible rather than collapsed
+into the final RAM contents. Mode 8 flash state persists across partial line
+updates. Only completed fields are presented, with versioned texture uploads
+avoiding redundant work between guest fields. This remains a chunk-level
+model: individual RAM bus-byte timing, exact video-fetch latency, and measured
+interrupt-to-beam phase alignment are not reproduced.
+
 The visible picture is the ZX8301 output: 512x256 mode-4 pixels or 256x256
 logical pixels in mode 8. Without CRT filtering, both modes fill a square
 display using integer-sized blocks of physical display pixels. Mode 4 pixels
 are twice as tall as they are wide; Mode 8's duplicate texture columns collapse
 back to its logical width and its logical pixels are square. Both modes use the
 same canvas size, so changing modes does not resize the display. The optional
-CRT mode fills the available 4:3 area. Stretch mode overrides both layouts and
-fills the complete display slot. Palette bits are blue, red, green as on the QL.
+CRT mode fills the available 4:3 area. Its beam filtering and intensity modulation
+operate in linear light, with sRGB encoding at output. Stretch mode overrides both
+layouts and fills the complete display slot. Palette bits are blue, red, green as
+on the QL.
 
 ## Repository files
 

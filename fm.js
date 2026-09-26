@@ -240,6 +240,18 @@ export function getSsgTickRate(state) {
     return ssgTickRate[state.prescalerSelect & 3];
 }
 
+/**
+ * Return the 32-prescaled-clock write recovery interval in ticks of the caller's clock.
+ *
+ * @param {State} state
+ * @param {number} clockHz
+ * @returns {number}
+ */
+export function getBusyCycles(state, clockHz) {
+    const prescale = state.prescaler / (channelCount * operatorCount);
+    return Math.ceil(32 * prescale * clockHz / masterClockHz);
+}
+
 /** @param {State} state @returns {number} */
 export function readStatus(state) {
     return state.status;

@@ -76,11 +76,11 @@ button:disabled {
     cursor: default;
     background: #222;
 }
-.switch:has(> input[type="checkbox"]:checked) {
+.switch:has(> input:checked) {
     color: #000;
     background: var(--accent);
 }
-.switch > input[type="checkbox"] {
+.switch > input {
     position: absolute;
     width: 0;
     height: 0;
@@ -109,6 +109,14 @@ button:disabled {
     align-items: center;
     gap: 6px;
     min-width: 0;
+}
+.rom-controls {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+#rom-slot .switch:has(> input:focus-visible) {
+    outline: 1px solid var(--ink);
+    outline-offset: 2px;
 }
 .media-group-right > .media-info {
     text-align: right;
@@ -253,6 +261,9 @@ body.keyboard-splitting {
     .media-group {
         flex-basis: 100%;
     }
+    .rom-controls > .media-info {
+        flex-basis: 100%;
+    }
 }
 </style>
 </head>
@@ -300,10 +311,15 @@ body.keyboard-splitting {
             <button id="eject-mdv2" disabled>Eject</button>
             <div id="mdv2-info" class="media-info mdv-info" title="Microdrive 2 idle">No cartridge.</div>
         </div>
-        <div class="media-group media-group-right">
-            <div id="rom-cartridge-info" class="media-info">No cartridge.</div>
+        <div class="media-group media-group-right rom-controls">
+            <div id="rom-cartridge-info" class="media-info">No ROM.</div>
+            <div id="rom-slot" class="rowbox" role="radiogroup" aria-label="ROM slot">
+                <label class="switch" title="Cartridge (0x0C000)"><input id="rom-cart" type="radio" name="rom-slot" value="0" checked>Cart</label>
+                <label class="switch" title="I/O ROM 1 (0x10000)"><input id="rom-io1" type="radio" name="rom-slot" value="1">IO 1</label>
+                <label class="switch" title="I/O ROM 2 (0x14000)"><input id="rom-io2" type="radio" name="rom-slot" value="2">IO 2</label>
+            </div>
             <button id="eject-rom-cartridge" disabled>Eject</button>
-            <button id="load-rom-cartridge">Load cart</button>
+            <button id="load-rom-cartridge">Load</button>
             <input id="file-rom-cartridge" type="file" accept=".rom,.bin" style="display: none">
         </div>
     </div>

@@ -14,13 +14,17 @@ const crtViewH = 384;
  */
 
 /**
- * The program and texture stay bound for the life of the context, so draw
- * only needs the context itself.
+ * The program and texture stay bound for the life of the context. Cache the
+ * uploaded frame separately from display invalidation to avoid redundant work.
  *
  * @typedef {{
  *   gl: WebGL2RenderingContext,
+ *   pixels: Uint8Array | null,
+ *   frameVersion: number,
+ *   dirty: boolean,
  *   crtOn: boolean,
  *   stretchOn: boolean,
+ *   ntscOn: boolean,
  *   pixelRatio: number,
  *   crtLoc: WebGLUniformLocation,
  *   ntscLoc: WebGLUniformLocation,
@@ -66,8 +70,11 @@ export function init(canvas, shaders, onGfx) {
  * @param {boolean} on
  */
 export function setCrt(gfx, on) {
-    gfx.crtOn = on;
-    gfx.gl.uniform1i(gfx.crtLoc, Number(gfx.crtOn));
+    if (gfx.crtOn !== on) {
+        gfx.crtOn = on;
+        gfx.gl.uniform1i(gfx.crtLoc, Number(on));
+        gfx.dirty = true;
+    }
     const canvas = /** @type {HTMLCanvasElement} */ (gfx.gl.canvas);
     if (gfx.crtOn) {
         canvas.classList.add("crt");
@@ -84,7 +91,10 @@ export function setCrt(gfx, on) {
  * @param {boolean} on
  */
 export function setStretch(gfx, on) {
-    gfx.stretchOn = on;
+    if (gfx.stretchOn !== on) {
+        gfx.stretchOn = on;
+        gfx.dirty = true;
+    }
     resize(gfx);
 }
 
@@ -97,6 +107,9 @@ export function resize(gfx) {
     const canvas = /** @type {HTMLCanvasElement} */ (gfx.gl.canvas);
     const workspace = canvas.parentElement;
     const pixelRatio = window.devicePixelRatio;
+    if (gfx.pixelRatio !== pixelRatio) {
+        gfx.dirty = true;
+    }
     gfx.pixelRatio = pixelRatio;
     // Fit the content box so padding on the slot stays around the canvas.
     let slotW = crtViewW;
@@ -141,28 +154,43 @@ export function resize(gfx) {
     canvas.style.height = height + "px";
     if (canvas.width !== bufferWidth) {
         canvas.width = bufferWidth;
+        gfx.dirty = true;
     }
     if (canvas.height !== bufferHeight) {
         canvas.height = bufferHeight;
+        gfx.dirty = true;
     }
     gfx.gl.viewport(0, 0, bufferWidth, bufferHeight);
 }
 
 /**
- * Upload and draw one indexed QL video frame.
+ * Upload new pixel versions and redraw when the frame or display state changes.
  *
  * @param {Gfx} gfx
  * @param {Uint8Array} pixels
  * @param {boolean} ntsc
+ * @param {number} frameVersion Advances whenever the pixel buffer is rewritten.
  */
-export function draw(gfx, pixels, ntsc) {
+export function draw(gfx, pixels, ntsc, frameVersion) {
     if (gfx.pixelRatio !== window.devicePixelRatio) {
         resize(gfx);
     }
     const gl = gfx.gl;
-    gl.uniform1i(gfx.ntscLoc, Number(ntsc));
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frameW, frameH, gl.RED_INTEGER, gl.UNSIGNED_BYTE, pixels);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (gfx.ntscOn !== ntsc) {
+        gl.uniform1i(gfx.ntscLoc, Number(ntsc));
+        gfx.ntscOn = ntsc;
+        gfx.dirty = true;
+    }
+    if (gfx.pixels !== pixels || gfx.frameVersion !== frameVersion) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frameW, frameH, gl.RED_INTEGER, gl.UNSIGNED_BYTE, pixels);
+        gfx.pixels = pixels;
+        gfx.frameVersion = frameVersion;
+        gfx.dirty = true;
+    }
+    if (gfx.dirty) {
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gfx.dirty = false;
+    }
 }
 
 /**
@@ -209,7 +237,18 @@ function createGfx(canvas, vertGLSL, fragGLSL) {
     gl.uniform1i(crtLoc, 0);
     gl.uniform1i(ntscLoc, 0);
     gl.viewport(0, 0, frameW, frameH);
-    return {gl, crtOn: false, stretchOn: false, pixelRatio: 0, crtLoc, ntscLoc};
+    return {
+        gl,
+        pixels: null,
+        frameVersion: -1,
+        dirty: true,
+        crtOn: false,
+        stretchOn: false,
+        ntscOn: false,
+        pixelRatio: 0,
+        crtLoc,
+        ntscLoc,
+    };
 }
 
 /**

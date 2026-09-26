@@ -4,15 +4,20 @@ import * as disk from "./disk.js";
 import * as fm from "./fm.js";
 
 export const sysRomSize = 0xC000;
+export const romCartridgeSize = 0x4000;
 export const qsoundRomSize = 0x2000;
 export const qsoundOff = 0;
 export const qsoundOriginal = 1;
 export const qsound2 = 2;
 export const defaultRamKb = 128;
 
-const romCartridgeSize = 0x4000;
+const romSlotCount = 3;
 const frameW = 512;
 const frameH = 256;
+const ntscFrameH = 192;
+const initialFieldCapacity = 2048;
+const screenLineClocks = cpu.zx8301TimingChunkClocks * cpu.zx8301TimingChunksPerLine;
+const screenChunkPixels = frameW / cpu.zx8301DisplayChunksPerLine;
 const screenLineBytes = 128;
 const screenBytes = screenLineBytes * frameH;
 const screenBase = cpu.qdosUserRamBase;
@@ -155,6 +160,24 @@ for (let ink = 0; ink < 16; ink += 1) {
  *   cpu: import("./cpu.js").Cpu,
  *   cpuBus: import("./cpu.js").CpuBus,
  *   pixels: Uint8Array,
+ *   frameVersion: number,
+ *   frameNtsc: boolean,
+ *   video: {
+ *     pixels: Uint8Array,
+ *     completed: Uint8Array,
+ *     completedNtsc: boolean,
+ *     ready: boolean,
+ *     fieldStart: number,
+ *     fieldEnd: number,
+ *     ntsc: boolean,
+ *     chunk: number,
+ *     flashOn: boolean,
+ *     flashBackground: number,
+ *     fieldEnds: Float64Array,
+ *     fieldClocks: Uint32Array,
+ *     fieldHead: number,
+ *     fieldTail: number,
+ *   },
  *   keys: import("./keyboard.js").KeyState,
  *   theInt: number,
  *   guestRamTop: number,
@@ -209,6 +232,14 @@ for (let ink = 0; ink < 16; ink += 1) {
  *     model: number,
  *     rom: Uint8Array,
  *     selectedRegister: number,
+ *     addressValid: boolean,
+ *     pinSelect: number,
+ *     pinData: number,
+ *     busyUntil: number,
+ *     busActive: boolean,
+ *     busAddress: number,
+ *     busWrite: boolean,
+ *     busData: number,
  *     pia: Uint8Array,
  *     dataDirectionA: number,
  *     dataDirectionB: number,
@@ -261,12 +292,45 @@ export function create(keys) {
             isHw: function (addr) {
                 return hardwareIsMapped(m, addr);
             },
+            isEClocked: function (addr) {
+                return qsoundContains(m, addr);
+            },
+            beginHwAccess: function (addr, write, data) {
+                beginQsoundAccess(m, addr, write, data);
+            },
+            endHwAccess: function () {
+                endQsoundAccess(m);
+            },
             readHwByte: function (addr) {
-                return readHwByte(m, addr);
+                if (m.qsound.busActive) {
+                    return readHwByte(m, addr);
+                }
+                beginQsoundAccess(m, addr, false, 0);
+                const value = readHwByte(m, addr);
+                endQsoundAccess(m);
+                return value;
             },
             readHwLongClock: readQdosClock,
             writeHwByte: function (addr, d) {
+                if (m.qsound.busActive) {
+                    writeHwByte(m, addr, d);
+                    return;
+                }
+                beginQsoundAccess(m, addr, true, d);
                 writeHwByte(m, addr, d);
+                endQsoundAccess(m);
+            },
+            beforeMemoryWrite: function (addr, length) {
+                let base = screenBase;
+                if (m.displaySecondScreen) {
+                    base = secondScreenBase;
+                }
+                if (addr < base + screenBytes && addr + length > base) {
+                    renderVideoTo(m, m.cpu.cycleCount);
+                }
+            },
+            executeHostOpcode: function (c, opcode) {
+                disk.executeOpcode(m.disks, c, m.cpuBus, opcode);
             },
             afterInstruction: function () {
                 microdriveAdvanceActive(m);
@@ -278,6 +342,24 @@ export function create(keys) {
             },
         },
         pixels: new Uint8Array(frameW * frameH),
+        frameVersion: 0,
+        frameNtsc: false,
+        video: {
+            pixels: new Uint8Array(frameW * frameH),
+            completed: new Uint8Array(frameW * frameH),
+            completedNtsc: false,
+            ready: false,
+            fieldStart: 0,
+            fieldEnd: 0,
+            ntsc: false,
+            chunk: 0,
+            flashOn: false,
+            flashBackground: 0,
+            fieldEnds: new Float64Array(initialFieldCapacity),
+            fieldClocks: new Uint32Array(initialFieldCapacity),
+            fieldHead: 0,
+            fieldTail: 0,
+        },
         keys,
         theInt: 0,
         guestRamTop: cpu.qdosUserRamBase + defaultRamKb * 1024,
@@ -338,6 +420,14 @@ export function create(keys) {
             model: qsoundOff,
             rom: new Uint8Array(qsoundRomSize),
             selectedRegister: 0,
+            addressValid: false,
+            pinSelect: 0,
+            pinData: 0,
+            busyUntil: 0,
+            busActive: false,
+            busAddress: 0,
+            busWrite: false,
+            busData: 0,
             pia: new Uint8Array(4),
             dataDirectionA: 0,
             dataDirectionB: 0,
@@ -389,6 +479,7 @@ export function reset(m) {
     cpu.reset(m.cpu, m.cpuBus);
     resetQsound(m);
     resetAudioClock(m);
+    resetVideo(m);
     decodeScreen(m);
 }
 
@@ -438,13 +529,17 @@ export function setRamKb(m, ramKb) {
 }
 
 /**
- * Insert a read-only ROM-port cartridge, padded to its 16 KiB window.
+ * Insert a read-only cartridge or I/O ROM, padded to its 16 KiB window.
  *
  * @param {Machine} m
  * @param {ArrayBuffer | Uint8Array} bytes
+ * @param {number} [slot] Cartridge = 0, I/O ROM 1 = 1, I/O ROM 2 = 2.
  * @returns {string | null}
  */
-export function insertRomCartridge(m, bytes) {
+export function insertRomCartridge(m, bytes, slot = 0) {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= romSlotCount) {
+        return "Invalid ROM slot.";
+    }
     let src = bytes;
     if (!(src instanceof Uint8Array)) {
         src = new Uint8Array(src);
@@ -452,18 +547,24 @@ export function insertRomCartridge(m, bytes) {
     if (src.byteLength === 0 || src.byteLength > romCartridgeSize) {
         return "Expected 1 to " + romCartridgeSize + ", got " + src.byteLength + " bytes.";
     }
-    m.mem.fill(0, romCartridgeBase, romCartridgeBase + romCartridgeSize);
-    m.mem.set(src, romCartridgeBase);
+    const base = romCartridgeBase + slot * romCartridgeSize;
+    m.mem.set(src, base);
+    m.mem.fill(0, base + src.byteLength, base + romCartridgeSize);
     return null;
 }
 
 /**
- * Clear the external ROM-port cartridge without changing the running CPU.
+ * Clear one ROM slot without changing the running CPU or other slots.
  *
  * @param {Machine} m
+ * @param {number} [slot] Cartridge = 0, I/O ROM 1 = 1, I/O ROM 2 = 2.
  */
-export function ejectRomCartridge(m) {
-    m.mem.fill(0, romCartridgeBase, romCartridgeBase + romCartridgeSize);
+export function ejectRomCartridge(m, slot = 0) {
+    if (!Number.isInteger(slot) || slot < 0 || slot >= romSlotCount) {
+        return;
+    }
+    const base = romCartridgeBase + slot * romCartridgeSize;
+    m.mem.fill(0, base, base + romCartridgeSize);
 }
 
 /**
@@ -511,6 +612,7 @@ export function setQsoundModel(m, model) {
  * @param {boolean} ntsc
  */
 export function setNtsc(m, ntsc) {
+    renderVideoTo(m, m.cpu.cycleCount);
     m.ntscMachine = ntsc;
     m.mdv.pairCycles = Math.round(cpuClockHz(m) / microdriveBitRateHz * microdriveBitsPerPair);
     resetQsound(m);
@@ -523,6 +625,13 @@ export function setNtsc(m, ntsc) {
  * @returns {number}
  */
 export function clocksPerFrame(m) {
+    const video = m.video;
+    if (video.fieldHead < video.fieldTail) {
+        return video.fieldClocks[video.fieldHead];
+    }
+    if (video.fieldEnd > video.fieldStart) {
+        return video.fieldEnd - video.fieldStart;
+    }
     if (m.ntscMachine && m.displayNtsc) {
         return cpu.zx8301NtscClocksPerFrame;
     }
@@ -561,20 +670,49 @@ export function frameHz(m) {
  */
 export function runFrame(m) {
     if (!m.romLoaded) {
+        resetVideo(m);
         m.pixels.fill(0);
+        m.frameVersion += 1;
         return;
     }
-    const frameClocks = clocksPerFrame(m);
+    renderVideoTo(m, m.cpu.cycleCount);
+    const video = m.video;
+    while (video.fieldHead < video.fieldTail && video.fieldEnds[video.fieldHead] <= m.cpu.cycleBudget) {
+        video.fieldHead += 1;
+    }
+    if (video.fieldHead === video.fieldTail && video.fieldEnd === 0) {
+        beginVideoField(m);
+    }
+    let fieldEnd = video.fieldEnd;
+    if (video.fieldHead < video.fieldTail) {
+        fieldEnd = video.fieldEnds[video.fieldHead];
+    }
     // The cumulative CPU budget carries complete-instruction overshoot into
     // the next field, keeping guest time aligned with the display raster.
-    cpu.executeCycleBudget(m.cpu, m.cpuBus, frameClocks);
-    if (m.videoOn) {
-        decodeScreen(m);
-    }
-    m.flashFrame = (m.flashFrame + 1) & 63;
+    cpu.executeCycleBudget(m.cpu, m.cpuBus, fieldEnd - m.cpu.cycleBudget);
+    renderVideoTo(m, m.cpu.cycleCount);
     renderAudioTo(m, m.cpu.cycleCount);
     m.theInt |= cpu.frameInterruptStatusBit;
     cpu.frameInterrupt(m.cpu, m.cpuBus);
+    renderVideoTo(m, m.cpu.cycleCount);
+    video.fieldHead += 1;
+    if (video.fieldHead * 2 >= video.fieldTail) {
+        const remaining = video.fieldTail - video.fieldHead;
+        for (let i = 0; i < remaining; i += 1) {
+            video.fieldEnds[i] = video.fieldEnds[video.fieldHead + i];
+            video.fieldClocks[i] = video.fieldClocks[video.fieldHead + i];
+        }
+        video.fieldHead = 0;
+        video.fieldTail = remaining;
+    }
+    if (m.videoOn && video.ready) {
+        const pixels = m.pixels;
+        m.pixels = video.completed;
+        video.completed = pixels;
+        video.ready = false;
+        m.frameNtsc = video.completedNtsc;
+        m.frameVersion += 1;
+    }
 }
 
 /**
@@ -733,6 +871,7 @@ function emptyCartridge() {
 
 /** @param {Machine} m */
 function fillRam(m) {
+    renderVideoTo(m, m.cpu.cycleCount);
     let seed = (Math.floor(Math.random() * 0xFFFFFFFF) ^ Date.now()) >>> 0;
     if (seed === 0) {
         seed = 1;
@@ -768,7 +907,7 @@ function isUnmapped(m, addr) {
     if (addr < m.guestRamTop) {
         return false;
     }
-    return addr < screenBase || addr >= secondScreenBase;
+    return true;
 }
 
 /**
@@ -998,6 +1137,7 @@ function writeHwByte(m, addr, d) {
     }
     switch (addr) {
     case displayControlAddr:
+        renderVideoTo(m, m.cpu.cycleCount);
         m.displayBlank = (d & displayControlBlankBit) !== 0;
         m.displayNtsc = m.ntscMachine && (d & displayControlNtscBit) !== 0;
         m.displayMode8 = (d & displayControlMode8) !== 0;
@@ -1075,88 +1215,181 @@ function readHwByte(m, addr) {
 }
 
 /** @param {Machine} m */
-function decodeScreen(m) {
-    if (m.displayBlank) {
-        m.pixels.fill(0);
+function resetVideo(m) {
+    const video = m.video;
+    video.fieldStart = 0;
+    video.fieldEnd = 0;
+    video.ntsc = false;
+    video.chunk = 0;
+    video.flashOn = false;
+    video.flashBackground = 0;
+    video.fieldHead = 0;
+    video.fieldTail = 0;
+    video.ready = false;
+    video.completedNtsc = false;
+    m.frameNtsc = false;
+}
+
+/** @param {Machine} m @param {number} time */
+function renderVideoTo(m, time) {
+    if (!m.romLoaded) {
         return;
     }
-    let src = screenBase;
-    if (m.displaySecondScreen) {
-        src = secondScreenBase;
+    const video = m.video;
+    const chunksPerLine = cpu.zx8301DisplayChunksPerLine;
+    while (time > video.fieldStart) {
+        if (video.fieldEnd === 0) {
+            beginVideoField(m);
+        }
+        let height = frameH;
+        if (video.ntsc) {
+            height = ntscFrameH;
+        }
+        const elapsed = Math.min(time, video.fieldEnd) - video.fieldStart;
+        const line = Math.floor(elapsed / screenLineClocks);
+        const column = Math.min(chunksPerLine, Math.ceil((elapsed % screenLineClocks) / cpu.zx8301TimingChunkClocks));
+        const end = Math.min(height * chunksPerLine, line * chunksPerLine + column);
+        while (video.chunk < end) {
+            const take = Math.min(end - video.chunk, chunksPerLine - video.chunk % chunksPerLine);
+            const start = video.chunk * screenChunkPixels;
+            decodeScreenSpan(m, video.pixels, start, start + take * screenChunkPixels);
+            video.chunk += take;
+        }
+        if (time < video.fieldEnd) {
+            return;
+        }
+        for (let y = height; y < frameH; y += 1) {
+            decodeScreenSpan(m, video.pixels, y * frameW, (y + 1) * frameW);
+        }
+        const completed = video.completed;
+        video.completed = video.pixels;
+        video.pixels = completed;
+        video.completedNtsc = video.ntsc;
+        video.ready = true;
+        if (video.fieldTail === video.fieldEnds.length) {
+            if (video.fieldHead > 0) {
+                video.fieldEnds.copyWithin(0, video.fieldHead, video.fieldTail);
+                video.fieldClocks.copyWithin(0, video.fieldHead, video.fieldTail);
+                video.fieldTail -= video.fieldHead;
+                video.fieldHead = 0;
+            } else {
+                const capacity = video.fieldEnds.length * 2;
+                const ends = new Float64Array(capacity);
+                const clocks = new Uint32Array(capacity);
+                ends.set(video.fieldEnds);
+                clocks.set(video.fieldClocks);
+                video.fieldEnds = ends;
+                video.fieldClocks = clocks;
+            }
+        }
+        video.fieldEnds[video.fieldTail] = video.fieldEnd;
+        video.fieldClocks[video.fieldTail] = video.fieldEnd - video.fieldStart;
+        video.fieldTail += 1;
+        video.fieldStart = video.fieldEnd;
+        video.fieldEnd = 0;
+        video.chunk = 0;
+        video.flashOn = false;
+        video.flashBackground = 0;
+        m.flashFrame = (m.flashFrame + 1) & 63;
+    }
+}
+
+/** @param {Machine} m */
+function beginVideoField(m) {
+    const video = m.video;
+    video.ntsc = m.ntscMachine && m.displayNtsc;
+    let clocks = cpu.zx8301PalClocksPerFrame;
+    if (video.ntsc) {
+        clocks = cpu.zx8301NtscClocksPerFrame;
+    }
+    video.fieldEnd = video.fieldStart + clocks;
+}
+
+/** @param {Machine} m */
+function decodeScreen(m) {
+    for (let y = 0; y < frameH; y += 1) {
+        decodeScreenSpan(m, m.pixels, y * frameW, (y + 1) * frameW);
+    }
+    m.frameVersion += 1;
+}
+
+/** @param {Machine} m @param {Uint8Array} pixels @param {number} start @param {number} end */
+function decodeScreenSpan(m, pixels, start, end) {
+    if (start % frameW === 0) {
+        m.video.flashOn = false;
+        m.video.flashBackground = 0;
     }
     const flash = m.displayMode8 && (m.flashFrame & 32) !== 0;
+    if (m.displayBlank && !flash) {
+        pixels.fill(0, start, end);
+        return;
+    }
+    let src = screenBase + start / 4;
+    if (m.displaySecondScreen) {
+        src += screenBytes;
+    }
     if (flash) {
-        decodeMode8Flash(m, src);
+        decodeMode8Flash(m, src, pixels, start, end);
         return;
     }
     let lut = mode4Lut;
     if (m.displayMode8) {
         lut = mode8Lut;
     }
-    const pixels = m.pixels;
     const mem = m.mem;
-    let di = 0;
-    for (let y = 0; y < frameH; y += 1) {
-        const line = src + y * screenLineBytes;
-        for (let x = 0; x < screenLineBytes; x += 2) {
-            const first = mem[line + x];
-            const second = mem[line + x + 1];
-            const hi = ((first >> 4) * 16 + (second >> 4)) * 4;
-            pixels[di] = lut[hi];
-            pixels[di + 1] = lut[hi + 1];
-            pixels[di + 2] = lut[hi + 2];
-            pixels[di + 3] = lut[hi + 3];
-            const lo = ((first & 0x0F) * 16 + (second & 0x0F)) * 4;
-            pixels[di + 4] = lut[lo];
-            pixels[di + 5] = lut[lo + 1];
-            pixels[di + 6] = lut[lo + 2];
-            pixels[di + 7] = lut[lo + 3];
-            di += 8;
-        }
+    for (let di = start; di < end; di += 8) {
+        const first = mem[src];
+        const second = mem[src + 1];
+        const hi = ((first >> 4) * 16 + (second >> 4)) * 4;
+        pixels[di] = lut[hi];
+        pixels[di + 1] = lut[hi + 1];
+        pixels[di + 2] = lut[hi + 2];
+        pixels[di + 3] = lut[hi + 3];
+        const lo = ((first & 0x0F) * 16 + (second & 0x0F)) * 4;
+        pixels[di + 4] = lut[lo];
+        pixels[di + 5] = lut[lo + 1];
+        pixels[di + 6] = lut[lo + 2];
+        pixels[di + 7] = lut[lo + 3];
+        src += 2;
     }
 }
 
 /**
  * @param {Machine} m
  * @param {number} src
+ * @param {Uint8Array} pixels
+ * @param {number} start
+ * @param {number} end
  */
-function decodeMode8Flash(m, src) {
-    const pixels = m.pixels;
+function decodeMode8Flash(m, src, pixels, start, end) {
     const mem = m.mem;
-    let di = 0;
-    for (let y = 0; y < frameH; y += 1) {
-        const line = src + y * screenLineBytes;
-        let logicalX = 0;
-        let flashBackground = 0;
-        let flashOn = false;
-        for (let x = 0; x < screenLineBytes; x += 2) {
-            const first = mem[line + x];
-            const second = mem[line + x + 1];
-            for (let shift = 6; shift >= 0; shift -= 2) {
-                const p1 = (first >> shift) & 3;
-                const p2 = (second >> shift) & 3;
-                const flashBit = (p1 & 1) !== 0;
-                let color = ((p1 & 2) << 1) | p2;
-                if (flashOn) {
-                    color = flashBackground;
-                }
-                pixels[di] = color;
-                pixels[di + 1] = color;
-                di += 2;
-                if (flashBit) {
-                    if (!flashOn) {
-                        flashBackground = color;
-                    }
-                    flashOn = !flashOn;
-                }
-                logicalX += 1;
-                if (logicalX === 256) {
-                    logicalX = 0;
-                    flashBackground = 0;
-                    flashOn = false;
-                }
+    const video = m.video;
+    let di = start;
+    while (di < end) {
+        const first = mem[src];
+        const second = mem[src + 1];
+        for (let shift = 6; shift >= 0; shift -= 2) {
+            const p1 = (first >> shift) & 3;
+            const p2 = (second >> shift) & 3;
+            const flashBit = (p1 & 1) !== 0;
+            let color = ((p1 & 2) << 1) | p2;
+            if (video.flashOn) {
+                color = video.flashBackground;
             }
+            if (flashBit) {
+                if (!video.flashOn) {
+                    video.flashBackground = color;
+                }
+                video.flashOn = !video.flashOn;
+            }
+            if (m.displayBlank) {
+                color = 0;
+            }
+            pixels[di] = color;
+            pixels[di + 1] = color;
+            di += 2;
         }
+        src += 2;
     }
 }
 
@@ -1314,12 +1547,13 @@ function renderBeepSample(m) {
     const sample = beep.waveState;
     beep.cyclePoint += 1;
     if (beep.cyclePoint >= beep.halfCycle) {
+        beep.cyclePoint = Math.min(beep.cyclePoint - beep.halfCycle, 1);
         beep.waveState *= -1;
         if (beep.fuzzAmount > soundSignedNibbleMax) {
             beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
             beep.halfCycle = beepHalfSampleCount(m, beep);
         }
-        beep.cyclePoint = 0;
+        return sample * (1 - 2 * beep.cyclePoint);
     }
     return sample;
 }
@@ -1375,7 +1609,7 @@ function beepHalfSampleCount(m, beep) {
         pitch = 0;
     }
     const units = pitch * soundPitchFractionScale + soundPitchBaseUnits;
-    return Math.max(Math.round(m.sampleRate * units / soundPitchDivisor), 1);
+    return Math.max(m.sampleRate * units / soundPitchDivisor, 1);
 }
 
 /** @param {Machine["beep"]} beep @param {number} value @returns {number} */
@@ -1399,6 +1633,14 @@ function qsoundContains(m, addr) {
 function resetQsound(m) {
     const qsound = m.qsound;
     qsound.selectedRegister = 0;
+    qsound.addressValid = false;
+    qsound.pinSelect = 0;
+    qsound.pinData = 0;
+    qsound.busyUntil = 0;
+    qsound.busActive = false;
+    qsound.busAddress = 0;
+    qsound.busWrite = false;
+    qsound.busData = 0;
     qsound.pia.fill(0);
     qsound.dataDirectionA = 0;
     qsound.dataDirectionB = 0;
@@ -1419,6 +1661,33 @@ function qsoundTickCycles(m) {
     return qsoundAyTickCycles;
 }
 
+/**
+ * Keep the CPU data strobe distinct from the later PIA register transfer.
+ *
+ * @param {Machine} m
+ * @param {number} addr
+ * @param {boolean} write
+ * @param {number} data
+ */
+function beginQsoundAccess(m, addr, write, data) {
+    const qsound = m.qsound;
+    qsound.busActive = true;
+    qsound.busAddress = addr;
+    qsound.busWrite = write;
+    qsound.busData = data & 0xFF;
+    if (qsound.model === qsound2) {
+        updateQsoundPins(m);
+    }
+}
+
+/** @param {Machine} m */
+function endQsoundAccess(m) {
+    m.qsound.busActive = false;
+    if (m.qsound.model === qsound2) {
+        updateQsoundPins(m);
+    }
+}
+
 /** @param {Machine} m @param {number} addr @returns {number} */
 function readQsound(m, addr) {
     if (addr < qsoundPiaBase) {
@@ -1433,14 +1702,14 @@ function readQsound(m, addr) {
         if ((m.qsound.pia[1] & qsoundDataSelectBit) === 0) {
             return m.qsound.dataDirectionA;
         }
-        return m.qsound.pia[0];
+        return readQsoundPortA(m);
     case 1:
         return m.qsound.pia[1];
     case 2:
         if ((m.qsound.pia[3] & qsoundDataSelectBit) === 0) {
             return m.qsound.dataDirectionB;
         }
-        return m.qsound.pia[2];
+        return m.qsound.pia[2] & m.qsound.dataDirectionB;
     default:
         return m.qsound.pia[3];
     }
@@ -1448,13 +1717,10 @@ function readQsound(m, addr) {
 
 /** @param {Machine} m @param {number} addr @param {number} value */
 function writeQsound(m, addr, value) {
-    if (addr < qsoundPiaBase) {
-        return;
-    }
     if (!qsoundPiaContains(m, addr)) {
-        writeQsound2Direct(m, addr, value);
         return;
     }
+    value &= 0xFF;
     const reg = (addr - qsoundPiaBase) & 3;
     switch (reg) {
     case 0:
@@ -1463,37 +1729,99 @@ function writeQsound(m, addr, value) {
         } else {
             m.qsound.pia[0] = value;
         }
-        return;
+        break;
     case 1:
-        m.qsound.pia[1] = value;
-        return;
+        m.qsound.pia[1] = value & 0x3F;
+        break;
     case 2:
         if ((m.qsound.pia[3] & qsoundDataSelectBit) === 0) {
             m.qsound.dataDirectionB = value;
-            return;
+        } else {
+            m.qsound.pia[2] = value;
         }
-        m.qsound.pia[2] = value;
-        updateQsoundAy(m, value);
-        return;
+        break;
     default:
-        m.qsound.pia[3] = value;
+        m.qsound.pia[3] = value & 0x3F;
     }
+    updateQsoundPins(m);
 }
 
-/** @param {Machine} m @param {number} value */
-function updateQsoundAy(m, value) {
-    const select = value & qsoundSelectMask;
-    if (select === qsoundAddressSelect) {
-        m.qsound.selectedRegister = m.qsound.pia[0] & 0x0F;
+/**
+ * Resolve PA's driven bits and input pull-ups, including the PSG's read bus.
+ * Undriven PB controls are treated as inactive; electrical contention is not modeled.
+ *
+ * @param {Machine} m
+ * @returns {number}
+ */
+function readQsoundPortA(m) {
+    const qsound = m.qsound;
+    let data = qsound.pia[0] | (~qsound.dataDirectionA & 0xFF);
+    const select = qsound.pia[2] & qsound.dataDirectionB & qsoundSelectMask;
+    const active = qsound.model === qsoundOriginal || (qsound.busActive && qsoundPiaContains(m, qsound.busAddress));
+    if (active && select === 1 && qsound.addressValid) {
+        let value = 0;
+        if (qsound.selectedRegister < 16) {
+            value = ay.readReg(qsound.ay, qsound.selectedRegister);
+        }
+        data &= value;
+    }
+    return data;
+}
+
+/**
+ * Follow transparent AY latches and the QSound2 GAL's DS-qualified bus controls.
+ * Only changed data or a newly asserted write strobe produces a register write.
+ *
+ * @param {Machine} m
+ */
+function updateQsoundPins(m) {
+    const qsound = m.qsound;
+    if (qsound.model === qsoundOff) {
         return;
     }
-    if (select !== qsoundDataWrite) {
+    let select = qsound.pia[2] & qsound.dataDirectionB & qsoundSelectMask;
+    let data = qsound.pia[0] | (~qsound.dataDirectionA & 0xFF);
+    if (qsound.model === qsound2) {
+        if (!qsound.busActive || !qsoundContains(m, qsound.busAddress)) {
+            select = 0;
+        } else if (!qsoundPiaContains(m, qsound.busAddress)) {
+            select = 0;
+            if (qsound.busAddress >= qsound2DirectBase && qsound.busWrite) {
+                select = qsoundAddressSelect;
+                if ((qsound.busAddress & 2) !== 0) {
+                    select = qsoundDataWrite;
+                }
+                data = qsound.busData;
+            }
+        }
+    }
+    const changed = select !== qsound.pinSelect || data !== qsound.pinData;
+    qsound.pinSelect = select;
+    qsound.pinData = data;
+    if (!changed) {
+        return;
+    }
+    if (select === qsoundAddressSelect) {
+        if (qsound.model === qsound2) {
+            writeQsound2Direct(m, qsound2DirectBase, data);
+        } else {
+            qsound.addressValid = (data & 0xF0) === 0;
+            if (qsound.addressValid) {
+                qsound.selectedRegister = data;
+            }
+        }
+        return;
+    }
+    if (select !== qsoundDataWrite || !qsound.addressValid) {
+        return;
+    }
+    if (qsound.model === qsound2) {
+        writeQsound2Direct(m, qsound2DirectBase + 2, data);
         return;
     }
     renderAudioTo(m, m.cpu.cycleCount);
-    const reg = m.qsound.selectedRegister;
-    const masked = m.qsound.pia[0] & qsoundRegisterMasks[reg];
-    ay.writeReg(m.qsound.ay, reg, masked);
+    const reg = qsound.selectedRegister;
+    ay.writeReg(qsound.ay, reg, data & qsoundRegisterMasks[reg]);
 }
 
 /** @param {Machine} m @param {number} addr @returns {boolean} */
@@ -1514,7 +1842,11 @@ function readQsound2Direct(m, addr) {
     }
     if (((addr - qsound2DirectBase) & 2) === 0) {
         renderAudioTo(m, m.cpu.cycleCount);
-        return fm.readStatus(m.qsound.fm);
+        let status = fm.readStatus(m.qsound.fm);
+        if (m.cpu.cycleCount < m.qsound.busyUntil) {
+            status |= 0x80;
+        }
+        return status;
     }
     const reg = m.qsound.selectedRegister;
     if (reg < 16) {
@@ -1533,6 +1865,7 @@ function writeQsound2Direct(m, addr, value) {
             renderAudioTo(m, m.cpu.cycleCount);
         }
         m.qsound.selectedRegister = value;
+        m.qsound.addressValid = true;
         fm.writeAddress(m.qsound.fm, value);
         if (value >= 0x2D && value <= 0x2F) {
             const tickT = cpuClockHz(m) / fm.getSsgTickRate(m.qsound.fm);
@@ -1541,12 +1874,20 @@ function writeQsound2Direct(m, addr, value) {
         return;
     }
     renderAudioTo(m, m.cpu.cycleCount);
+    markQsoundBusy(m);
     const reg = m.qsound.selectedRegister;
     if (reg < 16) {
         ay.writeReg(m.qsound.ay, reg, value & qsoundRegisterMasks[reg]);
         return;
     }
     fm.writeReg(m.qsound.fm, reg, value);
+}
+
+/** @param {Machine} m */
+function markQsoundBusy(m) {
+    if (m.qsound.model === qsound2) {
+        m.qsound.busyUntil = m.cpu.cycleCount + fm.getBusyCycles(m.qsound.fm, cpuClockHz(m));
+    }
 }
 
 /**

@@ -9,12 +9,14 @@ export const internalIoBase = 0x18000;
 export const internalIoEnd = 0x1C000;
 const zx8301OnboardRamEnd = 0x40000;
 const busCycleClocks = 4;
+const peripheralEClocks = 10;
+const peripheralELowClocks = 6;
 const byteBusCycles = 1;
 const wordBusCycles = 2;
 const longBusCycles = 4;
-const zx8301TimingChunkClocks = 12;
-const zx8301TimingChunksPerLine = 40;
-const zx8301DisplayChunksPerLine = 32;
+export const zx8301TimingChunkClocks = 12;
+export const zx8301TimingChunksPerLine = 40;
+export const zx8301DisplayChunksPerLine = 32;
 const zx8301BusSlotsPerChunk = zx8301TimingChunkClocks / busCycleClocks;
 const zx8301BusSlotsPerLine = zx8301TimingChunksPerLine * zx8301BusSlotsPerChunk;
 const zx8301DisplayBusSlots = zx8301DisplayChunksPerLine * zx8301BusSlotsPerChunk;
@@ -76,9 +78,14 @@ const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
  *   mem: Uint8Array,
  *   isUnmapped: function(number): boolean,
  *   isHw: function(number): boolean,
+ *   isEClocked: function(number): boolean,
+ *   beginHwAccess: function(number, boolean, number): void,
+ *   endHwAccess: function(): void,
  *   readHwByte: function(number): number,
  *   readHwLongClock: function(): number,
  *   writeHwByte: function(number, number): void,
+ *   beforeMemoryWrite: function(number, number): void,
+ *   executeHostOpcode: function(Cpu, number): void,
  *   afterInstruction: function(): void,
  *   resetHardware: function(): void,
  * }} CpuBus
@@ -115,6 +122,7 @@ const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
  *   cycleLimit: number,
  *   cycleLimitActive: boolean,
  *   accessActive: boolean,
+ *   peripheralWaitCycles: number,
  *   instructionCycleOverride: number,
  *   cycleBudget: number,
  *   rewriteTarget: number,
@@ -159,6 +167,7 @@ export function create() {
         cycleLimit: 0,
         cycleLimitActive: false,
         accessActive: false,
+        peripheralWaitCycles: 0,
         instructionCycleOverride: -1,
         cycleBudget: 0,
         rewriteTarget: -1,
@@ -1353,37 +1362,44 @@ export function writePointerLong(mem, addr, v) {
 }
 
 /**
+ * @param {Cpu} c
  * @param {CpuBus} bus
  * @param {number} addr
  * @returns {number}
  */
-function readDecodedWord(bus, addr) {
+function readDecodedWord(c, bus, addr) {
+    const next = (addr + 1) & addrMask;
+    if (bus.isHw(addr) || ((addr & 1) !== 0 && (next === 0 || bus.isHw(next)))) {
+        const highByte = readByte(c, bus, addr);
+        const lowByte = readByte(c, bus, next);
+        return ((highByte << 8) | lowByte) & 0xFFFF;
+    }
+    addCpuBusCycles(c, addr, wordBusCycles);
     if (bus.isUnmapped(addr)) {
         return 0;
-    }
-    if (bus.isHw(addr >>> 0)) {
-        const highByte = bus.readHwByte(addr);
-        const lowByte = bus.readHwByte(addr + 1);
-        return ((highByte << 8) | lowByte) & 0xFFFF;
     }
     return readPointerWord(bus.mem, addr);
 }
 
 /**
+ * @param {Cpu} c
  * @param {CpuBus} bus
  * @param {number} addr
  * @param {number} d
  */
-function writeDecodedWord(bus, addr, d) {
+function writeDecodedWord(c, bus, addr, d) {
+    const next = (addr + 1) & addrMask;
+    if (bus.isHw(addr) || ((addr & 1) !== 0 && (next === 0 || bus.isHw(next)))) {
+        writeByte(c, bus, addr, (d >> 8) & 0xFF);
+        writeByte(c, bus, next, d & 0xFF);
+        return;
+    }
+    addCpuBusCycles(c, addr, wordBusCycles);
     if (bus.isUnmapped(addr)) {
         return;
     }
-    if (bus.isHw(addr >>> 0)) {
-        bus.writeHwByte(addr, (d >> 8) & 0xFF);
-        bus.writeHwByte(addr + 1, d & 0xFF);
-        return;
-    }
     if (addr >= qdosUserRamBase) {
+        bus.beforeMemoryWrite(addr, qdosWordSize);
         writePointerWord(bus.mem, addr, d);
     }
 }
@@ -1395,16 +1411,14 @@ function writeDecodedWord(bus, addr, d) {
  * @returns {number}
  */
 function readByte(c, bus, addr) {
-    addCpuBusCycles(c, addr, byteBusCycles);
-    if (c.accessActive && c.exception !== 0) {
-        return 0;
-    }
     addr &= addrMask;
-    if (bus.isUnmapped(addr)) {
-        return 0;
+    const mapped = !bus.isUnmapped(addr);
+    if (mapped && (!c.accessActive || c.exception === 0) && bus.isHw(addr)) {
+        return accessHardwareByte(c, bus, addr, false, 0);
     }
-    if (bus.isHw(addr >>> 0)) {
-        return bus.readHwByte(addr);
+    addCpuBusCycles(c, addr, byteBusCycles);
+    if (!mapped || (c.accessActive && c.exception !== 0)) {
+        return 0;
     }
     return bus.mem[addr];
 }
@@ -1416,12 +1430,12 @@ function readByte(c, bus, addr) {
  * @returns {number}
  */
 function readWord(c, bus, addr) {
-    addCpuBusCycles(c, addr, wordBusCycles);
     if (cpuWordOrLongFaultIfNeeded(c, addr, true)) {
+        addCpuBusCycles(c, addr, wordBusCycles);
         return 0;
     }
     addr &= addrMask;
-    return readDecodedWord(bus, addr);
+    return readDecodedWord(c, bus, addr);
 }
 
 /**
@@ -1431,20 +1445,22 @@ function readWord(c, bus, addr) {
  * @returns {number}
  */
 function readLong(c, bus, addr) {
-    addCpuBusCycles(c, addr, longBusCycles);
     if (cpuWordOrLongFaultIfNeeded(c, addr, true)) {
+        addCpuBusCycles(c, addr, longBusCycles);
         return 0;
     }
     addr &= addrMask;
     if (addr === internalIoBase) {
+        addCpuBusCycles(c, addr, longBusCycles);
         return bus.readHwLongClock();
     }
     const lowAddr = (addr + qdosWordSize) & addrMask;
     if (isDirectRamLongAccess(bus, addr, lowAddr)) {
+        addCpuBusCycles(c, addr, longBusCycles);
         return readPointerLong(bus.mem, addr);
     }
-    const highWord = readDecodedWord(bus, addr);
-    const lowWord = readDecodedWord(bus, lowAddr);
+    const highWord = readDecodedWord(c, bus, addr);
+    const lowWord = readDecodedWord(c, bus, lowAddr);
     return ((highWord << 16) | lowWord) >>> 0;
 }
 
@@ -1455,19 +1471,18 @@ function readLong(c, bus, addr) {
  * @param {number} d
  */
 function writeByte(c, bus, addr, d) {
-    addCpuBusCycles(c, addr, byteBusCycles);
-    if (c.accessActive && c.exception !== 0) {
-        return;
-    }
     addr &= addrMask;
-    if (bus.isUnmapped(addr)) {
+    const mapped = !bus.isUnmapped(addr);
+    if (mapped && (!c.accessActive || c.exception === 0) && bus.isHw(addr)) {
+        accessHardwareByte(c, bus, addr, true, d & 0xFF);
         return;
     }
-    if (bus.isHw(addr >>> 0)) {
-        bus.writeHwByte(addr, d & 0xFF);
+    addCpuBusCycles(c, addr, byteBusCycles);
+    if (!mapped || (c.accessActive && c.exception !== 0)) {
         return;
     }
     if (addr >= qdosUserRamBase) {
+        bus.beforeMemoryWrite(addr, qdosByteSize);
         bus.mem[addr] = d & 0xFF;
     }
 }
@@ -1479,12 +1494,12 @@ function writeByte(c, bus, addr, d) {
  * @param {number} d
  */
 function writeWord(c, bus, addr, d) {
-    addCpuBusCycles(c, addr, wordBusCycles);
     if (cpuWordOrLongFaultIfNeeded(c, addr, false)) {
+        addCpuBusCycles(c, addr, wordBusCycles);
         return;
     }
     addr &= addrMask;
-    writeDecodedWord(bus, addr, d);
+    writeDecodedWord(c, bus, addr, d);
 }
 
 /**
@@ -1494,24 +1509,81 @@ function writeWord(c, bus, addr, d) {
  * @param {number} d
  */
 function writeLong(c, bus, addr, d) {
-    addCpuBusCycles(c, addr, longBusCycles);
     if (cpuWordOrLongFaultIfNeeded(c, addr, false)) {
+        addCpuBusCycles(c, addr, longBusCycles);
         return;
     }
     addr &= addrMask;
     const lowAddr = (addr + qdosWordSize) & addrMask;
     if (isDirectRamLongAccess(bus, addr, lowAddr)) {
+        addCpuBusCycles(c, addr, longBusCycles);
         if (addr >= qdosUserRamBase) {
+            bus.beforeMemoryWrite(addr, qdosLongSize);
             writePointerLong(bus.mem, addr, d);
             return;
         }
         if (lowAddr >= qdosUserRamBase) {
+            bus.beforeMemoryWrite(lowAddr, qdosWordSize);
             writePointerWord(bus.mem, lowAddr, d & 0xFFFF);
         }
         return;
     }
-    writeDecodedWord(bus, addr, (d >>> 16) & 0xFFFF);
-    writeDecodedWord(bus, lowAddr, d & 0xFFFF);
+    writeDecodedWord(c, bus, addr, (d >>> 16) & 0xFFFF);
+    writeDecodedWord(c, bus, lowAddr, d & 0xFFFF);
+}
+
+/**
+ * Sequence DS, the device transfer, and bus completion without moving time back.
+ * E falls half a clock before multiples of ten; E-qualified VPA is sampled at
+ * the end of S4, then a complete E-high transfer must finish before S7 ends.
+ * Extra peripheral clocks are kept outside the instruction's internal padding.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @param {boolean} write
+ * @param {number} data
+ * @returns {number}
+ */
+function accessHardwareByte(c, bus, addr, write, data) {
+    if (!c.accessActive) {
+        if (write) {
+            bus.writeHwByte(addr, data);
+            return 0;
+        }
+        return bus.readHwByte(addr);
+    }
+    const start = c.cycleCount;
+    let end = start + busCycleClocks;
+    const peripheral = bus.isEClocked(addr);
+    if (peripheral) {
+        let sync = start + 3;
+        const phase = sync % peripheralEClocks;
+        if (phase >= peripheralELowClocks) {
+            sync += peripheralEClocks - phase;
+        }
+        end = sync + peripheralEClocks - sync % peripheralEClocks;
+        c.peripheralWaitCycles += end - start - busCycleClocks;
+    }
+    c.cycleCount = start + 1 + Number(write);
+    bus.beginHwAccess(addr, write, data);
+    let transfer = end;
+    if (peripheral) {
+        transfer -= 1 - Number(write) * 0.5;
+    }
+    c.cycleCount = transfer;
+    let value = 0;
+    if (write) {
+        bus.writeHwByte(addr, data);
+    } else {
+        value = bus.readHwByte(addr);
+    }
+    if (peripheral) {
+        c.cycleCount = end - 0.5;
+    }
+    bus.endHwAccess();
+    c.cycleCount = end;
+    return value;
 }
 
 /**
@@ -1853,6 +1925,8 @@ function processInterrupts(c, bus) {
     ) {
         const interruptCycleStart = c.cycleCount;
         const savedCpuAccessActive = c.accessActive;
+        const savedPeripheralWaitCycles = c.peripheralWaitCycles;
+        c.peripheralWaitCycles = 0;
         c.accessActive = true;
         pushCpuExceptionFrame(c, bus, c.pc);
         const vectorAddr = (autovectorBase + c.pendingInterrupt) * qdosLongSize;
@@ -1865,8 +1939,10 @@ function processInterrupts(c, bus) {
         c.extraFlag = false;
         c.accessActive = savedCpuAccessActive;
         const elapsed = c.cycleCount - interruptCycleStart;
-        if (elapsed < interruptExceptionClocks) {
-            c.cycleCount += interruptExceptionClocks - elapsed;
+        const expectedCycles = interruptExceptionClocks + c.peripheralWaitCycles;
+        c.peripheralWaitCycles = savedPeripheralWaitCycles;
+        if (elapsed < expectedCycles) {
+            c.cycleCount += expectedCycles - elapsed;
         }
     }
 }
@@ -1982,6 +2058,7 @@ function executeLoadedOpcode(c, bus, opcode, instructionCycleStart) {
         }
     }
     if (expectedCycles > 0) {
+        expectedCycles += c.peripheralWaitCycles;
         const elapsed = c.cycleCount - instructionCycleStart;
         if (elapsed < expectedCycles) {
             c.cycleCount += expectedCycles - elapsed;
@@ -2000,10 +2077,10 @@ function executeLoadedOpcode(c, bus, opcode, instructionCycleStart) {
 function executeTimedPcInstruction(c, bus) {
     c.instructionsRun += 1;
     const instructionCycleStart = c.cycleCount;
+    c.peripheralWaitCycles = 0;
     c.currentInstructionPc = c.pc;
     c.accessActive = true;
-    addCpuBusCycles(c, c.pc, wordBusCycles);
-    const opcode = readDecodedWord(bus, c.pc);
+    const opcode = readDecodedWord(c, bus, c.pc);
     c.pc = cpuAddressOffset(c.pc, qdosWordSize) | 0;
     executeLoadedOpcode(c, bus, opcode, instructionCycleStart);
 }
@@ -2158,6 +2235,7 @@ export function reset(c, bus) {
     c.exceptionPc = -1;
     c.currentInstructionPc = -1;
     c.accessActive = false;
+    c.peripheralWaitCycles = 0;
     c.cycleCount = 0;
     c.cycleLimitActive = false;
     c.cycleLimit = 0;
@@ -2330,8 +2408,11 @@ export function setOpcode(opcode, handler) {
 export function executeOpcode(c, bus, opcode) {
     ensureOpcodeTable();
     const instructionCycleStart = c.cycleCount;
+    const savedPeripheralWaitCycles = c.peripheralWaitCycles;
+    c.peripheralWaitCycles = 0;
     c.currentInstructionPc = c.pc;
     executeLoadedOpcode(c, bus, opcode, instructionCycleStart);
+    c.peripheralWaitCycles = savedPeripheralWaitCycles;
 }
 
 /**
@@ -2388,6 +2469,7 @@ function runGuestCall(c, bus, returnPc, instructionLimit) {
     const savedCode = c.code;
     const savedInstructionPc = c.currentInstructionPc;
     const savedAccess = c.accessActive;
+    const savedPeripheralWaitCycles = c.peripheralWaitCycles;
     const savedOverride = c.instructionCycleOverride;
     const savedNInst = c.nInst;
     const savedNInst2 = c.nInst2;
@@ -2425,6 +2507,7 @@ function runGuestCall(c, bus, returnPc, instructionLimit) {
     c.code = savedCode;
     c.currentInstructionPc = savedInstructionPc;
     c.accessActive = savedAccess;
+    c.peripheralWaitCycles = savedPeripheralWaitCycles;
     c.instructionCycleOverride = savedOverride;
     c.cycleLimitActive = savedCycleLimitActive;
 }

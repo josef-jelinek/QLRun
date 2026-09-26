@@ -35,6 +35,7 @@ const dcBlockPole = 1 - 2 * Math.PI * dcBlockHz / sampleRate;
  * @typedef {{
  *   chunks: WorkletChunk[],
  *   head: number,
+ *   released: number,
  *   offset: number,
  *   waiting: boolean,
  *   waitSamples: number,
@@ -69,6 +70,7 @@ function QLRunProcessor() {
     const p = /** @type {WorkletProc} */ (Reflect.construct(AudioWorkletProcessor, [], QLRunProcessor));
     p.chunks = [];
     p.head = 0;
+    p.released = 0;
     p.offset = 0;
     p.waiting = false;
     p.waitSamples = 0;
@@ -285,30 +287,31 @@ function trimOldAudio(p) {
 }
 
 /**
- * Hand played chunks back to the producer: all of them once the queue has
- * drained, otherwise only once enough have piled up in front of the head to be
+ * Hand played chunks back immediately, but compact their entries only once
+ * the queue has drained or enough have piled up in front of the head to be
  * worth shifting the rest down.
  *
  * @param {WorkletProc} p
  */
 function dropPlayed(p) {
+    releaseChunks(p, p.head);
     if (p.head >= p.chunks.length) {
-        releaseChunks(p, p.chunks.length);
         p.chunks = [];
         p.head = 0;
+        p.released = 0;
         p.offset = 0;
         return;
     }
     if (p.head <= 8) {
         return;
     }
-    releaseChunks(p, p.head);
     const remain = p.chunks.length - p.head;
     for (let i = 0; i < remain; i += 1) {
         p.chunks[i] = p.chunks[p.head + i];
     }
     p.chunks.length = remain;
     p.head = 0;
+    p.released = 0;
 }
 
 /** @param {WorkletProc} p */
@@ -363,8 +366,9 @@ function writeSample(p, ol, or, at, sampleL, sampleR) {
  * @param {number} upto
  */
 function releaseChunks(p, upto) {
-    for (let i = 0; i < upto; i += 1) {
+    for (let i = p.released; i < upto; i += 1) {
         const samples = p.chunks[i].samples;
         p.port.postMessage({type: "spent", samples}, [samples.buffer]);
     }
+    p.released = upto;
 }

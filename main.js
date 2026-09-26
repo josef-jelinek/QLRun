@@ -40,6 +40,11 @@ const ui = {
     loadRom:          /** @type {HTMLButtonElement} */ (document.getElementById("load-rom")),
     fileRom:          /** @type {HTMLInputElement} */  (document.getElementById("file-rom")),
     romInfo:          /** @type {HTMLElement} */       (document.getElementById("rom-info")),
+    romSlots: [
+        /** @type {HTMLInputElement} */ (document.getElementById("rom-cart")),
+        /** @type {HTMLInputElement} */ (document.getElementById("rom-io1")),
+        /** @type {HTMLInputElement} */ (document.getElementById("rom-io2")),
+    ],
     loadRomCartridge: /** @type {HTMLButtonElement} */ (document.getElementById("load-rom-cartridge")),
     fileRomCartridge: /** @type {HTMLInputElement} */  (document.getElementById("file-rom-cartridge")),
     ejectRomCartridge: /** @type {HTMLButtonElement} */ (document.getElementById("eject-rom-cartridge")),
@@ -114,6 +119,11 @@ const mdvActivity = [
 ];
 const hddStatus = {inserted: false, name: "", modified: false, driverReady: false};
 const fddStatus = {inserted: false, name: "", driverReady: false};
+const romSlotStates = [
+    {name: "", error: "", generation: 0},
+    {name: "", error: "", generation: 0},
+    {name: "", error: "", generation: 0},
+];
 let keyboardVisible = false;
 let screenOnly = false;
 let screenOnlyFallback = false;
@@ -239,7 +249,10 @@ window.onkeydown = function (e) {
         }
         return;
     }
-    keyboard.handleKeyDown(kbd, e);
+    const selectingRom = ui.romSlots.includes(/** @type {HTMLInputElement} */ (e.target));
+    if (!selectingRom || e.code.startsWith("F")) {
+        keyboard.handleKeyDown(kbd, e);
+    }
 };
 
 window.onpointerdown = function () {
@@ -253,7 +266,10 @@ window.onkeyup = function (e) {
         e.preventDefault();
         return;
     }
-    keyboard.handleKeyUp(kbd, e);
+    const selectingRom = ui.romSlots.includes(/** @type {HTMLInputElement} */ (e.target));
+    if (!selectingRom || kbd.hostHeld.includes(e.code)) {
+        keyboard.handleKeyUp(kbd, e);
+    }
 };
 
 window.onblur = function () {
@@ -372,6 +388,10 @@ ui.fileRom.onchange = function () {
     });
 };
 
+for (const control of ui.romSlots) {
+    control.onchange = refreshRomSlotStatus;
+}
+
 ui.loadRomCartridge.onclick = function () {
     ui.fileRomCartridge.click();
 };
@@ -382,32 +402,46 @@ ui.fileRomCartridge.onchange = function () {
     if (file === undefined) {
         return;
     }
+    const slot = selectedRomSlot();
+    const state = romSlotStates[slot];
+    state.generation += 1;
+    const generation = state.generation;
+    if (file.size === 0 || file.size > machine.romCartridgeSize) {
+        state.error = "Expected 1 to " + machine.romCartridgeSize + ", got " + file.size + " bytes.";
+        refreshRomSlotStatus();
+        return;
+    }
     io.readFile(file, function (err, buf) {
-        if (err !== null) {
-            showError(ui.romCartridgeInfo, err);
+        if (state.generation !== generation) {
             return;
         }
-        if (!(buf instanceof ArrayBuffer)) {
-            showError(ui.romCartridgeInfo, "Empty read.");
-            return;
+        if (err === null && !(buf instanceof ArrayBuffer)) {
+            err = "Empty read.";
         }
-        const cartridgeErr = machine.insertRomCartridge(ql, buf);
-        if (cartridgeErr !== null) {
-            showError(ui.romCartridgeInfo, cartridgeErr);
-            return;
+        if (err === null) {
+            err = machine.insertRomCartridge(ql, buf, slot);
         }
-        ui.ejectRomCartridge.disabled = false;
-        resetSystem();
-        showInfo(ui.romCartridgeInfo, file.name);
+        state.error = err ?? "";
+        if (err === null) {
+            state.name = file.name;
+            resetSystem();
+        }
+        refreshRomSlotStatus();
     });
 };
 
 ui.ejectRomCartridge.onclick = function () {
-    machine.ejectRomCartridge(ql);
-    ui.ejectRomCartridge.disabled = true;
+    const slot = selectedRomSlot();
+    const state = romSlotStates[slot];
+    state.generation += 1;
+    machine.ejectRomCartridge(ql, slot);
+    state.name = "";
+    state.error = "";
     resetSystem();
-    showInfo(ui.romCartridgeInfo, "No cartridge.");
+    refreshRomSlotStatus();
 };
+
+refreshRomSlotStatus();
 
 ui.loadHdd.onclick = function () {
     ui.fileHdd.click();
@@ -663,6 +697,29 @@ function loadSystemRom() {
     }
 }
 
+function refreshRomSlotStatus() {
+    const state = romSlotStates[selectedRomSlot()];
+    ui.ejectRomCartridge.disabled = state.name === "";
+    if (state.error !== "") {
+        showError(ui.romCartridgeInfo, state.error);
+        return;
+    }
+    let name = state.name;
+    if (name === "") {
+        name = "No ROM.";
+    }
+    showInfo(ui.romCartridgeInfo, name);
+}
+
+function selectedRomSlot() {
+    for (let slot = 0; slot < ui.romSlots.length; slot += 1) {
+        if (ui.romSlots[slot].checked) {
+            return slot;
+        }
+    }
+    return 0;
+}
+
 /**
  * Set informational text and clear its error presentation.
  *
@@ -821,6 +878,8 @@ function cancelStartupFile() {
  * @param {ArrayBuffer} bytes
  */
 function applyStartupFile(name, bytes) {
+    startupFileName = null;
+    startupFileBytes = null;
     if (media.isMdvName(name)) {
         const mdvErr = machine.insertMdv(ql, 0, bytes, name);
         if (mdvErr !== null) {
@@ -929,7 +988,7 @@ function onFrame(now) {
     refreshFddStatus();
     refreshSoundStatus(now);
     if (gfx !== null) {
-        screen.draw(gfx, ql.pixels, ql.displayNtsc);
+        screen.draw(gfx, ql.pixels, ql.frameNtsc, ql.frameVersion);
     }
 }
 

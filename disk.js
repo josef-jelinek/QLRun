@@ -99,6 +99,8 @@ const defaultHdTrackMap = Uint8Array.of(
     13, 15, 17, 0x81, 0x83, 0x85, 0x87, 0x89, 0x8B, 0x8D, 0x8F, 0x91,
 );
 
+let opcodeHooksReady = false;
+
 /**
  * @typedef {import("./cpu.js").Cpu} Cpu
  * @typedef {import("./cpu.js").CpuBus} CpuBus
@@ -146,6 +148,7 @@ const defaultHdTrackMap = Uint8Array.of(
  *   interleave: number,
  *   fatSectors: number,
  *   rootLength: number,
+ *   fileMap: Map<number, number>,
  * }} State
  */
 
@@ -156,20 +159,55 @@ const defaultHdTrackMap = Uint8Array.of(
  */
 
 /**
- * Create both empty drives and bind their host pseudo-ops to them.
+ * Create both empty drives and initialize their shared host pseudo-ops.
  *
  * @returns {Disks}
  */
 export function create() {
-    const disks = {
+    ensureOpcodeHooks();
+    return {
         romInitAddr: -1,
         win: createDrive(false, "WIN", winTrampolineAddr, winOpcodeBase),
         flp: createDrive(true, "FLP", flpTrampolineAddr, flpOpcodeBase),
     };
-    cpu.setOpcode(romInitOpcode, function (c, bus) {
+}
+
+/**
+ * Dispatch a host pseudo-op using the disk state owned by the executing machine.
+ *
+ * @param {Disks} disks
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} opcode
+ */
+export function executeOpcode(disks, c, bus, opcode) {
+    if (opcode === romInitOpcode) {
         romInit(disks, c, bus);
-    });
-    return disks;
+        return;
+    }
+    let state = disks.win;
+    if (opcode >= flpOpcodeBase) {
+        state = disks.flp;
+    }
+    switch (opcode - state.opcodeBase) {
+    case 0:
+        driverIo(state, c, bus);
+        return;
+    case 1:
+        c.reg[0] = openChannel(state, c, bus);
+        break;
+    case 2:
+        driverClose(state, c, bus);
+        return;
+    case 3:
+        break;
+    case 4:
+        c.reg[0] = qerrNi;
+        break;
+    default:
+        return;
+    }
+    returnFromDriver(c, bus);
 }
 
 /**
@@ -287,6 +325,7 @@ export function eject(state) {
     state.interleave = 0;
     state.fatSectors = 0;
     state.rootLength = 0;
+    state.fileMap.clear();
 }
 
 /**
@@ -336,23 +375,27 @@ function createDrive(floppy, driver, trampolineAddr, opcodeBase) {
         interleave: 0,
         fatSectors: 0,
         rootLength: 0,
+        fileMap: new Map(),
     };
-    cpu.setOpcode(opcodeBase, function (c, bus) {
-        driverIo(state, c, bus);
-    });
-    cpu.setOpcode(opcodeBase + 1, function (c, bus) {
-        c.reg[0] = openChannel(state, c, bus);
-        returnFromDriver(c, bus);
-    });
-    cpu.setOpcode(opcodeBase + 2, function (c, bus) {
-        driverClose(state, c, bus);
-    });
-    cpu.setOpcode(opcodeBase + 3, returnFromDriver);
-    cpu.setOpcode(opcodeBase + 4, function (c, bus) {
-        c.reg[0] = qerrNi;
-        returnFromDriver(c, bus);
-    });
     return state;
+}
+
+function ensureOpcodeHooks() {
+    if (opcodeHooksReady) {
+        return;
+    }
+    cpu.setOpcode(romInitOpcode, executeHostOpcode);
+    for (const opcodeBase of [winOpcodeBase, flpOpcodeBase]) {
+        for (let entry = 0; entry < driverEntryCount; entry += 1) {
+            cpu.setOpcode(opcodeBase + entry, executeHostOpcode);
+        }
+    }
+    opcodeHooksReady = true;
+}
+
+/** @param {Cpu} c @param {CpuBus} bus */
+function executeHostOpcode(c, bus) {
+    bus.executeHostOpcode(c, c.code);
 }
 
 /**
@@ -369,9 +412,11 @@ function romInit(disks, c, bus) {
     cpu.writePointerWord(bus.mem, disks.romInitAddr, originalRomInitOpcode);
     const saved = new Int32Array(c.reg);
     const savedPollMask = cpu.readPointerWord(bus.mem, qdosPollMaskAddr);
+    bus.beforeMemoryWrite(qdosPollMaskAddr, 2);
     cpu.writePointerWord(bus.mem, qdosPollMaskAddr, 0);
     linkDriver(disks.win, c, bus);
     linkDriver(disks.flp, c, bus);
+    bus.beforeMemoryWrite(qdosPollMaskAddr, 2);
     cpu.writePointerWord(bus.mem, qdosPollMaskAddr, savedPollMask);
     c.reg.set(saved);
     cpu.executeOpcode(c, bus, originalRomInitOpcode);
@@ -398,6 +443,7 @@ function linkDriver(state, c, bus) {
     }
     const link = base + 4;
     const t = state.trampolineAddr;
+    bus.beforeMemoryWrite(link, driverLinkSize);
     bus.mem.fill(0, link, link + driverLinkSize);
     cpu.writePointerLong(bus.mem, link, t);
     cpu.writePointerLong(bus.mem, link + 4, t + 2);
@@ -476,6 +522,7 @@ function openChannel(state, c, bus) {
         eof: fileLength(state, file) + fileHeaderSize,
     };
     state.channels.set(channelBase, channel);
+    bus.beforeMemoryWrite(data, channelDataSize);
     cpu.writePointerLong(bus.mem, data + channelPositionOffset, channel.position);
     cpu.writePointerLong(bus.mem, data + channelEofOffset, channel.eof);
     cpu.writePointerWord(bus.mem, data + channelKeyOffset, key);
@@ -491,10 +538,12 @@ function driverClose(state, c, bus) {
     const channelBase = c.reg[8] & qdosChannelMask;
     state.channels.delete(channelBase);
     const data = channelBase + channelDataOffset;
+    bus.beforeMemoryWrite(data, channelDataSize);
     cpu.writePointerWord(bus.mem, data + channelOpenOffset, 0);
     cpu.writePointerLong(bus.mem, data + channelFileIdOffset, 0);
     const pdb = cpu.readPointerLong(bus.mem, qdosPdbTableAddr + 4);
     if (pdb >= cpu.qdosUserRamBase && pdb + 0x23 <= bus.mem.length && bus.mem[pdb + 0x22] > 0) {
+        bus.beforeMemoryWrite(pdb + 0x22, 1);
         bus.mem[pdb + 0x22] -= 1;
     }
     const savedA0 = c.reg[8];
@@ -607,6 +656,7 @@ function driverIo(state, c, bus) {
         break;
     }
     const data = channelBase + channelDataOffset;
+    bus.beforeMemoryWrite(data, channelDataSize);
     cpu.writePointerLong(bus.mem, data + channelPositionOffset, channel.position);
     cpu.writePointerLong(bus.mem, data + channelEofOffset, channel.eof);
     returnFromDriver(c, bus);
@@ -671,6 +721,7 @@ function validateFlpImage(image) {
 /** @param {State} state */
 function readGeometry(state) {
     const image = state.image;
+    state.fileMap.clear();
     if (!state.floppy) {
         state.sectorsPerCluster = cpu.readPointerWord(image, winSectorsPerClusterOffset);
         state.clusterCount = cpu.readPointerWord(image, winClusterCountOffset);
@@ -696,6 +747,18 @@ function readGeometry(state) {
         cpu.readPointerWord(image, flpRootDirSectorsOffset) * sectorSize +
         cpu.readPointerWord(image, flpRootDirBytesOffset);
     fixLogical(image.subarray(flpTrackMapOffset, flpTrackMapOffset + flpTrackMapSize), state.doubleDensity);
+    const slotCount = mapSlotCount(state);
+    for (let slotIndex = 0; slotIndex < slotCount; slotIndex += 1) {
+        const offset = flpFileMapOffset + slotIndex * flpFileMapSlotSize;
+        const high = mapByte(state, offset);
+        if (high === flpFileMapFree) {
+            continue;
+        }
+        const slot = (high << 16) | (mapByte(state, offset + 1) << 8) | mapByte(state, offset + 2);
+        if (!state.fileMap.has(slot)) {
+            state.fileMap.set(slot, slotIndex * state.sectorsPerBlock);
+        }
+    }
 }
 
 /**
@@ -829,16 +892,31 @@ function walkChain(state, first, links) {
  * @param {State} state
  * @param {FileId} file
  * @param {number} sector
+ * @param {{cluster: number, index: number} | null} [cursor]
  * @returns {number}
  */
-function fileSectorOffset(state, file, sector) {
+function fileSectorOffset(state, file, sector, cursor = null) {
     if (sector < 0) {
         return -1;
     }
     if (!state.floppy) {
-        const cluster = walkChain(state, file.file, Math.floor(sector / state.sectorsPerCluster));
+        const index = Math.floor(sector / state.sectorsPerCluster);
+        if (index >= state.clusterCount) {
+            return -1;
+        }
+        let first = file.file;
+        let links = index;
+        if (cursor !== null && cursor.index <= index) {
+            first = cursor.cluster;
+            links -= cursor.index;
+        }
+        const cluster = walkChain(state, first, links);
         if (cluster < 0) {
             return -1;
+        }
+        if (cursor !== null) {
+            cursor.cluster = cluster;
+            cursor.index = index;
         }
         return clusterSectorOffset(state, cluster, sector % state.sectorsPerCluster);
     }
@@ -847,18 +925,11 @@ function fileSectorOffset(state, file, sector) {
         return -1;
     }
     const want = (file.file << flpFileMapBlockBits) | block;
-    const slotCount = mapSlotCount(state);
-    for (let slotIndex = 0; slotIndex < slotCount; slotIndex += 1) {
-        const offset = flpFileMapOffset + slotIndex * flpFileMapSlotSize;
-        if (mapByte(state, offset) === flpFileMapFree) {
-            continue;
-        }
-        const slot = (mapByte(state, offset) << 16) | (mapByte(state, offset + 1) << 8) | mapByte(state, offset + 2);
-        if (slot === want) {
-            return logicalSectorOffset(state, slotIndex * state.sectorsPerBlock + sector % state.sectorsPerBlock);
-        }
+    const firstSector = state.fileMap.get(want);
+    if (firstSector === undefined) {
+        return -1;
     }
-    return -1;
+    return logicalSectorOffset(state, firstSector + sector % state.sectorsPerBlock);
 }
 
 /** @param {State} state @param {FileId} directory @param {number} entry @returns {number} */
@@ -1164,13 +1235,17 @@ function writeFileBytes(state, channel, source, sourceOffset, count) {
     if (channel.position > 0x7FFFFFFF - count || !ensureFileCapacity(state, channel.file, channel.position + count)) {
         return qerrDf;
     }
-    for (let i = 0; i < count; i += 1) {
-        const base = fileSectorOffset(state, channel.file, Math.floor(channel.position / sectorSize));
+    const cursor = {cluster: channel.file.file, index: 0};
+    for (let i = 0; i < count;) {
+        const base = fileSectorOffset(state, channel.file, Math.floor(channel.position / sectorSize), cursor);
         if (base < 0) {
             return qerrBm;
         }
-        state.image[base + channel.position % sectorSize] = source[sourceOffset + i];
-        channel.position += 1;
+        const offset = channel.position % sectorSize;
+        const take = Math.min(count - i, sectorSize - offset);
+        state.image.set(source.subarray(sourceOffset + i, sourceOffset + i + take), base + offset);
+        channel.position += take;
+        i += take;
     }
     if (channel.position > channel.eof) {
         channel.eof = channel.position;
@@ -1185,7 +1260,8 @@ function transferRead(state, channel, c, bus, line, requested) {
     let address = c.reg[9] & 0xFFFFFF;
     let count = 0;
     let status = 0;
-    for (; count < requested; count += 1) {
+    const cursor = {cluster: channel.file.file, index: 0};
+    while (count < requested) {
         if (channel.position >= channel.eof) {
             status = qerrEof;
             break;
@@ -1194,16 +1270,33 @@ function transferRead(state, channel, c, bus, line, requested) {
             status = qerrBp;
             break;
         }
-        const value = readFileByte(state, channel.file, channel.position);
-        if (value < 0) {
+        const base = fileSectorOffset(state, channel.file, Math.floor(channel.position / sectorSize), cursor);
+        if (base < 0) {
             status = qerrBm;
             break;
         }
-        bus.mem[address] = value;
-        address += 1;
-        channel.position += 1;
-        if (line && value === 10) {
-            count += 1;
+        const offset = channel.position % sectorSize;
+        const start = base + offset;
+        let take = Math.min(
+            requested - count,
+            channel.eof - channel.position,
+            bus.mem.length - address,
+            sectorSize - offset,
+        );
+        if (line) {
+            for (let i = 0; i < take; i += 1) {
+                if (state.image[start + i] === 10) {
+                    take = i + 1;
+                    break;
+                }
+            }
+        }
+        bus.beforeMemoryWrite(address, take);
+        bus.mem.set(state.image.subarray(start, start + take), address);
+        address += take;
+        channel.position += take;
+        count += take;
+        if (line && state.image[start + take - 1] === 10) {
             break;
         }
     }
@@ -1261,6 +1354,7 @@ function mediumInfo(state, c, bus) {
         nameOffset = flpMediumNameOffset;
     }
     c.reg[1] = ((freeSectors(state) & 0xFFFF) << 16) | (state.totalSectors & 0xFFFF);
+    bus.beforeMemoryWrite(address, mediumNameSize);
     bus.mem.set(state.image.subarray(nameOffset, nameOffset + mediumNameSize), address);
     c.reg[9] = address + mediumNameSize;
 }
@@ -1281,6 +1375,7 @@ function readFileHeader(state, channel, c, bus) {
         result.set(state.image.subarray(header, header + fileHeaderSize));
     }
     cpu.writePointerLong(result, 0, fileLength(state, channel.file));
+    bus.beforeMemoryWrite(address, count);
     bus.mem.set(result.subarray(0, count), address);
     c.reg[1] = count;
     c.reg[9] = address + count;
@@ -1364,6 +1459,7 @@ function extendedInfo(state, c, bus) {
         c.reg[0] = qerrBp;
         return;
     }
+    bus.beforeMemoryWrite(address, 64);
     bus.mem.fill(0xFF, address, address + 64);
     const mountLength = Math.min(state.name.length, 20);
     cpu.writePointerWord(bus.mem, address, mountLength);

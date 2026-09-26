@@ -145,6 +145,10 @@ function pickZipMember(buf, member, onDone) {
             return;
         }
     }
+    if (chosen.size > maxMediaBytes) {
+        onDone("ZIP entry " + chosen.name + " is larger than " + maxMediaBytes + " bytes.", null, null);
+        return;
+    }
     zip.readEntry(buf, chosen, function (extractErr, bytes) {
         if (extractErr !== null) {
             onDone(extractErr, chosen.name, null);
