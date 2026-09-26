@@ -7,7 +7,8 @@ system ROM from `roms/` when those files are available, paints the ZX8301
 display, talks to the ZX8302 IPC for keyboard, beeper, and Microdrive, and
 emulates the original AY-3-8910 QSound card and the YM2203-compatible QSound2.
 It also mounts writable QLWA `.win` hard disk images as `WIN1_` and read-only
-QL5A/QL5B `.img` floppy images as `FLP1_`.
+QL5A/QL5B `.img` floppy images as `FLP1_`, and can connect the host mouse as
+the PS/2 mouse of a QIMSI ROM-port interface.
 
 No build, package manager, or external library is required. The page uses
 plain JavaScript. `tsconfig.json` is only for optional static checking during
@@ -44,7 +45,10 @@ window at `0x0C000`, I/O ROM 1 at `0x10000`, and I/O ROM 2 at `0x14000`.
 The UI controls can also be initialized through URL parameters. Use `0` to
 disable a switch and `1` to enable it. `qsound` accepts `0` for no card, `1`
 for QSound, or `2` for QSound2. RAM accepts `128`, `384`, `640`, or `896`.
-Missing or invalid parameters keep the normal defaults:
+`mouse` accepts `0` for no mouse or `qimsi` for the QIMSI PS/2 mouse.
+`mspeed` accepts `1`, `2`, or `4` mouse counts per displayed 512-mode pixel;
+it has no control on the page. Missing or invalid parameters keep the normal
+defaults:
 
 | Parameter | Default |
 | --- | --- |
@@ -54,6 +58,8 @@ Missing or invalid parameters keep the normal defaults:
 | `stereo` | `0` |
 | `ntsc` | `0` |
 | `ram` | `128` |
+| `mouse` | `0` |
+| `mspeed` | `1` |
 | `turbo` | `1` |
 | `stretch` | `0` |
 
@@ -111,6 +117,16 @@ selects another.
   the second RAM expansion turns the card off; selecting either card with both
   expansions active turns +256K off, leaving 640 KiB. The selected card wins
   the same conflict during startup when its ROM is available.
+- Mouse - connect the host mouse as the PS/2 mouse of a QIMSI interface, whose
+  registers occupy `0x0FED0`–`0x0FEDF` in the ROM port. Changing the switch
+  resets the machine. While it is on, click the screen to capture the mouse;
+  Esc releases it, so press Esc again to send it to the QL. Moving across the
+  displayed screen width sends 512 counts times `mspeed`. At the default `1`,
+  Pointer Environment software using the QIMSI mouse driver follows the host
+  one pixel per count; `2` or `4` help software that scales counts down and
+  drops slow movement. The mouse reports itself as an IntelliMouse with left,
+  right, and middle buttons and a wheel. Only the mouse is emulated, not the
+  QIMSI ROM, microSD card, keyboard, serial link, or sound.
 - Stretch - fill the entire available display area, disregarding aspect ratio
   and integer scaling. It applies with CRT enabled or disabled and in both
   fullscreen and windowed modes.
@@ -125,7 +141,7 @@ selects another.
 - The drive indicator is outlined while its motor runs, green during reads,
   white during writes or erasure, and dark while idle. It pulses during reads
   and writes.
-- Turbo - run the machine at up to four times normal speed while either
+- Turbo - run the machine at up to eight times normal speed while either
   Microdrive is transferring a read in the current field. It is enabled by
   default. Intermediate video fields are assembled but not presented or
   uploaded, and their audio samples are not collected. A motor left spinning
@@ -137,7 +153,8 @@ selects another.
   are padded with zeroes. Each slot retains its own image and filename.
   Changing the selection does not reset the machine; loading or ejecting
   does, so QDOS detects the change. Images survive resets and system-ROM
-  replacement.
+  replacement. While Mouse is on, the QIMSI registers replace Cart bytes
+  `0x0FED0`–`0x0FEDF`.
   These slots provide ROM storage only, not any additional peripheral
   hardware a particular expansion ROM may require.
 - FLP1 - Load mounts a QL5A or QL5B floppy `.img` without resetting the
@@ -225,11 +242,12 @@ on the QL.
 - `boot.js` - shader and default ROM fetch.
 - `load.js` - MDV or ZIP fetch for `index.html?url=`.
 - `io.js` - HTTP GET and local file reads.
-- `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, QSound/QSound2, and frame run.
+- `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, QSound/QSound2, QIMSI window, and frame run.
 - `cpu.js` - MC68008 state and execution core.
 - `disk.js` - writable QLWA hard disk and read-only QL5A/QL5B floppy images with their QDOS `WIN1_` and `FLP1_` host drivers.
 - `ay.js` - AY-3-8910/YM2149 PSG synthesis used by the sound cards.
 - `fm.js` - YM2203 FM synthesis used by QSound2.
+- `qimsi.js` - QIMSI mouse registers and the PS/2 mouse behind them.
 - `keyboard.js` - host keyboard mapping and the overlay.
 - `zip.js` - ZIP listing and entry extraction.
 - `media.js` - Microdrive, floppy, hard disk, ZIP, and junk file-name rules.

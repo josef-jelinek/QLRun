@@ -2,6 +2,7 @@ import * as ay from "./ay.js";
 import * as cpu from "./cpu.js";
 import * as disk from "./disk.js";
 import * as fm from "./fm.js";
+import * as qimsi from "./qimsi.js";
 
 export const sysRomSize = 0xC000;
 export const romCartridgeSize = 0x4000;
@@ -246,6 +247,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  *     ay: import("./ay.js").State,
  *     fm: import("./fm.js").State,
  *   },
+ *   qimsi: import("./qimsi.js").State,
  *   disks: import("./disk.js").Disks,
  *   mdv: {
  *     cartridges: MicrodriveCartridge[],
@@ -274,6 +276,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  */
 export function create(keys) {
     const audioN = audioCap;
+    const ramTop = cpu.qdosUserRamBase + defaultRamKb * 1024;
     const mem = new Uint8Array(cpu.addressSpaceBytes);
     /** @type {MicrodriveCartridge[]} */
     const cartridges = [];
@@ -286,11 +289,16 @@ export function create(keys) {
         cpu: cpu.create(),
         cpuBus: {
             mem,
+            guestRamTop: ramTop,
+            qimsiBase: 0,
+            qimsiEnd: 0,
+            qsoundBase: 0,
+            qsoundEnd: 0,
             isUnmapped: function (addr) {
-                return isUnmapped(m, addr);
+                return !cpu.addressIsMapped(m.cpuBus, addr);
             },
             isHw: function (addr) {
-                return hardwareIsMapped(m, addr);
+                return cpu.addressIsHardware(m.cpuBus, addr);
             },
             isEClocked: function (addr) {
                 return qsoundContains(m, addr);
@@ -333,7 +341,9 @@ export function create(keys) {
                 disk.executeOpcode(m.disks, c, m.cpuBus, opcode);
             },
             afterInstruction: function () {
-                microdriveAdvanceActive(m);
+                if (m.mdv.selectedMask !== 0) {
+                    microdriveAdvanceActive(m);
+                }
             },
             resetHardware: function () {
                 resetIpc(m);
@@ -362,7 +372,7 @@ export function create(keys) {
         },
         keys,
         theInt: 0,
-        guestRamTop: cpu.qdosUserRamBase + defaultRamKb * 1024,
+        guestRamTop: ramTop,
         ntscMachine: false,
         displayNtsc: false,
         displayBlank: false,
@@ -434,6 +444,7 @@ export function create(keys) {
             ay: ay.create(qsoundAyTickCycles),
             fm: fm.create(),
         },
+        qimsi: qimsi.create(),
         disks: disk.create(),
         mdv: {
             cartridges,
@@ -477,6 +488,7 @@ export function reset(m) {
     stopBeep(m);
     disk.prepareReset(m.disks, m.mem);
     cpu.reset(m.cpu, m.cpuBus);
+    qimsi.reset(m.qimsi, cpuClockHz(m));
     resetQsound(m);
     resetAudioClock(m);
     resetVideo(m);
@@ -524,6 +536,7 @@ export function setRamKb(m, ramKb) {
         return false;
     }
     m.guestRamTop = cpu.qdosUserRamBase + ramKb * 1024;
+    m.cpuBus.guestRamTop = m.guestRamTop;
     fillRam(m);
     return true;
 }
@@ -533,10 +546,10 @@ export function setRamKb(m, ramKb) {
  *
  * @param {Machine} m
  * @param {ArrayBuffer | Uint8Array} bytes
- * @param {number} [slot] Cartridge = 0, I/O ROM 1 = 1, I/O ROM 2 = 2.
+ * @param {number} slot Cartridge = 0, I/O ROM 1 = 1, I/O ROM 2 = 2.
  * @returns {string | null}
  */
-export function insertRomCartridge(m, bytes, slot = 0) {
+export function insertRomCartridge(m, bytes, slot) {
     if (!Number.isInteger(slot) || slot < 0 || slot >= romSlotCount) {
         return "Invalid ROM slot.";
     }
@@ -557,9 +570,9 @@ export function insertRomCartridge(m, bytes, slot = 0) {
  * Clear one ROM slot without changing the running CPU or other slots.
  *
  * @param {Machine} m
- * @param {number} [slot] Cartridge = 0, I/O ROM 1 = 1, I/O ROM 2 = 2.
+ * @param {number} slot Cartridge = 0, I/O ROM 1 = 1, I/O ROM 2 = 2.
  */
-export function ejectRomCartridge(m, slot = 0) {
+export function ejectRomCartridge(m, slot) {
     if (!Number.isInteger(slot) || slot < 0 || slot >= romSlotCount) {
         return;
     }
@@ -599,8 +612,31 @@ export function setQsoundModel(m, model) {
         return false;
     }
     m.qsound.model = model;
+    m.cpuBus.qsoundBase = 0;
+    m.cpuBus.qsoundEnd = 0;
+    if (model !== qsoundOff) {
+        m.cpuBus.qsoundBase = qsoundBase;
+        m.cpuBus.qsoundEnd = qsoundBase + qsoundBytes;
+    }
     resetQsound(m);
     return true;
+}
+
+/**
+ * Connect or remove the QIMSI mouse registers at `0xFED0`-`0xFEDF`. They
+ * cover those bytes of the cartridge slot while connected.
+ *
+ * @param {Machine} m
+ * @param {boolean} on
+ */
+export function setQimsi(m, on) {
+    m.cpuBus.qimsiBase = 0;
+    m.cpuBus.qimsiEnd = 0;
+    if (on) {
+        m.cpuBus.qimsiBase = qimsi.registerBase;
+        m.cpuBus.qimsiEnd = qimsi.registerEnd;
+    }
+    qimsi.reset(m.qimsi, cpuClockHz(m));
 }
 
 /**
@@ -615,6 +651,7 @@ export function setNtsc(m, ntsc) {
     renderVideoTo(m, m.cpu.cycleCount);
     m.ntscMachine = ntsc;
     m.mdv.pairCycles = Math.round(cpuClockHz(m) / microdriveBitRateHz * microdriveBitsPerPair);
+    qimsi.reset(m.qimsi, cpuClockHz(m));
     resetQsound(m);
 }
 
@@ -820,6 +857,21 @@ export function ejectMdv(m, drive) {
 }
 
 /**
+ * Report whether a Microdrive read was in progress and clear that flag.
+ *
+ * The mask is set only while a selected cartridge is supplying track bytes,
+ * and eject or deselect already clears it.
+ *
+ * @param {Machine} m
+ * @returns {boolean}
+ */
+export function takeMdvReading(m) {
+    const reading = m.mdv.readingMask !== 0;
+    m.mdv.readingMask = 0;
+    return reading;
+}
+
+/**
  * Return the user-visible medium, motor, and transfer state for one Microdrive.
  *
  * @param {Machine} m
@@ -892,38 +944,6 @@ function xorshift32(seed) {
     return value >>> 0;
 }
 
-/**
- * @param {Machine} m
- * @param {number} addr
- * @returns {boolean}
- */
-function isUnmapped(m, addr) {
-    if (addr < 0) {
-        return true;
-    }
-    if (qsoundContains(m, addr)) {
-        return false;
-    }
-    if (addr < m.guestRamTop) {
-        return false;
-    }
-    return true;
-}
-
-/**
- * ZX8302 I/O window and the selected QSound card occupy hardware, not RAM.
- *
- * @param {Machine} m
- * @param {number} addr
- * @returns {boolean}
- */
-function hardwareIsMapped(m, addr) {
-    if (addr >= cpu.internalIoBase && addr < cpu.internalIoEnd) {
-        return true;
-    }
-    return qsoundContains(m, addr);
-}
-
 /** @param {Machine} m */
 function resetIpc(m) {
     m.ipcRead = 0;
@@ -936,11 +956,22 @@ function resetIpc(m) {
     m.ipcKeyboardRowPending = false;
 }
 
-/** @returns {number} */
+let cachedQdosSecond = -1;
+let cachedQdosClock = 0;
+
+/**
+ * Host wall time as a QDOS second, reused until that unix second changes.
+ *
+ * @returns {number}
+ */
 function readQdosClock() {
     const unix = Math.floor(Date.now() / 1000);
-    const zone = -new Date().getTimezoneOffset() * 60;
-    return (unix + qdosUnixEpochDelta + zone) >>> 0;
+    if (unix !== cachedQdosSecond) {
+        const zone = -new Date().getTimezoneOffset() * 60;
+        cachedQdosSecond = unix;
+        cachedQdosClock = (unix + qdosUnixEpochDelta + zone) >>> 0;
+    }
+    return cachedQdosClock;
 }
 
 /**
@@ -965,17 +996,12 @@ function ipcAppendBits(buffer, maxBytes, bitPos, value, count) {
 }
 
 /**
+ * Start sending `bits` from `ipcResponse`, which the caller has already filled.
+ *
  * @param {Machine} m
- * @param {Uint8Array} bytes
- * @param {number} length
  * @param {number} bits
  */
-function ipcBeginResponse(m, bytes, length, bits) {
-    const n = Math.min(length, m.ipcResponse.length);
-    m.ipcResponse.fill(0);
-    for (let i = 0; i < n; i += 1) {
-        m.ipcResponse[i] = bytes[i];
-    }
+function ipcBeginResponse(m, bits) {
     m.ipcResponseBits = bits;
     m.ipcResponseSent = 0;
 }
@@ -1079,25 +1105,25 @@ function ipcWrite(m, d) {
     }
     if (m.ipcKeyboardRowPending) {
         m.ipcKeyboardRowPending = false;
-        const rowState = new Uint8Array([keyboardRow(m, command)]);
-        ipcBeginResponse(m, rowState, 1, ipcWireKeyboardRowResponseBits);
+        m.ipcResponse.fill(0);
+        m.ipcResponse[0] = keyboardRow(m, command);
+        ipcBeginResponse(m, ipcWireKeyboardRowResponseBits);
         m.ipcWait = false;
         return;
     }
     m.ipcWait = false;
     switch (command) {
-    case ipcWireStatusCommand: {
-        const status = new Uint8Array([ipcSerialStatus(m)]);
-        ipcBeginResponse(m, status, 1, ipcWireStatusResponseBits);
+    case ipcWireStatusCommand:
+        m.ipcResponse.fill(0);
+        m.ipcResponse[0] = ipcSerialStatus(m);
+        ipcBeginResponse(m, ipcWireStatusResponseBits);
         break;
-    }
     case ipcWireReadKeysCommand: {
-        const bytes = new Uint8Array(m.ipcResponse.length);
-        let bits = ipcSerialReadKeys(m, bytes);
+        let bits = ipcSerialReadKeys(m, m.ipcResponse);
         if (bits === 0) {
             bits = ipcWireReadKeysCountBits;
         }
-        ipcBeginResponse(m, bytes, Math.ceil(bits / 8), bits);
+        ipcBeginResponse(m, bits);
         break;
     }
     case ipcWireKeyboardRowCommand:
@@ -1117,11 +1143,10 @@ function ipcWrite(m, d) {
     case ipcWireNoResponseCommand:
         m.ipcWait = true;
         break;
-    default: {
-        const zero = new Uint8Array([0]);
-        ipcBeginResponse(m, zero, 1, ipcWireDefaultResponseBits);
+    default:
+        m.ipcResponse.fill(0);
+        ipcBeginResponse(m, ipcWireDefaultResponseBits);
         break;
-    }
     }
 }
 
@@ -1154,7 +1179,7 @@ function writeHwByte(m, addr, d) {
         ipcWrite(m, d);
         break;
     case interruptStatusAddr:
-        if (microdriveHasMedia(m) || m.mdv.selectedMask !== 0) {
+        if (m.mdv.selectedMask !== 0) {
             microdriveAdvanceActive(m);
         }
         m.theInt = m.theInt & ~(d & interruptClearMask);
@@ -1191,18 +1216,18 @@ function readHwByte(m, addr) {
             if (m.ipcRead === ipcReadDoneMarker) {
                 m.ipcRead = 0;
             }
-            if (microdriveHasMedia(m) || m.mdv.selectedMask !== 0) {
+            if (microdriveReportsStatus(m)) {
                 retByte |= microdriveStatusBits(m);
             }
             return retByte;
         }
         let idle = ipcReadIdleValue;
-        if (microdriveHasMedia(m) || m.mdv.selectedMask !== 0) {
+        if (microdriveReportsStatus(m)) {
             idle |= microdriveStatusBits(m);
         }
         return idle;
     case interruptStatusAddr:
-        if (microdriveHasMedia(m) || m.mdv.selectedMask !== 0) {
+        if (m.mdv.selectedMask !== 0) {
             microdriveAdvanceActive(m);
         }
         return m.theInt & 0xFF;
@@ -1210,6 +1235,9 @@ function readHwByte(m, addr) {
     case microdriveTrack2Addr:
         return microdriveReadTrackByte(m, addr);
     default:
+        if (addr >= m.cpuBus.qimsiBase && addr < m.cpuBus.qimsiEnd) {
+            return qimsi.read(m.qimsi, addr, m.cpu.cycleCount);
+        }
         return 0;
     }
 }
@@ -1891,11 +1919,22 @@ function markQsoundBusy(m) {
 }
 
 /**
+ * Mounted media keeps the idle GAP indication. A selected empty drive does too,
+ * so its silence can still time out. Tape motion itself stays gated elsewhere.
+ *
  * @param {Machine} m
  * @returns {boolean}
  */
-function microdriveHasMedia(m) {
-    return m.mdv.cartridges[0].inserted || m.mdv.cartridges[1].inserted;
+function microdriveReportsStatus(m) {
+    if (m.mdv.selectedMask !== 0) {
+        return true;
+    }
+    for (let i = 0; i < microdriveUnitCount; i += 1) {
+        if (m.mdv.cartridges[i].inserted) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**

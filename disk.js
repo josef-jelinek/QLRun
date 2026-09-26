@@ -598,8 +598,7 @@ function driverIo(state, c, bus) {
         if (!channelWritable(state, channel)) {
             c.reg[0] = qerrRo;
         } else {
-            const one = Uint8Array.of(c.reg[1] & 0xFF);
-            c.reg[0] = writeFileBytes(state, channel, one, 0, 1);
+            c.reg[0] = writeFileByte(state, channel, c.reg[1] & 0xFF);
         }
         break;
     case 7:
@@ -746,7 +745,9 @@ function readGeometry(state) {
     state.rootLength =
         cpu.readPointerWord(image, flpRootDirSectorsOffset) * sectorSize +
         cpu.readPointerWord(image, flpRootDirBytesOffset);
-    fixLogical(image.subarray(flpTrackMapOffset, flpTrackMapOffset + flpTrackMapSize), state.doubleDensity);
+    if (fixLogical(image.subarray(flpTrackMapOffset, flpTrackMapOffset + flpTrackMapSize), state.doubleDensity)) {
+        state.modified = true;
+    }
     const slotCount = mapSlotCount(state);
     for (let slotIndex = 0; slotIndex < slotCount; slotIndex += 1) {
         const offset = flpFileMapOffset + slotIndex * flpFileMapSlotSize;
@@ -766,6 +767,7 @@ function readGeometry(state) {
  *
  * @param {Uint8Array} trackMap
  * @param {boolean} doubleDensity
+ * @returns {boolean} Whether the mounted image changed.
  */
 function fixLogical(trackMap, doubleDensity) {
     let sides = 18;
@@ -788,8 +790,9 @@ function fixLogical(trackMap, doubleDensity) {
             }
         }
         trackMap.set(logicalMap);
-        return;
+        return true;
     }
+    return false;
 }
 
 /**
@@ -892,10 +895,10 @@ function walkChain(state, first, links) {
  * @param {State} state
  * @param {FileId} file
  * @param {number} sector
- * @param {{cluster: number, index: number} | null} [cursor]
+ * @param {{cluster: number, index: number} | null} cursor
  * @returns {number}
  */
-function fileSectorOffset(state, file, sector, cursor = null) {
+function fileSectorOffset(state, file, sector, cursor) {
     if (sector < 0) {
         return -1;
     }
@@ -934,7 +937,7 @@ function fileSectorOffset(state, file, sector, cursor = null) {
 
 /** @param {State} state @param {FileId} directory @param {number} entry @returns {number} */
 function directoryHeader(state, directory, entry) {
-    const base = fileSectorOffset(state, directory, Math.floor(entry / headersPerSector));
+    const base = fileSectorOffset(state, directory, Math.floor(entry / headersPerSector), null);
     if (base < 0) {
         return -1;
     }
@@ -1223,11 +1226,37 @@ function truncateFile(state, file, position) {
 
 /** @param {State} state @param {FileId} file @param {number} position @returns {number} */
 function readFileByte(state, file, position) {
-    const base = fileSectorOffset(state, file, Math.floor(position / sectorSize));
+    const base = fileSectorOffset(state, file, Math.floor(position / sectorSize), null);
     if (base < 0) {
         return -1;
     }
     return state.image[base + position % sectorSize];
+}
+
+/**
+ * Store one byte at the channel position and advance it.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @param {number} value
+ * @returns {number}
+ */
+function writeFileByte(state, channel, value) {
+    if (channel.position > 0x7FFFFFFF - 1 || !ensureFileCapacity(state, channel.file, channel.position + 1)) {
+        return qerrDf;
+    }
+    const base = fileSectorOffset(state, channel.file, Math.floor(channel.position / sectorSize), null);
+    if (base < 0) {
+        return qerrBm;
+    }
+    state.image[base + channel.position % sectorSize] = value & 0xFF;
+    channel.position += 1;
+    if (channel.position > channel.eof) {
+        channel.eof = channel.position;
+        setStoredLength(state, channel.file, channel.eof);
+    }
+    markModified(state);
+    return 0;
 }
 
 /** @param {State} state @param {Channel} channel @param {Uint8Array} source @param {number} sourceOffset @param {number} count @returns {number} */

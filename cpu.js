@@ -74,8 +74,19 @@ const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
 /**
  * Machine-owned memory and hardware operations used by the CPU core.
  *
+ * `guestRamTop` and the QSound window let ordinary ROM and RAM accesses stay
+ * in this module. `qsoundEnd` is 0 when no card is selected. The QIMSI window
+ * lies in the ROM port below `internalIoBase`, starts at an even address, and
+ * has an even length; `qimsiEnd` is 0 when it is disconnected. Hardware-window
+ * reads and writes still go through the callbacks.
+ *
  * @typedef {{
  *   mem: Uint8Array,
+ *   guestRamTop: number,
+ *   qimsiBase: number,
+ *   qimsiEnd: number,
+ *   qsoundBase: number,
+ *   qsoundEnd: number,
  *   isUnmapped: function(number): boolean,
  *   isHw: function(number): boolean,
  *   isEClocked: function(number): boolean,
@@ -117,7 +128,6 @@ const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
  *   doTrace: boolean,
  *   nInst: number,
  *   nInst2: number,
- *   instructionsRun: number,
  *   cycleCount: number,
  *   cycleLimit: number,
  *   cycleLimitActive: boolean,
@@ -162,7 +172,6 @@ export function create() {
         doTrace: false,
         nInst: 0,
         nInst2: 0,
-        instructionsRun: 0,
         cycleCount: 0,
         cycleLimit: 0,
         cycleLimitActive: false,
@@ -1308,6 +1317,38 @@ function cpuWordOrLongFaultIfNeeded(c, addr, readAccess) {
 }
 
 /**
+ * Report whether `addr` is ROM, RAM, or the selected QSound window.
+ *
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @returns {boolean}
+ */
+export function addressIsMapped(bus, addr) {
+    if (addr >= 0 && addr < bus.guestRamTop) {
+        return true;
+    }
+    return addr >= bus.qsoundBase && addr < bus.qsoundEnd;
+}
+
+/**
+ * Report whether `addr` is the QIMSI, ZX8302, or selected QSound window.
+ * ROM addresses below the ZX8302 window need only the QIMSI test.
+ *
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @returns {boolean}
+ */
+export function addressIsHardware(bus, addr) {
+    if (addr < internalIoBase) {
+        return addr < bus.qimsiEnd && addr >= bus.qimsiBase;
+    }
+    if (addr < internalIoEnd) {
+        return true;
+    }
+    return addr >= bus.qsoundBase && addr < bus.qsoundEnd;
+}
+
+/**
  * @param {CpuBus} bus
  * @param {number} addr
  * @param {number} lowAddr
@@ -1315,10 +1356,10 @@ function cpuWordOrLongFaultIfNeeded(c, addr, readAccess) {
  */
 function isDirectRamLongAccess(bus, addr, lowAddr) {
     return addr <= maxLinearLongAddr &&
-        !bus.isUnmapped(addr) &&
-        !bus.isUnmapped(lowAddr) &&
-        !bus.isHw(addr >>> 0) &&
-        !bus.isHw(lowAddr >>> 0);
+        addressIsMapped(bus, addr) &&
+        addressIsMapped(bus, lowAddr) &&
+        !addressIsHardware(bus, addr >>> 0) &&
+        !addressIsHardware(bus, lowAddr >>> 0);
 }
 
 /**
@@ -1369,13 +1410,13 @@ export function writePointerLong(mem, addr, v) {
  */
 function readDecodedWord(c, bus, addr) {
     const next = (addr + 1) & addrMask;
-    if (bus.isHw(addr) || ((addr & 1) !== 0 && (next === 0 || bus.isHw(next)))) {
+    if (addressIsHardware(bus, addr) || ((addr & 1) !== 0 && (next === 0 || addressIsHardware(bus, next)))) {
         const highByte = readByte(c, bus, addr);
         const lowByte = readByte(c, bus, next);
         return ((highByte << 8) | lowByte) & 0xFFFF;
     }
     addCpuBusCycles(c, addr, wordBusCycles);
-    if (bus.isUnmapped(addr)) {
+    if (!addressIsMapped(bus, addr)) {
         return 0;
     }
     return readPointerWord(bus.mem, addr);
@@ -1389,13 +1430,13 @@ function readDecodedWord(c, bus, addr) {
  */
 function writeDecodedWord(c, bus, addr, d) {
     const next = (addr + 1) & addrMask;
-    if (bus.isHw(addr) || ((addr & 1) !== 0 && (next === 0 || bus.isHw(next)))) {
+    if (addressIsHardware(bus, addr) || ((addr & 1) !== 0 && (next === 0 || addressIsHardware(bus, next)))) {
         writeByte(c, bus, addr, (d >> 8) & 0xFF);
         writeByte(c, bus, next, d & 0xFF);
         return;
     }
     addCpuBusCycles(c, addr, wordBusCycles);
-    if (bus.isUnmapped(addr)) {
+    if (!addressIsMapped(bus, addr)) {
         return;
     }
     if (addr >= qdosUserRamBase) {
@@ -1412,8 +1453,8 @@ function writeDecodedWord(c, bus, addr, d) {
  */
 function readByte(c, bus, addr) {
     addr &= addrMask;
-    const mapped = !bus.isUnmapped(addr);
-    if (mapped && (!c.accessActive || c.exception === 0) && bus.isHw(addr)) {
+    const mapped = addressIsMapped(bus, addr);
+    if (mapped && (!c.accessActive || c.exception === 0) && addressIsHardware(bus, addr)) {
         return accessHardwareByte(c, bus, addr, false, 0);
     }
     addCpuBusCycles(c, addr, byteBusCycles);
@@ -1472,8 +1513,8 @@ function readLong(c, bus, addr) {
  */
 function writeByte(c, bus, addr, d) {
     addr &= addrMask;
-    const mapped = !bus.isUnmapped(addr);
-    if (mapped && (!c.accessActive || c.exception === 0) && bus.isHw(addr)) {
+    const mapped = addressIsMapped(bus, addr);
+    if (mapped && (!c.accessActive || c.exception === 0) && addressIsHardware(bus, addr)) {
         accessHardwareByte(c, bus, addr, true, d & 0xFF);
         return;
     }
@@ -2075,7 +2116,6 @@ function executeLoadedOpcode(c, bus, opcode, instructionCycleStart) {
  * @param {CpuBus} bus
  */
 function executeTimedPcInstruction(c, bus) {
-    c.instructionsRun += 1;
     const instructionCycleStart = c.cycleCount;
     c.peripheralWaitCycles = 0;
     c.currentInstructionPc = c.pc;

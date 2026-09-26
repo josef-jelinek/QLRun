@@ -5,13 +5,19 @@ import * as keyboard from "./keyboard.js";
 import * as load from "./load.js";
 import * as machine from "./machine.js";
 import * as media from "./media.js";
+import * as qimsi from "./qimsi.js";
 import * as screen from "./screen.js";
 import * as sound from "./sound.js";
 
 const statsWindowMs = 1000;
 const carryFloorMs = -80;
 const mdvActivityHoldMs = 50;
-const turboMultiplier = 4;
+const turboMultiplier = 8;
+const mouseOff = "0";
+const mouseQimsi = "qimsi";
+const guestColumns = 512;
+const wheelPixelsPerStep = 100;
+const wheelLinesPerStep = 3;
 
 const ui = {
     pageHeader:       /** @type {HTMLElement} */       (document.getElementById("page-header")),
@@ -72,6 +78,7 @@ const ui = {
     ntsc:             /** @type {HTMLInputElement} */  (document.getElementById("ntsc")),
     ram256:           /** @type {HTMLInputElement} */  (document.getElementById("ram-256")),
     ram512:           /** @type {HTMLInputElement} */  (document.getElementById("ram-512")),
+    mouse:            /** @type {HTMLInputElement} */  (document.getElementById("mouse")),
     turbo:            /** @type {HTMLInputElement} */  (document.getElementById("turbo")),
     stretch:          /** @type {HTMLInputElement} */  (document.getElementById("stretch")),
     fullscreenToggle: /** @type {HTMLButtonElement} */ (document.getElementById("fullscreen-toggle")),
@@ -79,6 +86,8 @@ const ui = {
 
 const query = new URLSearchParams(window.location.search);
 const configuredRomName = query.get("rom") ?? "";
+/** PS/2 counts per displayed 512-mode pixel; at 1, QIMSI's PE driver follows the host 1:1. */
+const mouseCountsPerPixel = mouseSpeedFromParam(query.get("mspeed") ?? "");
 const keys = {
     rows: new Uint8Array(8),
     shift: false,
@@ -117,13 +126,23 @@ const mdvActivity = [
     {readCount: 0, writeCount: 0, until: 0, state: "idle", inserted: false, name: "", modified: false},
     {readCount: 0, writeCount: 0, until: 0, state: "idle", inserted: false, name: "", modified: false},
 ];
-const hddStatus = {inserted: false, name: "", modified: false, driverReady: false};
-const fddStatus = {inserted: false, name: "", driverReady: false};
+/**
+ * @typedef {{
+ *   inserted: boolean,
+ *   name: string,
+ *   modified: boolean,
+ *   driverReady: boolean,
+ *   generation: number,
+ * }} DriveStatus
+ */
+const hddStatus = {inserted: false, name: "", modified: false, driverReady: false, generation: 1};
+const fddStatus = {inserted: false, name: "", modified: false, driverReady: false, generation: 1};
 const romSlotStates = [
     {name: "", error: "", generation: 0},
     {name: "", error: "", generation: 0},
     {name: "", error: "", generation: 0},
 ];
+let wheelSteps = 0;
 let keyboardVisible = false;
 let screenOnly = false;
 let screenOnlyFallback = false;
@@ -138,10 +157,12 @@ applySwitchParam(ui.crt, "crt", "1", "01");
 applySwitchParam(ui.qsound, "qsound", "1", "012");
 applySwitchParam(ui.qsound2, "qsound", "2", "012");
 applySwitchParam(ui.stereo, "stereo", "1", "01");
+ui.mouse.checked = mouseFromParam(query.get("mouse") ?? "") !== mouseOff;
 applySwitchParam(ui.turbo, "turbo", "1", "01");
 applySwitchParam(ui.stretch, "stretch", "1", "01");
 keyboardVisible = ui.keyboardToggle.checked;
 applyVisibility();
+machine.setQimsi(ql, ui.mouse.checked);
 
 ui.reset.onclick = function () {
     resetSystem();
@@ -188,6 +209,19 @@ ui.ntsc.onchange = function () {
 ui.ram256.onchange = updateRamSize;
 ui.ram512.onchange = updateRamSize;
 
+ui.mouse.onchange = function () {
+    let model = mouseOff;
+    if (ui.mouse.checked) {
+        model = mouseQimsi;
+    }
+    updateUrlParam("mouse", model);
+    machine.setQimsi(ql, ui.mouse.checked);
+    if (!ui.mouse.checked && document.pointerLockElement === ui.screen) {
+        document.exitPointerLock();
+    }
+    resetSystem();
+};
+
 ui.turbo.onchange = function () {
     updateUrlParam("turbo", ui.turbo.checked);
 };
@@ -201,6 +235,68 @@ ui.stretch.onchange = function () {
 
 ui.fullscreenToggle.onclick = function () {
     toggleCanvasFullscreen();
+};
+
+ui.screen.onmousedown = function (/** @type {MouseEvent} */ e) {
+    if (!ui.mouse.checked) {
+        return;
+    }
+    e.preventDefault();
+    if (document.pointerLockElement === ui.screen) {
+        qimsi.setButtons(ql.qimsi, e.buttons);
+        return;
+    }
+    // The capturing click stays on the host. Chrome refuses a new lock
+    // shortly after Esc released the previous one; the next click retries.
+    const request = ui.screen.requestPointerLock();
+    if (request !== undefined) {
+        request.then(function () {}, function () {});
+    }
+};
+
+ui.screen.onmouseup = function (/** @type {MouseEvent} */ e) {
+    if (document.pointerLockElement === ui.screen) {
+        qimsi.setButtons(ql.qimsi, e.buttons);
+    }
+};
+
+ui.screen.onmousemove = function (/** @type {MouseEvent} */ e) {
+    const width = ui.screen.clientWidth;
+    if (document.pointerLockElement !== ui.screen || width <= 0) {
+        return;
+    }
+    const scale = mouseCountsPerPixel * guestColumns / width;
+    qimsi.move(ql.qimsi, e.movementX * scale, e.movementY * scale);
+};
+
+ui.screen.onwheel = function (/** @type {WheelEvent} */ e) {
+    if (document.pointerLockElement !== ui.screen) {
+        return;
+    }
+    e.preventDefault();
+    let steps = e.deltaY;
+    switch (e.deltaMode) {
+    case WheelEvent.DOM_DELTA_PIXEL:
+        steps /= wheelPixelsPerStep;
+        break;
+    case WheelEvent.DOM_DELTA_LINE:
+        steps /= wheelLinesPerStep;
+        break;
+    default:
+        break;
+    }
+    wheelSteps += steps;
+    const whole = Math.trunc(wheelSteps);
+    wheelSteps -= whole;
+    if (whole !== 0) {
+        qimsi.scroll(ql.qimsi, whole);
+    }
+};
+
+ui.screen.oncontextmenu = function (/** @type {MouseEvent} */ e) {
+    if (ui.mouse.checked) {
+        e.preventDefault();
+    }
 };
 
 ui.keyboardSplit.onpointerdown = function (/** @type {PointerEvent} */ e) {
@@ -236,6 +332,13 @@ new ResizeObserver(function () {
 document.onfullscreenchange = function () {
     screenOnly = document.fullscreenElement !== null || screenOnlyFallback;
     applyVisibility();
+};
+
+document.onpointerlockchange = function () {
+    if (document.pointerLockElement !== ui.screen) {
+        qimsi.setButtons(ql.qimsi, 0);
+        wheelSteps = 0;
+    }
 };
 
 window.onkeydown = function (e) {
@@ -296,22 +399,13 @@ for (let drive = 0; drive < ui.mdv.length; drive += 1) {
         controls.file.click();
     };
     controls.file.onchange = function () {
-        const file = controls.file.files?.[0];
-        controls.file.value = "";
-        if (file === undefined) {
-            return;
-        }
-        if (drive === 0) {
-            updateUrlParam("url", null);
-            cancelStartupFile();
-        }
-        io.readFile(file, function (err, buf) {
-            if (err !== null) {
-                showError(controls.info, err);
-                return;
-            }
-            if (!(buf instanceof ArrayBuffer)) {
-                showError(controls.info, "Empty read.");
+        const chosen = readChosenFile(controls.file, 0, function (file, err, buf) {
+            if (err !== null || buf === null) {
+                let message = "Empty read.";
+                if (err !== null) {
+                    message = err;
+                }
+                showError(controls.info, message);
                 return;
             }
             const mdvErr = machine.insertMdv(ql, drive, buf, file.name);
@@ -322,26 +416,17 @@ for (let drive = 0; drive < ui.mdv.length; drive += 1) {
             showInfo(controls.info, file.name);
             showInfo(ui.startupFileInfo, "");
         });
+        if (chosen && drive === 0) {
+            updateUrlParam("url", null);
+            cancelStartupFile();
+        }
     };
     controls.download.onclick = function () {
         const saved = machine.saveMdv(ql, drive);
         if (saved === null) {
             return;
         }
-        let name = saved.name.split("/").pop() ?? "";
-        name = name.split("\\").pop() ?? "";
-        if (name === "") {
-            name = "mdv" + (drive + 1) + ".mdv";
-        } else if (!media.isMdvName(name)) {
-            name += ".mdv";
-        }
-        const buffer = /** @type {ArrayBuffer} */ (saved.bytes.buffer);
-        const url = URL.createObjectURL(new Blob([buffer], {type: "application/octet-stream"}));
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = name;
-        link.click();
-        URL.revokeObjectURL(url);
+        downloadBytes(saved.name, saved.bytes, "mdv" + (drive + 1) + ".mdv", media.isMdvName, ".mdv");
     };
     controls.eject.onclick = function () {
         if (drive === 0) {
@@ -358,23 +443,23 @@ ui.loadRom.onclick = function () {
 };
 
 ui.fileRom.onchange = function () {
+    const files = ui.fileRom.files;
+    if (files === null || files.length === 0) {
+        ui.fileRom.value = "";
+        return;
+    }
     if (abortLoadRom !== null) {
         abortLoadRom();
         abortLoadRom = null;
     }
-    const file = ui.fileRom.files?.[0];
-    ui.fileRom.value = "";
-    if (file === undefined) {
-        return;
-    }
     updateUrlParam("rom", null);
-    io.readFile(file, function (err, buf) {
-        if (err !== null) {
-            showError(ui.romInfo, err);
-            return;
-        }
-        if (!(buf instanceof ArrayBuffer)) {
-            showError(ui.romInfo, "Empty read.");
+    readChosenFile(ui.fileRom, 0, function (file, err, buf) {
+        if (err !== null || buf === null) {
+            let message = "Empty read.";
+            if (err !== null) {
+                message = err;
+            }
+            showError(ui.romInfo, message);
             return;
         }
         const romErr = machine.setSysRom(ql, buf);
@@ -397,31 +482,26 @@ ui.loadRomCartridge.onclick = function () {
 };
 
 ui.fileRomCartridge.onchange = function () {
-    const file = ui.fileRomCartridge.files?.[0];
-    ui.fileRomCartridge.value = "";
-    if (file === undefined) {
+    const files = ui.fileRomCartridge.files;
+    if (files === null || files.length === 0) {
+        ui.fileRomCartridge.value = "";
         return;
     }
     const slot = selectedRomSlot();
     const state = romSlotStates[slot];
     state.generation += 1;
     const generation = state.generation;
-    if (file.size === 0 || file.size > machine.romCartridgeSize) {
-        state.error = "Expected 1 to " + machine.romCartridgeSize + ", got " + file.size + " bytes.";
-        refreshRomSlotStatus();
-        return;
-    }
-    io.readFile(file, function (err, buf) {
+    readChosenFile(ui.fileRomCartridge, machine.romCartridgeSize, function (file, err, buf) {
         if (state.generation !== generation) {
             return;
         }
-        if (err === null && !(buf instanceof ArrayBuffer)) {
-            err = "Empty read.";
-        }
-        if (err === null) {
+        if (err === null && buf !== null) {
             err = machine.insertRomCartridge(ql, buf, slot);
         }
-        state.error = err ?? "";
+        state.error = "";
+        if (err !== null) {
+            state.error = err;
+        }
         if (err === null) {
             state.name = file.name;
             resetSystem();
@@ -448,18 +528,13 @@ ui.loadHdd.onclick = function () {
 };
 
 ui.fileHdd.onchange = function () {
-    const file = ui.fileHdd.files?.[0];
-    ui.fileHdd.value = "";
-    if (file === undefined) {
-        return;
-    }
-    io.readFile(file, function (err, buf) {
-        if (err !== null) {
-            showError(ui.hddInfo, err);
-            return;
-        }
-        if (!(buf instanceof ArrayBuffer)) {
-            showError(ui.hddInfo, "Empty read.");
+    readChosenFile(ui.fileHdd, 0, function (file, err, buf) {
+        if (err !== null || buf === null) {
+            let message = "Empty read.";
+            if (err !== null) {
+                message = err;
+            }
+            showError(ui.hddInfo, message);
             return;
         }
         const hddErr = disk.insert(ql.disks.win, buf, file.name);
@@ -467,7 +542,7 @@ ui.fileHdd.onchange = function () {
             showError(ui.hddInfo, hddErr);
             return;
         }
-        refreshHddStatus();
+        refreshMountedDrives();
     });
 };
 
@@ -476,26 +551,13 @@ ui.downloadHdd.onclick = function () {
     if (saved === null) {
         return;
     }
-    let name = saved.name.split("/").pop() ?? "";
-    name = name.split("\\").pop() ?? "";
-    if (name === "") {
-        name = "win1.win";
-    } else if (!media.isWinName(name)) {
-        name += ".win";
-    }
-    const buffer = /** @type {ArrayBuffer} */ (saved.bytes.buffer);
-    const url = URL.createObjectURL(new Blob([buffer], {type: "application/octet-stream"}));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = name;
-    link.click();
-    URL.revokeObjectURL(url);
-    refreshHddStatus();
+    downloadBytes(saved.name, saved.bytes, "win1.win", media.isWinName, ".win");
+    refreshMountedDrives();
 };
 
 ui.ejectHdd.onclick = function () {
     disk.eject(ql.disks.win);
-    refreshHddStatus();
+    refreshMountedDrives();
 };
 
 ui.loadFdd.onclick = function () {
@@ -503,18 +565,13 @@ ui.loadFdd.onclick = function () {
 };
 
 ui.fileFdd.onchange = function () {
-    const file = ui.fileFdd.files?.[0];
-    ui.fileFdd.value = "";
-    if (file === undefined) {
-        return;
-    }
-    io.readFile(file, function (err, buf) {
-        if (err !== null) {
-            showError(ui.fddInfo, err);
-            return;
-        }
-        if (!(buf instanceof ArrayBuffer)) {
-            showError(ui.fddInfo, "Empty read.");
+    readChosenFile(ui.fileFdd, 0, function (file, err, buf) {
+        if (err !== null || buf === null) {
+            let message = "Empty read.";
+            if (err !== null) {
+                message = err;
+            }
+            showError(ui.fddInfo, message);
             return;
         }
         const fddErr = disk.insert(ql.disks.flp, buf, file.name);
@@ -522,7 +579,7 @@ ui.fileFdd.onchange = function () {
             showError(ui.fddInfo, fddErr);
             return;
         }
-        refreshFddStatus();
+        refreshMountedDrives();
     });
 };
 
@@ -531,25 +588,13 @@ ui.downloadFdd.onclick = function () {
     if (saved === null) {
         return;
     }
-    let name = saved.name.split("/").pop() ?? "";
-    name = name.split("\\").pop() ?? "";
-    if (name === "") {
-        name = "flp1.img";
-    } else if (!media.isImgName(name)) {
-        name += ".img";
-    }
-    const buffer = /** @type {ArrayBuffer} */ (saved.bytes.buffer);
-    const url = URL.createObjectURL(new Blob([buffer], {type: "application/octet-stream"}));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = name;
-    link.click();
-    URL.revokeObjectURL(url);
+    downloadBytes(saved.name, saved.bytes, "flp1.img", media.isImgName, ".img");
+    refreshMountedDrives();
 };
 
 ui.ejectFdd.onclick = function () {
     disk.eject(ql.disks.flp);
-    refreshFddStatus();
+    refreshMountedDrives();
 };
 
 boot.loadShaders(function (err, shaders) {
@@ -721,6 +766,88 @@ function selectedRomSlot() {
 }
 
 /**
+ * Read one chosen local file. An empty picker does nothing. A zero-length
+ * file, or a file larger than `maxBytes` when that limit is positive, is
+ * reported without reading.
+ *
+ * @param {HTMLInputElement} input
+ * @param {number} maxBytes
+ * @param {function(File, string | null, ArrayBuffer | null): void} onFile
+ * @returns {boolean} Whether a file was chosen.
+ */
+function readChosenFile(input, maxBytes, onFile) {
+    const files = input.files;
+    if (files === null || files.length === 0) {
+        input.value = "";
+        return false;
+    }
+    // Clearing the value empties Chrome's live FileList, so keep the File
+    // first. Clearing lets the same file be chosen again.
+    const file = files[0];
+    input.value = "";
+    if (file.size === 0 || (maxBytes > 0 && file.size > maxBytes)) {
+        let err = "Empty read.";
+        if (maxBytes > 0) {
+            err = "Expected 1 to " + maxBytes + ", got " + file.size + " bytes.";
+        }
+        onFile(file, err, null);
+        return true;
+    }
+    io.readFile(file, function (err, buf) {
+        if (err !== null) {
+            onFile(file, err, null);
+            return;
+        }
+        onFile(file, null, /** @type {ArrayBuffer} */ (buf));
+    });
+    return true;
+}
+
+/**
+ * Download image bytes, using `fallback` when the saved name has no leaf.
+ *
+ * @param {string} savedName
+ * @param {Uint8Array} bytes
+ * @param {string} fallback
+ * @param {function(string): boolean} isName
+ * @param {string} extension
+ */
+function downloadBytes(savedName, bytes, fallback, isName, extension) {
+    let name = leafName(savedName);
+    if (name === "") {
+        name = fallback;
+    } else if (!isName(name)) {
+        name += extension;
+    }
+    const buffer = /** @type {ArrayBuffer} */ (bytes.buffer);
+    const url = URL.createObjectURL(new Blob([buffer], {type: "application/octet-stream"}));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    URL.revokeObjectURL(url);
+}
+
+/**
+ * Last path segment, accepting both URL and Windows separators.
+ *
+ * @param {string} path
+ * @returns {string}
+ */
+function leafName(path) {
+    let name = path;
+    const slash = name.lastIndexOf("/");
+    if (slash >= 0) {
+        name = name.substring(slash + 1);
+    }
+    const back = name.lastIndexOf("\\");
+    if (back >= 0) {
+        name = name.substring(back + 1);
+    }
+    return name;
+}
+
+/**
  * Set informational text and clear its error presentation.
  *
  * @param {HTMLElement} el
@@ -760,14 +887,17 @@ function applySwitchParam(input, name, on, values) {
 
 /**
  * Set a control parameter or remove a superseded startup source from the URL.
+ * Strings are stored as given; switches and numbers are stored as digits.
  *
  * @param {string} name
- * @param {boolean | number | null} value
+ * @param {boolean | number | string | null} value
  */
 function updateUrlParam(name, value) {
     const url = new URL(window.location.href);
     if (value === null) {
         url.searchParams.delete(name);
+    } else if (typeof value === "string") {
+        url.searchParams.set(name, value);
     } else {
         url.searchParams.set(name, String(Number(value)));
     }
@@ -791,6 +921,40 @@ function ramKbFromParam(value) {
     case "128":
     default:
         return machine.defaultRamKb;
+    }
+}
+
+/**
+ * Accept a supported mouse model and otherwise leave the mouse disconnected.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function mouseFromParam(value) {
+    switch (value) {
+    case "qimsi":
+        return mouseQimsi;
+    case "0":
+    default:
+        return mouseOff;
+    }
+}
+
+/**
+ * Accept a supported count rate per displayed 512-mode pixel, defaulting to 1.
+ *
+ * @param {string} value
+ * @returns {number}
+ */
+function mouseSpeedFromParam(value) {
+    switch (value) {
+    case "2":
+        return 2;
+    case "4":
+        return 4;
+    case "1":
+    default:
+        return 1;
     }
 }
 
@@ -984,8 +1148,7 @@ function onFrame(now) {
         fillSoundQueue();
     }
     refreshMdvActivity(now);
-    refreshHddStatus();
-    refreshFddStatus();
+    refreshMountedDrives();
     refreshSoundStatus(now);
     if (gfx !== null) {
         screen.draw(gfx, ql.pixels, ql.frameNtsc, ql.frameVersion);
@@ -1008,8 +1171,8 @@ function fillSoundQueue() {
  * stay on after the last transfer.
  */
 function stepTurboGroup() {
-    const burst = ui.turbo.checked && (machine.mdvInfo(ql, 0).reading || machine.mdvInfo(ql, 1).reading);
-    ql.mdv.readingMask = 0;
+    const reading = machine.takeMdvReading(ql);
+    const burst = ui.turbo.checked && reading;
     if (burst) {
         for (let frame = 1; frame < turboMultiplier; frame += 1) {
             stepMachine(false);
@@ -1088,59 +1251,67 @@ function refreshMdvActivity(now) {
     }
 }
 
-/** Keep hard disk controls synchronized with the mounted writable image. */
-function refreshHddStatus() {
-    const info = disk.info(ql.disks.win);
-    if (
-        info.inserted === hddStatus.inserted &&
-        info.name === hddStatus.name &&
-        info.modified === hddStatus.modified &&
-        info.driverReady === hddStatus.driverReady
-    ) {
-        return;
-    }
-    let label = "No hard disk.";
-    if (info.inserted) {
-        label = info.name;
-        if (info.modified) {
-            label += " (modified)";
-        }
-        if (!info.driverReady) {
-            label += " (WIN1 unavailable)";
-        }
-    }
-    showInfo(ui.hddInfo, label);
-    ui.downloadHdd.disabled = !info.inserted;
-    ui.ejectHdd.disabled = !info.inserted;
-    hddStatus.inserted = info.inserted;
-    hddStatus.name = info.name;
-    hddStatus.modified = info.modified;
-    hddStatus.driverReady = info.driverReady;
+/** Keep both mounted-drive rows aligned with their images. */
+function refreshMountedDrives() {
+    refreshDriveStatus(
+        ql.disks.win,
+        hddStatus,
+        ui.hddInfo,
+        ui.downloadHdd,
+        ui.ejectHdd,
+        "No hard disk.",
+        "WIN1",
+    );
+    refreshDriveStatus(
+        ql.disks.flp,
+        fddStatus,
+        ui.fddInfo,
+        ui.downloadFdd,
+        ui.ejectFdd,
+        "No floppy.",
+        "FLP1",
+    );
 }
 
-/** Keep floppy controls synchronized with the mounted QL5A/QL5B image. */
-function refreshFddStatus() {
-    const info = disk.info(ql.disks.flp);
+/**
+ * Keep one drive row aligned with its image. Unchanged fields leave the DOM alone.
+ *
+ * @param {import("./disk.js").State} state
+ * @param {DriveStatus} status
+ * @param {HTMLElement} infoEl
+ * @param {HTMLButtonElement} download
+ * @param {HTMLButtonElement} eject
+ * @param {string} emptyLabel
+ * @param {string} unavailableLabel
+ */
+function refreshDriveStatus(state, status, infoEl, download, eject, emptyLabel, unavailableLabel) {
     if (
-        info.inserted === fddStatus.inserted &&
-        info.name === fddStatus.name &&
-        info.driverReady === fddStatus.driverReady
+        state.inserted === status.inserted &&
+        state.name === status.name &&
+        state.modified === status.modified &&
+        state.driverReady === status.driverReady &&
+        state.generation === status.generation
     ) {
         return;
     }
-    let label = "No disk.";
-    if (info.inserted) {
-        label = info.name;
-        if (!info.driverReady) {
-            label += " (FLP1 unavailable)";
+    let label = emptyLabel;
+    if (state.inserted) {
+        label = state.name;
+        if (state.modified) {
+            label += " (modified)";
+        }
+        if (!state.driverReady) {
+            label += " (" + unavailableLabel + " unavailable)";
         }
     }
-    showInfo(ui.fddInfo, label);
-    ui.downloadFdd.disabled = !info.inserted;
-    ui.ejectFdd.disabled = !info.inserted;
-    fddStatus.inserted = info.inserted;
-    fddStatus.name = info.name;
-    fddStatus.driverReady = info.driverReady;
+    showInfo(infoEl, label);
+    download.disabled = !state.inserted;
+    eject.disabled = !state.inserted;
+    status.inserted = state.inserted;
+    status.name = state.name;
+    status.modified = state.modified;
+    status.driverReady = state.driverReady;
+    status.generation = state.generation;
 }
 
 /** @param {number} now */
