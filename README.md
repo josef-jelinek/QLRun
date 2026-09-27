@@ -45,7 +45,8 @@ window at `0x0C000`, I/O ROM 1 at `0x10000`, and I/O ROM 2 at `0x14000`.
 The UI controls can also be initialized through URL parameters. Use `0` to
 disable a switch and `1` to enable it. `qsound` accepts `0` for no card, `1`
 for QSound, or `2` for QSound2. RAM accepts `128`, `384`, `640`, or `896`.
-`mouse` accepts `0` for no mouse or `qimsi` for the QIMSI PS/2 mouse.
+`mouse` accepts `0` for no mouse, `qimsi` for the QIMSI PS/2 mouse, or `pe`
+for the host pointer in the Pointer Environment.
 `mspeed` accepts `1`, `2`, or `4` mouse counts per displayed 512-mode pixel;
 it has no control on the page. Missing or invalid parameters keep the normal
 defaults:
@@ -117,16 +118,24 @@ selects another.
   the second RAM expansion turns the card off; selecting either card with both
   expansions active turns +256K off, leaving 640 KiB. The selected card wins
   the same conflict during startup when its ROM is available.
-- Mouse - connect the host mouse as the PS/2 mouse of a QIMSI interface, whose
-  registers occupy `0x0FED0`–`0x0FEDF` in the ROM port. Changing the switch
-  resets the machine. While it is on, click the screen to capture the mouse;
-  Esc releases it, so press Esc again to send it to the QL. Moving across the
-  displayed screen width sends 512 counts times `mspeed`. At the default `1`,
-  Pointer Environment software using the QIMSI mouse driver follows the host
-  one pixel per count; `2` or `4` help software that scales counts down and
-  drops slow movement. The mouse reports itself as an IntelliMouse with left,
-  right, and middle buttons and a wheel. Only the mouse is emulated, not the
-  QIMSI ROM, microSD card, keyboard, serial link, or sound.
+- Mouse - connect the host mouse using the model from the `mouse` parameter,
+  or QIMSI when the page was opened without one. Changing the switch resets
+  the machine.
+  - QIMSI connects the host mouse as the PS/2 mouse of a QIMSI interface,
+    whose registers occupy `0x0FED0`–`0x0FEDF` in the ROM port. While it is
+    on, click the screen to capture the mouse; Esc releases it, so press Esc
+    again to send it to the QL. Moving across the displayed screen width
+    sends 512 counts times `mspeed`. At the default `1`, Pointer Environment
+    software using the QIMSI mouse driver follows the host one pixel per
+    count; `2` or `4` help software that scales counts down and drops slow
+    movement. The mouse reports itself as an IntelliMouse with left, right,
+    and middle buttons and a wheel. Only the mouse is emulated, not the QIMSI
+    ROM, microSD card, keyboard, serial link, or sound.
+  - PE places the Pointer Environment pointer under the host cursor over the
+    screen, as QPC and uQLX do, with no capture. The left and right buttons
+    are HIT and DO. It needs the Pointer Environment (`ptr_gen` with the
+    `PTR2` linkage) loaded in the QL and does nothing until then; `mspeed`
+    does not apply.
 - Stretch - fill the entire available display area, disregarding aspect ratio
   and integer scaling. It applies with CRT enabled or disabled and in both
   fullscreen and windowed modes.
@@ -153,7 +162,7 @@ selects another.
   are padded with zeroes. Each slot retains its own image and filename.
   Changing the selection does not reset the machine; loading or ejecting
   does, so QDOS detects the change. Images survive resets and system-ROM
-  replacement. While Mouse is on, the QIMSI registers replace Cart bytes
+  replacement. While the QIMSI mouse is on, its registers replace Cart bytes
   `0x0FED0`–`0x0FEDF`.
   These slots provide ROM storage only, not any additional peripheral
   hardware a particular expansion ROM may require.
@@ -248,6 +257,7 @@ on the QL.
 - `ay.js` - AY-3-8910/YM2149 PSG synthesis used by the sound cards.
 - `fm.js` - YM2203 FM synthesis used by QSound2.
 - `qimsi.js` - QIMSI mouse registers and the PS/2 mouse behind them.
+- `pe.js` - host pointer written into the QL Pointer Environment.
 - `keyboard.js` - host keyboard mapping and the overlay.
 - `zip.js` - ZIP listing and entry extraction.
 - `media.js` - Microdrive, floppy, hard disk, ZIP, and junk file-name rules.

@@ -2,6 +2,7 @@ import * as ay from "./ay.js";
 import * as cpu from "./cpu.js";
 import * as disk from "./disk.js";
 import * as fm from "./fm.js";
+import * as pe from "./pe.js";
 import * as qimsi from "./qimsi.js";
 
 export const sysRomSize = 0xC000;
@@ -10,6 +11,9 @@ export const qsoundRomSize = 0x2000;
 export const qsoundOff = 0;
 export const qsoundOriginal = 1;
 export const qsound2 = 2;
+export const mouseOff = 0;
+export const mouseQimsi = 1;
+export const mousePe = 2;
 export const defaultRamKb = 128;
 
 const romSlotCount = 3;
@@ -247,7 +251,9 @@ for (let ink = 0; ink < 16; ink += 1) {
  *     ay: import("./ay.js").State,
  *     fm: import("./fm.js").State,
  *   },
+ *   mouseModel: number,
  *   qimsi: import("./qimsi.js").State,
+ *   pe: import("./pe.js").State,
  *   disks: import("./disk.js").Disks,
  *   mdv: {
  *     cartridges: MicrodriveCartridge[],
@@ -444,7 +450,9 @@ export function create(keys) {
             ay: ay.create(qsoundAyTickCycles),
             fm: fm.create(),
         },
+        mouseModel: mouseOff,
         qimsi: qimsi.create(),
+        pe: pe.create(),
         disks: disk.create(),
         mdv: {
             cartridges,
@@ -489,6 +497,7 @@ export function reset(m) {
     disk.prepareReset(m.disks, m.mem);
     cpu.reset(m.cpu, m.cpuBus);
     qimsi.reset(m.qimsi, cpuClockHz(m));
+    pe.reset(m.pe);
     resetQsound(m);
     resetAudioClock(m);
     resetVideo(m);
@@ -623,20 +632,27 @@ export function setQsoundModel(m, model) {
 }
 
 /**
- * Connect or remove the QIMSI mouse registers at `0xFED0`-`0xFEDF`. They
- * cover those bytes of the cartridge slot while connected.
+ * Select no mouse, the QIMSI mouse registers at `0xFED0`-`0xFEDF`, or the host
+ * pointer written into a loaded Pointer Environment. QIMSI covers those bytes
+ * of the cartridge slot while it is selected.
  *
  * @param {Machine} m
- * @param {boolean} on
+ * @param {number} model
+ * @returns {boolean}
  */
-export function setQimsi(m, on) {
+export function setMouseModel(m, model) {
+    if (model !== mouseOff && model !== mouseQimsi && model !== mousePe) {
+        return false;
+    }
+    m.mouseModel = model;
     m.cpuBus.qimsiBase = 0;
     m.cpuBus.qimsiEnd = 0;
-    if (on) {
+    if (model === mouseQimsi) {
         m.cpuBus.qimsiBase = qimsi.registerBase;
         m.cpuBus.qimsiEnd = qimsi.registerEnd;
     }
     qimsi.reset(m.qimsi, cpuClockHz(m));
+    return true;
 }
 
 /**
@@ -711,6 +727,9 @@ export function runFrame(m) {
         m.pixels.fill(0);
         m.frameVersion += 1;
         return;
+    }
+    if (m.mouseModel === mousePe) {
+        pe.update(m.pe, m.cpuBus);
     }
     renderVideoTo(m, m.cpu.cycleCount);
     const video = m.video;

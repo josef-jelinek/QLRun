@@ -5,6 +5,7 @@ import * as keyboard from "./keyboard.js";
 import * as load from "./load.js";
 import * as machine from "./machine.js";
 import * as media from "./media.js";
+import * as pe from "./pe.js";
 import * as qimsi from "./qimsi.js";
 import * as screen from "./screen.js";
 import * as sound from "./sound.js";
@@ -13,9 +14,9 @@ const statsWindowMs = 1000;
 const carryFloorMs = -80;
 const mdvActivityHoldMs = 50;
 const turboMultiplier = 8;
-const mouseOff = "0";
-const mouseQimsi = "qimsi";
 const guestColumns = 512;
+const guestRows = 256;
+const ntscCrtRows = 192;
 const wheelPixelsPerStep = 100;
 const wheelLinesPerStep = 3;
 
@@ -88,6 +89,12 @@ const query = new URLSearchParams(window.location.search);
 const configuredRomName = query.get("rom") ?? "";
 /** PS/2 counts per displayed 512-mode pixel; at 1, QIMSI's PE driver follows the host 1:1. */
 const mouseCountsPerPixel = mouseSpeedFromParam(query.get("mspeed") ?? "");
+const configuredMouseModel = mouseFromParam(query.get("mouse") ?? "");
+/** Model the Mouse switch connects: the one from the URL, or QIMSI. */
+let mouseOnModel = configuredMouseModel;
+if (mouseOnModel === machine.mouseOff) {
+    mouseOnModel = machine.mouseQimsi;
+}
 const keys = {
     rows: new Uint8Array(8),
     shift: false,
@@ -157,12 +164,12 @@ applySwitchParam(ui.crt, "crt", "1", "01");
 applySwitchParam(ui.qsound, "qsound", "1", "012");
 applySwitchParam(ui.qsound2, "qsound", "2", "012");
 applySwitchParam(ui.stereo, "stereo", "1", "01");
-ui.mouse.checked = mouseFromParam(query.get("mouse") ?? "") !== mouseOff;
+ui.mouse.checked = configuredMouseModel !== machine.mouseOff;
 applySwitchParam(ui.turbo, "turbo", "1", "01");
 applySwitchParam(ui.stretch, "stretch", "1", "01");
 keyboardVisible = ui.keyboardToggle.checked;
 applyVisibility();
-machine.setQimsi(ql, ui.mouse.checked);
+machine.setMouseModel(ql, configuredMouseModel);
 
 ui.reset.onclick = function () {
     resetSystem();
@@ -210,13 +217,13 @@ ui.ram256.onchange = updateRamSize;
 ui.ram512.onchange = updateRamSize;
 
 ui.mouse.onchange = function () {
-    let model = mouseOff;
+    let model = machine.mouseOff;
     if (ui.mouse.checked) {
-        model = mouseQimsi;
+        model = mouseOnModel;
     }
-    updateUrlParam("mouse", model);
-    machine.setQimsi(ql, ui.mouse.checked);
-    if (!ui.mouse.checked && document.pointerLockElement === ui.screen) {
+    updateUrlParam("mouse", mouseParam(model));
+    machine.setMouseModel(ql, model);
+    if (document.pointerLockElement === ui.screen) {
         document.exitPointerLock();
     }
     resetSystem();
@@ -238,29 +245,52 @@ ui.fullscreenToggle.onclick = function () {
 };
 
 ui.screen.onmousedown = function (/** @type {MouseEvent} */ e) {
-    if (!ui.mouse.checked) {
-        return;
-    }
-    e.preventDefault();
-    if (document.pointerLockElement === ui.screen) {
-        qimsi.setButtons(ql.qimsi, e.buttons);
-        return;
-    }
-    // The capturing click stays on the host. Chrome refuses a new lock
-    // shortly after Esc released the previous one; the next click retries.
-    const request = ui.screen.requestPointerLock();
-    if (request !== undefined) {
-        request.then(function () {}, function () {});
+    switch (ql.mouseModel) {
+    case machine.mousePe:
+        e.preventDefault();
+        movePePointer(e);
+        pe.setButtons(ql.pe, e.buttons);
+        break;
+    case machine.mouseQimsi:
+        e.preventDefault();
+        if (document.pointerLockElement === ui.screen) {
+            qimsi.setButtons(ql.qimsi, e.buttons);
+            break;
+        }
+        // The capturing click stays on the host. Chrome refuses a new lock
+        // shortly after Esc released the previous one; the next click retries.
+        const request = ui.screen.requestPointerLock();
+        if (request !== undefined) {
+            request.then(function () {}, function () {});
+        }
+        break;
+    default:
+        break;
     }
 };
 
 ui.screen.onmouseup = function (/** @type {MouseEvent} */ e) {
+    if (ql.mouseModel === machine.mousePe) {
+        movePePointer(e);
+        pe.setButtons(ql.pe, e.buttons);
+        return;
+    }
     if (document.pointerLockElement === ui.screen) {
         qimsi.setButtons(ql.qimsi, e.buttons);
     }
 };
 
+ui.screen.onmouseleave = function () {
+    if (ql.mouseModel === machine.mousePe) {
+        pe.setButtons(ql.pe, 0);
+    }
+};
+
 ui.screen.onmousemove = function (/** @type {MouseEvent} */ e) {
+    if (ql.mouseModel === machine.mousePe) {
+        movePePointer(e);
+        return;
+    }
     const width = ui.screen.clientWidth;
     if (document.pointerLockElement !== ui.screen || width <= 0) {
         return;
@@ -294,7 +324,7 @@ ui.screen.onwheel = function (/** @type {WheelEvent} */ e) {
 };
 
 ui.screen.oncontextmenu = function (/** @type {MouseEvent} */ e) {
-    if (ui.mouse.checked) {
+    if (ql.mouseModel !== machine.mouseOff) {
         e.preventDefault();
     }
 };
@@ -928,15 +958,32 @@ function ramKbFromParam(value) {
  * Accept a supported mouse model and otherwise leave the mouse disconnected.
  *
  * @param {string} value
- * @returns {string}
+ * @returns {number}
  */
 function mouseFromParam(value) {
     switch (value) {
     case "qimsi":
-        return mouseQimsi;
+        return machine.mouseQimsi;
+    case "pe":
+        return machine.mousePe;
     case "0":
     default:
-        return mouseOff;
+        return machine.mouseOff;
+    }
+}
+
+/**
+ * @param {number} model
+ * @returns {string}
+ */
+function mouseParam(model) {
+    switch (model) {
+    case machine.mouseQimsi:
+        return "qimsi";
+    case machine.mousePe:
+        return "pe";
+    default:
+        return "0";
     }
 }
 
@@ -1116,6 +1163,26 @@ function endKeyboardSplit(pointerId) {
         ui.keyboardSplit.releasePointerCapture(pointerId);
     }
     document.body.classList.remove("keyboard-splitting");
+}
+
+/**
+ * Place the Pointer Environment pointer under the host cursor. The canvas
+ * spans 512 columns and 256 rows, or rows 0-191 of a CRT-filtered NTSC field.
+ *
+ * @param {MouseEvent} e
+ */
+function movePePointer(e) {
+    const rect = ui.screen.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+        return;
+    }
+    let rows = guestRows;
+    if (ui.crt.checked && ql.frameNtsc) {
+        rows = ntscCrtRows;
+    }
+    const x = Math.floor((e.clientX - rect.left) * guestColumns / rect.width);
+    const y = Math.floor((e.clientY - rect.top) * rows / rect.height);
+    pe.move(ql.pe, Math.min(Math.max(x, 0), guestColumns - 1), Math.min(Math.max(y, 0), rows - 1));
 }
 
 /** Follow the current PAL or US ZX8301 field rate. */
