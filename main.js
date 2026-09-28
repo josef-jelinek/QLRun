@@ -14,14 +14,40 @@ const statsWindowMs = 1000;
 const carryFloorMs = -80;
 const mdvActivityHoldMs = 50;
 const turboMultiplier = 8;
+const sectorsPerMebibyte = 2048;
 const guestColumns = 512;
 const guestRows = 256;
 const ntscCrtRows = 192;
 const wheelPixelsPerStep = 100;
 const wheelLinesPerStep = 3;
+/**
+ * Page defaults of the URL parameters that controls write back. A control
+ * changed to its default removes its parameter instead of repeating it.
+ *
+ * @type {Record<string, string>}
+ */
+const urlParamDefaults = {
+    keyboard: "0",
+    crt: "1",
+    qsound: "1",
+    stereo: "0",
+    muted: "0",
+    ntsc: "0",
+    ram: String(machine.defaultRamKb),
+    mouse: "0",
+    mcursor: "0",
+    turbo: "1",
+    stretch: "0",
+};
 
 const ui = {
     pageHeader:       /** @type {HTMLElement} */       (document.getElementById("page-header")),
+    tabs: [
+        /** @type {HTMLInputElement} */ (document.getElementById("tab-media")),
+        /** @type {HTMLInputElement} */ (document.getElementById("tab-roms")),
+        /** @type {HTMLInputElement} */ (document.getElementById("tab-hardware")),
+        /** @type {HTMLInputElement} */ (document.getElementById("tab-display")),
+    ],
     initInfo:         /** @type {HTMLElement} */       (document.getElementById("init-info")),
     qsoundInfo:       /** @type {HTMLElement} */       (document.getElementById("qsound-info")),
     soundInfo:        /** @type {HTMLElement} */       (document.getElementById("sound-info")),
@@ -48,24 +74,40 @@ const ui = {
     fileRom:          /** @type {HTMLInputElement} */  (document.getElementById("file-rom")),
     romInfo:          /** @type {HTMLElement} */       (document.getElementById("rom-info")),
     romSlots: [
-        /** @type {HTMLInputElement} */ (document.getElementById("rom-cart")),
-        /** @type {HTMLInputElement} */ (document.getElementById("rom-io1")),
-        /** @type {HTMLInputElement} */ (document.getElementById("rom-io2")),
+        {
+            load:     /** @type {HTMLButtonElement} */ (document.getElementById("load-rom-cart")),
+            file:     /** @type {HTMLInputElement} */  (document.getElementById("file-rom-cart")),
+            eject:    /** @type {HTMLButtonElement} */ (document.getElementById("eject-rom-cart")),
+            info:     /** @type {HTMLElement} */       (document.getElementById("rom-cart-info")),
+        },
+        {
+            load:     /** @type {HTMLButtonElement} */ (document.getElementById("load-rom-io1")),
+            file:     /** @type {HTMLInputElement} */  (document.getElementById("file-rom-io1")),
+            eject:    /** @type {HTMLButtonElement} */ (document.getElementById("eject-rom-io1")),
+            info:     /** @type {HTMLElement} */       (document.getElementById("rom-io1-info")),
+        },
+        {
+            load:     /** @type {HTMLButtonElement} */ (document.getElementById("load-rom-io2")),
+            file:     /** @type {HTMLInputElement} */  (document.getElementById("file-rom-io2")),
+            eject:    /** @type {HTMLButtonElement} */ (document.getElementById("eject-rom-io2")),
+            info:     /** @type {HTMLElement} */       (document.getElementById("rom-io2-info")),
+        },
     ],
-    loadRomCartridge: /** @type {HTMLButtonElement} */ (document.getElementById("load-rom-cartridge")),
-    fileRomCartridge: /** @type {HTMLInputElement} */  (document.getElementById("file-rom-cartridge")),
-    ejectRomCartridge: /** @type {HTMLButtonElement} */ (document.getElementById("eject-rom-cartridge")),
-    romCartridgeInfo: /** @type {HTMLElement} */       (document.getElementById("rom-cartridge-info")),
+    newHdd4:          /** @type {HTMLButtonElement} */ (document.getElementById("new-hdd-4")),
+    newHdd16:         /** @type {HTMLButtonElement} */ (document.getElementById("new-hdd-16")),
     loadHdd:          /** @type {HTMLButtonElement} */ (document.getElementById("load-hdd")),
     fileHdd:          /** @type {HTMLInputElement} */  (document.getElementById("file-hdd")),
     downloadHdd:      /** @type {HTMLButtonElement} */ (document.getElementById("download-hdd")),
     ejectHdd:         /** @type {HTMLButtonElement} */ (document.getElementById("eject-hdd")),
     hddInfo:          /** @type {HTMLElement} */       (document.getElementById("hdd-info")),
+    newFddDd:         /** @type {HTMLButtonElement} */ (document.getElementById("new-fdd-dd")),
+    newFddHd:         /** @type {HTMLButtonElement} */ (document.getElementById("new-fdd-hd")),
     loadFdd:          /** @type {HTMLButtonElement} */ (document.getElementById("load-fdd")),
     fileFdd:          /** @type {HTMLInputElement} */  (document.getElementById("file-fdd")),
     downloadFdd:      /** @type {HTMLButtonElement} */ (document.getElementById("download-fdd")),
     ejectFdd:         /** @type {HTMLButtonElement} */ (document.getElementById("eject-fdd")),
     fddInfo:          /** @type {HTMLElement} */       (document.getElementById("fdd-info")),
+    paused:           /** @type {HTMLInputElement} */  (document.getElementById("paused")),
     reset:            /** @type {HTMLButtonElement} */ (document.getElementById("reset")),
     screenSlot:       /** @type {HTMLElement} */       (document.getElementById("screen-slot")),
     screen:           /** @type {HTMLCanvasElement} */ (document.getElementById("screen")),
@@ -76,10 +118,13 @@ const ui = {
     qsound:           /** @type {HTMLInputElement} */  (document.getElementById("qsound")),
     qsound2:          /** @type {HTMLInputElement} */  (document.getElementById("qsound2")),
     stereo:           /** @type {HTMLInputElement} */  (document.getElementById("stereo")),
+    muted:            /** @type {HTMLInputElement} */  (document.getElementById("muted")),
     ntsc:             /** @type {HTMLInputElement} */  (document.getElementById("ntsc")),
     ram256:           /** @type {HTMLInputElement} */  (document.getElementById("ram-256")),
     ram512:           /** @type {HTMLInputElement} */  (document.getElementById("ram-512")),
-    mouse:            /** @type {HTMLInputElement} */  (document.getElementById("mouse")),
+    mouseQimsi:       /** @type {HTMLInputElement} */  (document.getElementById("mouse-qimsi")),
+    mousePe:          /** @type {HTMLInputElement} */  (document.getElementById("mouse-pe")),
+    mouseCursor:      /** @type {HTMLInputElement} */  (document.getElementById("mouse-cursor")),
     turbo:            /** @type {HTMLInputElement} */  (document.getElementById("turbo")),
     stretch:          /** @type {HTMLInputElement} */  (document.getElementById("stretch")),
     fullscreenToggle: /** @type {HTMLButtonElement} */ (document.getElementById("fullscreen-toggle")),
@@ -90,11 +135,6 @@ const configuredRomName = query.get("rom") ?? "";
 /** PS/2 counts per displayed 512-mode pixel; at 1, QIMSI's PE driver follows the host 1:1. */
 const mouseCountsPerPixel = mouseSpeedFromParam(query.get("mspeed") ?? "");
 const configuredMouseModel = mouseFromParam(query.get("mouse") ?? "");
-/** Model the Mouse switch connects: the one from the URL, or QIMSI. */
-let mouseOnModel = configuredMouseModel;
-if (mouseOnModel === machine.mouseOff) {
-    mouseOnModel = machine.mouseQimsi;
-}
 const keys = {
     rows: new Uint8Array(8),
     shift: false,
@@ -164,15 +204,33 @@ applySwitchParam(ui.crt, "crt", "1", "01");
 applySwitchParam(ui.qsound, "qsound", "1", "012");
 applySwitchParam(ui.qsound2, "qsound", "2", "012");
 applySwitchParam(ui.stereo, "stereo", "1", "01");
-ui.mouse.checked = configuredMouseModel !== machine.mouseOff;
+applySwitchParam(ui.muted, "muted", "1", "01");
+ui.mouseQimsi.checked = configuredMouseModel === machine.mouseQimsi;
+ui.mousePe.checked = configuredMouseModel === machine.mousePe;
+applySwitchParam(ui.mouseCursor, "mcursor", "1", "01");
 applySwitchParam(ui.turbo, "turbo", "1", "01");
 applySwitchParam(ui.stretch, "stretch", "1", "01");
+ui.paused.checked = false;
 keyboardVisible = ui.keyboardToggle.checked;
 applyVisibility();
 machine.setMouseModel(ql, configuredMouseModel);
 
 ui.reset.onclick = function () {
     resetSystem();
+};
+
+ui.paused.onchange = function () {
+    if (sfx === null) {
+        return;
+    }
+    if (!ui.paused.checked) {
+        // Queue accounting went stale while nothing was sent. Restart it, and
+        // queue the next frames before gap counting resumes, so the refill
+        // itself is not reported as an underrun.
+        sound.reset(sfx);
+        fillSoundQueue();
+    }
+    sound.setPaused(sfx, ui.paused.checked);
 };
 
 ui.keyboardToggle.onchange = function () {
@@ -192,6 +250,13 @@ ui.stereo.onchange = function () {
     updateUrlParam("stereo", ui.stereo.checked);
     if (sfx !== null) {
         sound.setStereo(sfx, ui.stereo.checked);
+    }
+};
+
+ui.muted.onchange = function () {
+    updateUrlParam("muted", ui.muted.checked);
+    if (sfx !== null) {
+        sound.setMuted(sfx, ui.muted.checked);
     }
 };
 
@@ -216,17 +281,16 @@ ui.ntsc.onchange = function () {
 ui.ram256.onchange = updateRamSize;
 ui.ram512.onchange = updateRamSize;
 
-ui.mouse.onchange = function () {
-    let model = machine.mouseOff;
-    if (ui.mouse.checked) {
-        model = mouseOnModel;
-    }
-    updateUrlParam("mouse", mouseParam(model));
-    machine.setMouseModel(ql, model);
-    if (document.pointerLockElement === ui.screen) {
-        document.exitPointerLock();
-    }
-    resetSystem();
+ui.mouseQimsi.onchange = function () {
+    updateMouseSelection(ui.mouseQimsi, machine.mouseQimsi);
+};
+
+ui.mousePe.onchange = function () {
+    updateMouseSelection(ui.mousePe, machine.mousePe);
+};
+
+ui.mouseCursor.onchange = function () {
+    updateUrlParam("mcursor", ui.mouseCursor.checked);
 };
 
 ui.turbo.onchange = function () {
@@ -382,8 +446,8 @@ window.onkeydown = function (e) {
         }
         return;
     }
-    const selectingRom = ui.romSlots.includes(/** @type {HTMLInputElement} */ (e.target));
-    if (!selectingRom || e.code.startsWith("F")) {
+    const selectingSwitch = isSwitchTarget(e.target);
+    if (!selectingSwitch || e.code.startsWith("F")) {
         keyboard.handleKeyDown(kbd, e);
     }
 };
@@ -399,8 +463,8 @@ window.onkeyup = function (e) {
         e.preventDefault();
         return;
     }
-    const selectingRom = ui.romSlots.includes(/** @type {HTMLInputElement} */ (e.target));
-    if (!selectingRom || kbd.hostHeld.includes(e.code)) {
+    const selectingSwitch = isSwitchTarget(e.target);
+    if (!selectingSwitch || kbd.hostHeld.includes(e.code)) {
         keyboard.handleKeyUp(kbd, e);
     }
 };
@@ -503,55 +567,56 @@ ui.fileRom.onchange = function () {
     });
 };
 
-for (const control of ui.romSlots) {
-    control.onchange = refreshRomSlotStatus;
-}
-
-ui.loadRomCartridge.onclick = function () {
-    ui.fileRomCartridge.click();
-};
-
-ui.fileRomCartridge.onchange = function () {
-    const files = ui.fileRomCartridge.files;
-    if (files === null || files.length === 0) {
-        ui.fileRomCartridge.value = "";
-        return;
-    }
-    const slot = selectedRomSlot();
+for (let slot = 0; slot < ui.romSlots.length; slot += 1) {
+    const controls = ui.romSlots[slot];
     const state = romSlotStates[slot];
-    state.generation += 1;
-    const generation = state.generation;
-    readChosenFile(ui.fileRomCartridge, machine.romCartridgeSize, function (file, err, buf) {
-        if (state.generation !== generation) {
+    controls.load.onclick = function () {
+        controls.file.click();
+    };
+    controls.file.onchange = function () {
+        const files = controls.file.files;
+        if (files === null || files.length === 0) {
+            controls.file.value = "";
             return;
         }
-        if (err === null && buf !== null) {
-            err = machine.insertRomCartridge(ql, buf, slot);
-        }
+        state.generation += 1;
+        const generation = state.generation;
+        readChosenFile(controls.file, machine.romCartridgeSize, function (file, err, buf) {
+            if (state.generation !== generation) {
+                return;
+            }
+            if (err === null && buf !== null) {
+                err = machine.insertRomCartridge(ql, buf, slot);
+            }
+            state.error = "";
+            if (err !== null) {
+                state.error = err;
+            }
+            if (err === null) {
+                state.name = file.name;
+                resetSystem();
+            }
+            refreshRomSlotStatus(slot);
+        });
+    };
+    controls.eject.onclick = function () {
+        state.generation += 1;
+        machine.ejectRomCartridge(ql, slot);
+        state.name = "";
         state.error = "";
-        if (err !== null) {
-            state.error = err;
-        }
-        if (err === null) {
-            state.name = file.name;
-            resetSystem();
-        }
-        refreshRomSlotStatus();
-    });
+        resetSystem();
+        refreshRomSlotStatus(slot);
+    };
+    refreshRomSlotStatus(slot);
+}
+
+ui.newHdd4.onclick = function () {
+    insertNewHardDisk(4 * sectorsPerMebibyte);
 };
 
-ui.ejectRomCartridge.onclick = function () {
-    const slot = selectedRomSlot();
-    const state = romSlotStates[slot];
-    state.generation += 1;
-    machine.ejectRomCartridge(ql, slot);
-    state.name = "";
-    state.error = "";
-    resetSystem();
-    refreshRomSlotStatus();
+ui.newHdd16.onclick = function () {
+    insertNewHardDisk(disk.maxReportedSectors);
 };
-
-refreshRomSlotStatus();
 
 ui.loadHdd.onclick = function () {
     ui.fileHdd.click();
@@ -588,6 +653,14 @@ ui.downloadHdd.onclick = function () {
 ui.ejectHdd.onclick = function () {
     disk.eject(ql.disks.win);
     refreshMountedDrives();
+};
+
+ui.newFddDd.onclick = function () {
+    insertNewFloppy(false);
+};
+
+ui.newFddHd.onclick = function () {
+    insertNewFloppy(true);
 };
 
 ui.loadFdd.onclick = function () {
@@ -673,6 +746,7 @@ sound.init(
         }
         sfx = initializedSfx;
         sound.setStereo(initializedSfx, ui.stereo.checked);
+        sound.setMuted(initializedSfx, ui.muted.checked);
         machine.setSoundRate(ql, initializedSfx.context.sampleRate);
         machine.enableSound(ql, initializedSfx.context.state === "running");
     },
@@ -772,27 +846,31 @@ function loadSystemRom() {
     }
 }
 
-function refreshRomSlotStatus() {
-    const state = romSlotStates[selectedRomSlot()];
-    ui.ejectRomCartridge.disabled = state.name === "";
+/**
+ * Report whether a key event targets a tab switch, whose arrow, Space, and
+ * Enter keys keep their native selection behavior.
+ *
+ * @param {EventTarget | null} target
+ * @returns {boolean}
+ */
+function isSwitchTarget(target) {
+    return ui.tabs.includes(/** @type {HTMLInputElement} */ (target));
+}
+
+/** @param {number} slot */
+function refreshRomSlotStatus(slot) {
+    const controls = ui.romSlots[slot];
+    const state = romSlotStates[slot];
+    controls.eject.disabled = state.name === "";
     if (state.error !== "") {
-        showError(ui.romCartridgeInfo, state.error);
+        showError(controls.info, state.error);
         return;
     }
     let name = state.name;
     if (name === "") {
         name = "No ROM.";
     }
-    showInfo(ui.romCartridgeInfo, name);
-}
-
-function selectedRomSlot() {
-    for (let slot = 0; slot < ui.romSlots.length; slot += 1) {
-        if (ui.romSlots[slot].checked) {
-            return slot;
-        }
-    }
-    return 0;
+    showInfo(controls.info, name);
 }
 
 /**
@@ -918,18 +996,23 @@ function applySwitchParam(input, name, on, values) {
 /**
  * Set a control parameter or remove a superseded startup source from the URL.
  * Strings are stored as given; switches and numbers are stored as digits.
+ * A value equal to the page default removes the parameter.
  *
  * @param {string} name
  * @param {boolean | number | string | null} value
  */
 function updateUrlParam(name, value) {
     const url = new URL(window.location.href);
-    if (value === null) {
+    let text = null;
+    if (typeof value === "string") {
+        text = value;
+    } else if (value !== null) {
+        text = String(Number(value));
+    }
+    if (text === null || text === urlParamDefaults[name]) {
         url.searchParams.delete(name);
-    } else if (typeof value === "string") {
-        url.searchParams.set(name, value);
     } else {
-        url.searchParams.set(name, String(Number(value)));
+        url.searchParams.set(name, text);
     }
     window.history.replaceState(null, "", url);
 }
@@ -1036,6 +1119,37 @@ function updateQsoundSelection(changed, model) {
     updateUrlParam("qsound", selected);
     machine.setQsoundModel(ql, selected);
     resetSystem();
+}
+
+/**
+ * Apply one mouse switch: at most one model is connected, like the sound cards.
+ *
+ * @param {HTMLInputElement} changed
+ * @param {number} model
+ */
+function updateMouseSelection(changed, model) {
+    if (changed.checked) {
+        ui.mouseQimsi.checked = model === machine.mouseQimsi;
+        ui.mousePe.checked = model === machine.mousePe;
+    }
+    const selected = selectedMouseModel();
+    updateUrlParam("mouse", mouseParam(selected));
+    machine.setMouseModel(ql, selected);
+    if (document.pointerLockElement === ui.screen) {
+        document.exitPointerLock();
+    }
+    resetSystem();
+}
+
+/** @returns {number} */
+function selectedMouseModel() {
+    if (ui.mousePe.checked) {
+        return machine.mousePe;
+    }
+    if (ui.mouseQimsi.checked) {
+        return machine.mouseQimsi;
+    }
+    return machine.mouseOff;
 }
 
 /** Apply the selected RAM expansions and reflect their total in the URL. */
@@ -1203,12 +1317,14 @@ function onFrame(now) {
     }
     const dt = Math.min(now - lastNow, 80);
     lastNow = now;
-    carryMs += dt;
     let ran = 0;
-    while (carryMs >= frameMs && ran < 4) {
-        stepTurboGroup();
-        carryMs -= frameMs;
-        ran += 1;
+    if (!ui.paused.checked) {
+        carryMs += dt;
+        while (carryMs >= frameMs && ran < 4) {
+            stepTurboGroup();
+            carryMs -= frameMs;
+            ran += 1;
+        }
     }
     syncFrameTiming();
     if (ran < 4) {
@@ -1223,7 +1339,7 @@ function onFrame(now) {
 }
 
 function fillSoundQueue() {
-    if (sfx === null || sfx.context.state !== "running") {
+    if (sfx === null || sfx.context.state !== "running" || ui.paused.checked) {
         return;
     }
     for (let ran = 0; ran < 4 && sound.wantsFrame(sfx); ran += 1) {
@@ -1316,6 +1432,34 @@ function refreshMdvActivity(now) {
         controls.info.title = title;
         activity.state = state;
     }
+}
+
+/**
+ * Mount an empty formatted floppy in FLP1 without resetting the machine.
+ *
+ * @param {boolean} highDensity
+ */
+function insertNewFloppy(highDensity) {
+    const error = disk.insertBlankFloppy(ql.disks.flp, highDensity, "flp1.img");
+    if (error !== null) {
+        showError(ui.fddInfo, error);
+        return;
+    }
+    refreshMountedDrives();
+}
+
+/**
+ * Mount an empty formatted hard disk in WIN1 without resetting the machine.
+ *
+ * @param {number} sectors
+ */
+function insertNewHardDisk(sectors) {
+    const error = disk.insertBlankHardDisk(ql.disks.win, sectors, "win1.win");
+    if (error !== null) {
+        showError(ui.hddInfo, error);
+        return;
+    }
+    refreshMountedDrives();
 }
 
 /** Keep both mounted-drive rows aligned with their images. */

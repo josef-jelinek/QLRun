@@ -27,6 +27,8 @@ const dcBlockPole = 1 - 2 * Math.PI * dcBlockHz / sampleRate;
  * @typedef {{type: "reset"}
  *     | {type: "queue-samples", low: number, cap: number}
  *     | {type: "pan", near: number, center: number, far: number}
+ *     | {type: "mute", on: boolean}
+ *     | {type: "pause", on: boolean}
  *     | ({type: "data"} & WorkletChunk)
  * } WorkletMessage
  */
@@ -56,6 +58,7 @@ const dcBlockPole = 1 - 2 * Math.PI * dcBlockHz / sampleRate;
  *   transitionFromR: number,
  *   transitionFrames: number,
  *   fadeInPending: boolean,
+ *   paused: boolean,
  *   dcInL: number,
  *   dcOutL: number,
  *   dcInR: number,
@@ -93,6 +96,7 @@ function QLRunProcessor() {
     p.transitionFromR = 0;
     p.transitionFrames = 0;
     p.fadeInPending = true;
+    p.paused = false;
     p.dcInL = 0;
     p.dcOutL = 0;
     p.dcInR = 0;
@@ -144,6 +148,18 @@ function handleMessage(p, data) {
             p.panFar = data.far;
         }
         return;
+    case "mute":
+        beginTransition(p);
+        p.ayGain = ayPathGain;
+        p.beepGain = beepPathGain;
+        if (data.on) {
+            p.ayGain = 0;
+            p.beepGain = 0;
+        }
+        return;
+    case "pause":
+        p.paused = data.on;
+        return;
     case "data":
         p.receivedSamples += data.length;
         p.chunks.push({samples: data.samples, length: data.length});
@@ -172,7 +188,9 @@ function process(p, output) {
             for (let j = i; j < n; j += 1) {
                 writeSample(p, ol, or, j, 0, 0);
             }
-            p.gapSamples += n - i;
+            if (!p.paused) {
+                p.gapSamples += n - i;
+            }
             break;
         }
         const chunk = p.chunks[p.head];

@@ -59,6 +59,7 @@ button,
 }
 button {
     font: inherit;
+    white-space: nowrap;
 }
 .switch {
     position: relative;
@@ -80,6 +81,9 @@ button:disabled {
     color: #000;
     background: var(--accent);
 }
+.turbo-spacer {
+    visibility: hidden;
+}
 .switch > input {
     position: absolute;
     width: 0;
@@ -99,24 +103,43 @@ button:disabled {
     font-weight: 600;
     color: var(--accent);
 }
-.media-row {
-    flex-wrap: nowrap;
-}
 .media-group {
     display: flex;
     flex: 1 1 0;
     flex-wrap: nowrap;
     align-items: center;
     gap: 6px;
-    min-width: 0;
 }
-.rom-controls {
-    flex-wrap: wrap;
-    justify-content: flex-end;
+.media-group > .media-info {
+    min-width: 16ch;
 }
-#rom-slot .switch:has(> input:focus-visible) {
+#sound-info {
+    flex: 0 1 auto;
+    text-align: right;
+}
+#tab-bar .switch:has(> input:focus-visible) {
     outline: 1px solid var(--ink);
     outline-offset: 2px;
+}
+#tab-panels {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    margin: 0 -14px;
+    padding: 6px 14px 0;
+    border-top: 1px solid var(--line);
+}
+.tab-panel {
+    grid-area: 1 / 1;
+    visibility: hidden;
+}
+#page-header:has(#tab-media:checked) #panel-media,
+#page-header:has(#tab-roms:checked) #panel-roms,
+#page-header:has(#tab-hardware:checked) #panel-hardware,
+#page-header:has(#tab-display:checked) #panel-display {
+    visibility: visible;
+}
+.media-group-right {
+    justify-content: flex-end;
 }
 .media-group-right > .media-info {
     text-align: right;
@@ -166,6 +189,7 @@ button:disabled {
     flex: 1;
     flex-direction: column;
     min-height: 0;
+    padding: 6px;
 }
 #screen-slot {
     display: flex;
@@ -173,9 +197,6 @@ button:disabled {
     align-items: center;
     justify-content: center;
     min-height: 0;
-}
-#screen-slot:has(#screen.crt) {
-    background: #000;
 }
 #screen-slot:fullscreen {
     width: 100%;
@@ -191,6 +212,12 @@ button:disabled {
 }
 #screen.crt {
     image-rendering: auto;
+}
+body:has(#mouse-pe:checked) #screen {
+    cursor: none;
+}
+body:has(#mouse-cursor:checked) #screen {
+    cursor: auto;
 }
 #keyboard-split {
     flex: 0 0 6px;
@@ -255,14 +282,12 @@ body.keyboard-splitting {
     mix-blend-mode: difference;
 }
 @media (max-width: 700px) {
-    .media-row {
-        flex-wrap: wrap;
-    }
     .media-group {
         flex-basis: 100%;
+        flex-wrap: wrap;
     }
-    .rom-controls > .media-info {
-        flex-basis: 100%;
+    .turbo-spacer {
+        display: none;
     }
 }
 </style>
@@ -270,77 +295,126 @@ body.keyboard-splitting {
 <body>
 <header id="page-header" class="colbox">
     <div class="rowbox">
+        <div id="tab-bar" class="rowbox" role="radiogroup" aria-label="Settings">
+            <label class="switch" title="Microdrive, floppy, and hard disk images"><input id="tab-media" type="radio" name="tab" value="media" checked>Media</label>
+            <label class="switch" title="System ROM and extension ROM slots"><input id="tab-roms" type="radio" name="tab" value="roms">ROMs</label>
+            <label class="switch" title="Machine timing, memory, sound cards, and mouse"><input id="tab-hardware" type="radio" name="tab" value="hardware">Hardware</label>
+            <label class="switch" title="Display filter, layout, and onscreen keyboard"><input id="tab-display" type="radio" name="tab" value="display">Display</label>
+        </div>
+        <label class="switch" title="Stop the emulated machine; clear to continue from the same point"><input id="paused" type="checkbox">Paused</label>
         <button id="reset">Reset</button>
-        <label class="switch" title="Onscreen keyboard"><input id="keyboard-toggle" type="checkbox">Keyboard</label>
-        <label class="switch" title="CRT display filter"><input id="crt" type="checkbox" checked>CRT</label>
-        <label class="switch" title="Original AY-3-8910 QSound card"><input id="qsound" type="checkbox" checked disabled>QSound</label>
-        <label class="switch" title="YM2203-compatible QSound2 card"><input id="qsound2" type="checkbox" disabled>QSound2</label>
-        <label class="switch" title="Spread QSound PSG channels across the stereo image"><input id="stereo" type="checkbox">Stereo</label>
-        <label class="switch" title="US NTSC machine timing and jsu.rom by default"><input id="ntsc" type="checkbox">NTSC</label>
-        <label class="switch" title="Add 256 KiB of RAM"><input id="ram-256" type="checkbox">+256K</label>
-        <label class="switch" title="Add 512 KiB of RAM"><input id="ram-512" type="checkbox">+512K</label>
-        <label class="switch" title="QIMSI PS/2 mouse; click the screen to capture it, Esc releases it"><input id="mouse" type="checkbox">Mouse</label>
-        <label class="switch" title="Run eight times faster while either Microdrive is reading"><input id="turbo" type="checkbox" checked>Turbo</label>
-        <label class="switch" title="Fill the available display area"><input id="stretch" type="checkbox">Stretch</label>
-        <button id="fullscreen-toggle" title="Fullscreen (F11)">Fullscreen</button>
-        <div class="media-info"><span id="init-info">Initializing...</span> <span id="qsound-info"></span> <span id="sound-info" title="Emulated frames per second (about 50.1 PAL / 60.1 NTSC is real time), then audio overrun discarded and underrun filled with silence over the last second"></span> <span id="startup-file-info"></span></div>
+        <div class="media-info"><span id="init-info">Initializing...</span> <span id="qsound-info"></span> <span id="startup-file-info"></span></div>
+        <div id="sound-info" class="media-info" title="Emulated frames per second (about 50.1 PAL / 60.1 NTSC is real time), then audio overrun discarded and underrun filled with silence over the last second"></div>
         <a href="https://github.com/josef-jelinek/QLRun">GitHub repo</a>
     </div>
-    <div class="rowbox media-row">
-        <div class="media-group">
-            <strong>MDV1</strong>
-            <button id="new-mdv1">New</button>
-            <button id="load-mdv1">Load</button>
-            <input id="file-mdv1" type="file" accept=".mdv" style="display: none">
-            <button id="download-mdv1" disabled>Download</button>
-            <button id="eject-mdv1" disabled>Eject</button>
-            <div id="mdv1-info" class="media-info mdv-info" title="Microdrive 1 idle">No cartridge.</div>
-        </div>
-        <div class="media-group media-group-right">
-            <div id="rom-info" class="media-info">No system ROM file.</div>
-            <button id="load-rom" title="Set system ROM">Load ROM</button>
-            <input id="file-rom" type="file" accept=".rom,.bin" style="display: none">
-        </div>
-    </div>
-    <div class="rowbox media-row">
-        <div class="media-group">
-            <strong>MDV2</strong>
-            <button id="new-mdv2">New</button>
-            <button id="load-mdv2">Load</button>
-            <input id="file-mdv2" type="file" accept=".mdv" style="display: none">
-            <button id="download-mdv2" disabled>Download</button>
-            <button id="eject-mdv2" disabled>Eject</button>
-            <div id="mdv2-info" class="media-info mdv-info" title="Microdrive 2 idle">No cartridge.</div>
-        </div>
-        <div class="media-group media-group-right rom-controls">
-            <div id="rom-cartridge-info" class="media-info">No ROM.</div>
-            <div id="rom-slot" class="rowbox" role="radiogroup" aria-label="ROM slot">
-                <label class="switch" title="Cartridge (0x0C000)"><input id="rom-cart" type="radio" name="rom-slot" value="0" checked>Cart</label>
-                <label class="switch" title="I/O ROM 1 (0x10000)"><input id="rom-io1" type="radio" name="rom-slot" value="1">IO 1</label>
-                <label class="switch" title="I/O ROM 2 (0x14000)"><input id="rom-io2" type="radio" name="rom-slot" value="2">IO 2</label>
+    <div id="tab-panels">
+        <section id="panel-media" class="tab-panel colbox" aria-labelledby="tab-media">
+            <div class="rowbox media-row">
+                <div class="media-group">
+                    <label class="switch" title="Run eight times faster while either Microdrive is reading"><input id="turbo" type="checkbox" checked>Turbo</label>
+                    <strong>MDV1</strong>
+                    <button id="new-mdv1">New</button>
+                    <button id="load-mdv1">Load</button>
+                    <input id="file-mdv1" type="file" accept=".mdv" style="display: none">
+                    <button id="download-mdv1" disabled>Save</button>
+                    <button id="eject-mdv1" disabled>Eject</button>
+                    <div id="mdv1-info" class="media-info mdv-info" title="Microdrive 1 idle">No cartridge.</div>
+                </div>
+                <div class="media-group media-group-right">
+                    <div id="hdd-info" class="media-info">No hard disk.</div>
+                    <button id="new-hdd-4" title="Insert an empty formatted 4 MiB QLWA hard disk">New 4MB</button>
+                    <button id="new-hdd-16" title="Insert an empty formatted QLWA hard disk of 32764 sectors, just under 16 MiB: the largest whose free space QDOS reports exactly">New 16MB</button>
+                    <button id="load-hdd">Load</button>
+                    <input id="file-hdd" type="file" accept=".win" style="display: none">
+                    <button id="download-hdd" disabled>Save</button>
+                    <button id="eject-hdd" disabled>Eject</button>
+                    <strong>WIN1</strong>
+                </div>
             </div>
-            <button id="eject-rom-cartridge" disabled>Eject</button>
-            <button id="load-rom-cartridge">Load</button>
-            <input id="file-rom-cartridge" type="file" accept=".rom,.bin" style="display: none">
-        </div>
-    </div>
-    <div class="rowbox media-row">
-        <div class="media-group">
-            <strong>FLP1</strong>
-            <button id="load-fdd">Load</button>
-            <input id="file-fdd" type="file" accept=".img" style="display: none">
-            <button id="download-fdd" disabled>Download</button>
-            <button id="eject-fdd" disabled>Eject</button>
-            <div id="fdd-info" class="media-info">No floppy.</div>
-        </div>
-        <div class="media-group media-group-right">
-            <div id="hdd-info" class="media-info">No hard disk.</div>
-            <button id="load-hdd">Load</button>
-            <input id="file-hdd" type="file" accept=".win" style="display: none">
-            <button id="download-hdd" disabled>Download</button>
-            <button id="eject-hdd" disabled>Eject</button>
-            <strong>WIN1</strong>
-        </div>
+            <div class="rowbox media-row">
+                <div class="media-group">
+                    <span class="switch turbo-spacer" aria-hidden="true">Turbo</span>
+                    <strong>MDV2</strong>
+                    <button id="new-mdv2">New</button>
+                    <button id="load-mdv2">Load</button>
+                    <input id="file-mdv2" type="file" accept=".mdv" style="display: none">
+                    <button id="download-mdv2" disabled>Save</button>
+                    <button id="eject-mdv2" disabled>Eject</button>
+                    <div id="mdv2-info" class="media-info mdv-info" title="Microdrive 2 idle">No cartridge.</div>
+                </div>
+                <div class="media-group media-group-right">
+                    <div id="fdd-info" class="media-info">No floppy.</div>
+                    <button id="new-fdd-dd" title="Insert an empty formatted 720 KiB double-density (QL5A) floppy">New DD</button>
+                    <button id="new-fdd-hd" title="Insert an empty formatted 1440 KiB high-density (QL5B) floppy">New HD</button>
+                    <button id="load-fdd">Load</button>
+                    <input id="file-fdd" type="file" accept=".img" style="display: none">
+                    <button id="download-fdd" disabled>Save</button>
+                    <button id="eject-fdd" disabled>Eject</button>
+                    <strong>FLP1</strong>
+                </div>
+            </div>
+        </section>
+        <section id="panel-roms" class="tab-panel colbox" aria-labelledby="tab-roms">
+            <div class="rowbox media-row">
+                <div class="media-group">
+                    <button id="load-rom" title="Replace the 48 KiB system ROM">Load ROM</button>
+                    <input id="file-rom" type="file" accept=".rom,.bin" style="display: none">
+                    <div id="rom-info" class="media-info">No system ROM file.</div>
+                </div>
+                <div class="media-group media-group-right">
+                    <div id="rom-io1-info" class="media-info">No ROM.</div>
+                    <button id="load-rom-io1" title="I/O ROM 1 at 0x10000">Load IO1 ROM</button>
+                    <input id="file-rom-io1" type="file" accept=".rom,.bin" style="display: none">
+                    <button id="eject-rom-io1" disabled>Eject</button>
+                </div>
+            </div>
+            <div class="rowbox media-row">
+                <div class="media-group">
+                    <button id="load-rom-cart" title="Cartridge ROM at 0x0C000">Load cart ROM</button>
+                    <input id="file-rom-cart" type="file" accept=".rom,.bin" style="display: none">
+                    <button id="eject-rom-cart" disabled>Eject</button>
+                    <div id="rom-cart-info" class="media-info">No ROM.</div>
+                </div>
+                <div class="media-group media-group-right">
+                    <div id="rom-io2-info" class="media-info">No ROM.</div>
+                    <button id="load-rom-io2" title="I/O ROM 2 at 0x14000">Load IO2 ROM</button>
+                    <input id="file-rom-io2" type="file" accept=".rom,.bin" style="display: none">
+                    <button id="eject-rom-io2" disabled>Eject</button>
+                </div>
+            </div>
+        </section>
+        <section id="panel-hardware" class="tab-panel colbox" aria-labelledby="tab-hardware">
+            <div class="rowbox media-row">
+                <div class="media-group">
+                    <label class="switch" title="US NTSC machine timing and jsu.rom by default"><input id="ntsc" type="checkbox">NTSC</label>
+                </div>
+                <div class="media-group media-group-right">
+                    <label class="switch" title="Original AY-3-8910 QSound card"><input id="qsound" type="checkbox" checked disabled>QSound</label>
+                    <label class="switch" title="YM2203-compatible QSound2 card"><input id="qsound2" type="checkbox" disabled>QSound2</label>
+                    <label class="switch" title="Spread QSound PSG channels across the stereo image"><input id="stereo" type="checkbox">Stereo</label>
+                    <label class="switch" title="Silence the beeper and sound card output; emulation speed is unchanged"><input id="muted" type="checkbox">Muted</label>
+                </div>
+            </div>
+            <div class="rowbox media-row">
+                <div class="media-group">
+                    <label class="switch" title="Add 256 KiB of RAM"><input id="ram-256" type="checkbox">+256K</label>
+                    <label class="switch" title="Add 512 KiB of RAM"><input id="ram-512" type="checkbox">+512K</label>
+                </div>
+                <div class="media-group media-group-right">
+                    <label class="switch" title="QIMSI PS/2 mouse; click the screen to capture it, Esc releases it"><input id="mouse-qimsi" type="checkbox">QIMSI Mouse</label>
+                    <label class="switch" title="Host pointer in a loaded Pointer Environment, with no capture"><input id="mouse-pe" type="checkbox">PE Mouse</label>
+                    <label class="switch" title="Show the host cursor over the screen while PE Mouse is on; when off, only the QL pointer is visible there"><input id="mouse-cursor" type="checkbox">Cursor</label>
+                </div>
+            </div>
+        </section>
+        <section id="panel-display" class="tab-panel colbox" aria-labelledby="tab-display">
+            <div class="rowbox">
+                <label class="switch" title="CRT display filter"><input id="crt" type="checkbox" checked>CRT</label>
+                <label class="switch" title="Fill the available display area"><input id="stretch" type="checkbox">Stretch</label>
+                <label class="switch" title="Onscreen keyboard"><input id="keyboard-toggle" type="checkbox">Keyboard</label>
+                <button id="fullscreen-toggle" title="Fullscreen (F11)">Fullscreen</button>
+            </div>
+        </section>
     </div>
 </header>
 <main id="workspace">

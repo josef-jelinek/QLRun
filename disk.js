@@ -41,33 +41,54 @@ const fileIdOffset = 0x3A;
 const fileBackupDate = 0x3C;
 const directoryType = 0xFF;
 const mediumNameSize = 10;
-const updateCountOffset = 16;
-const winMediumNameOffset = 10;
+const flpUpdateCountOffset = 0x10;
+const winNameLengthOffset = 0x04;
+const winNameOffset = 0x06;
+const winNameSize = 20;
+const winUpdateCheckOffset = 0x1C;
+// SuperBASIC DIR prints the medium sector counts as signed words.
+const qdosMaxSectorCount = 0x7FFF;
 const winSectorsPerClusterOffset = 0x22;
 const winClusterCountOffset = 0x2A;
 const winFreeClusterCountOffset = 0x2C;
 const winMapSectorCountOffset = 0x2E;
+const winMapCountOffset = 0x30;
 const winFirstFreeClusterOffset = 0x32;
 const winRootClusterOffset = 0x34;
 const winRootLengthOffset = 0x36;
 const winFatOffset = 0x40;
+const winMinSectorsPerCluster = 4;
+const winSectorsPerClusterStep = 0x10000;
+/** Sectors of the largest new hard disk whose counts QDOS reports exactly. */
+export const maxReportedSectors = qdosMaxSectorCount - qdosMaxSectorCount % winMinSectorsPerCluster;
 const flpHeaderIdOffset = 2;
 const flpMediumNameOffset = 4;
+const flpRandomOffset = 0x0E;
 const flpFreeSectorsOffset = 20;
+const flpGoodSectorsOffset = 0x16;
 const flpTotalSectorsOffset = 24;
 const flpSectorsPerTrackOffset = 26;
 const flpSectorsPerClusterOffset = 28;
+const flpCylindersOffset = 0x1E;
 const flpSectorsPerBlockOffset = 32;
 const flpRootDirSectorsOffset = 34;
 const flpRootDirBytesOffset = 36;
 const flpInterleaveOffset = 38;
 const flpTrackMapOffset = 40;
 const flpTrackMapSize = 36;
+const flpSpareOffset = 0x4C;
 const flpFileMapOffset = 96;
 const flpFileMapSlotSize = 3;
 const flpFileMapFree = 0xFD;
+const flpFileMapFreeSlot = 0xFDFFFF;
 const flpFileMapBlockBits = 12;
 const flpFileMapBlockMask = (1 << flpFileMapBlockBits) - 1;
+const flpFileMapFirstSpecialId = 0xF80;
+const flpSubdirectoryIdBit = 0x800;
+const flpMapFileSlot = 0xF80000;
+const flpBlankCylinders = 80;
+const flpBlankSides = 2;
+const flpBlankSectorsPerGroup = 3;
 const qerrBf = -5;
 const qerrNo = -6;
 const qerrNf = -7;
@@ -122,8 +143,8 @@ let opcodeHooksReady = false;
  */
 
 /**
- * One mounted drive. `floppy` selects the read-only QL5A/QL5B layout over the
- * writable QLWA one; the geometry fields of the other layout stay zero.
+ * One mounted drive. `floppy` selects the QL5A/QL5B file map over the QLWA
+ * cluster chain. Both layouts accept guest writes; unused geometry stays zero.
  *
  * @typedef {{
  *   floppy: boolean,
@@ -256,6 +277,112 @@ export function prepareReset(disks, mem) {
             cpu.writePointerWord(mem, state.trampolineAddr + i * 2, state.opcodeBase + i);
         }
     }
+}
+
+/**
+ * Mount an empty, formatted QL5A (720 KiB DD) or QL5B (1440 KiB HD) floppy,
+ * laid out as SMSQ/E's formatter does: the map in the first groups, the root
+ * directory in the next group, and every other group free.
+ *
+ * @param {State} state
+ * @param {boolean} highDensity
+ * @param {string} name
+ * @returns {string | null}
+ */
+export function insertBlankFloppy(state, highDensity, name) {
+    let sectorsPerTrack = 9;
+    let formatId = 0x3541;
+    let skew = 5;
+    let mapGroups = 1;
+    let trackMap = defaultDdTrackMap;
+    if (highDensity) {
+        sectorsPerTrack = 18;
+        formatId = 0x3542;
+        skew = 2;
+        mapGroups = 2;
+        trackMap = defaultHdTrackMap;
+    }
+    const sectorsPerCylinder = sectorsPerTrack * flpBlankSides;
+    const totalSectors = sectorsPerCylinder * flpBlankCylinders;
+    const groups = totalSectors / flpBlankSectorsPerGroup;
+    const image = new Uint8Array(totalSectors * sectorSize);
+    image.set([0x51, 0x4C]);
+    cpu.writePointerWord(image, flpHeaderIdOffset, formatId);
+    image.fill(0x20, flpMediumNameOffset, flpMediumNameOffset + mediumNameSize);
+    cpu.writePointerWord(image, flpRandomOffset, Math.floor(Math.random() * 0x10000));
+    cpu.writePointerWord(image, flpFreeSectorsOffset, totalSectors - (mapGroups + 1) * flpBlankSectorsPerGroup);
+    cpu.writePointerWord(image, flpGoodSectorsOffset, totalSectors);
+    cpu.writePointerWord(image, flpTotalSectorsOffset, totalSectors);
+    cpu.writePointerWord(image, flpSectorsPerTrackOffset, sectorsPerTrack);
+    cpu.writePointerWord(image, flpSectorsPerClusterOffset, sectorsPerCylinder);
+    cpu.writePointerWord(image, flpCylindersOffset, flpBlankCylinders);
+    cpu.writePointerWord(image, flpSectorsPerBlockOffset, flpBlankSectorsPerGroup);
+    cpu.writePointerWord(image, flpRootDirBytesOffset, fileHeaderSize);
+    cpu.writePointerWord(image, flpInterleaveOffset, skew);
+    image.set(trackMap, flpTrackMapOffset);
+    image.fill(0xFF, flpSpareOffset, flpFileMapOffset);
+    const error = insert(state, image, name);
+    if (error !== null) {
+        return error;
+    }
+    // The map sectors are scattered by the track map, so write them logically.
+    const mapEnd = mapGroups * flpBlankSectorsPerGroup * sectorSize;
+    for (let offset = flpFileMapOffset; offset < mapEnd; offset += 1) {
+        state.image[mapByteOffset(state, offset)] = 0xFF;
+    }
+    for (let slot = 0; slot < groups; slot += 1) {
+        let value = flpFileMapFreeSlot;
+        if (slot < mapGroups) {
+            value = flpMapFileSlot | slot;
+        } else if (slot === mapGroups) {
+            value = 0;
+        }
+        writeMapSlot(state, slot, value);
+    }
+    readGeometry(state);
+    state.modified = false;
+    return null;
+}
+
+/**
+ * Mount an empty, formatted QLWA hard disk of `totalSectors` 512-byte sectors,
+ * laid out as SMSQ/E's formatter does: the map in the first groups, the root
+ * directory in the next group, and every other group on one free chain. A
+ * container has no physical geometry, so interleave, track and cylinder fields
+ * stay zero.
+ *
+ * @param {State} state
+ * @param {number} totalSectors
+ * @param {string} name
+ * @returns {string | null}
+ */
+export function insertBlankHardDisk(state, totalSectors, name) {
+    const sectorsPerCluster = Math.max(Math.floor(totalSectors / winSectorsPerClusterStep) + 1, winMinSectorsPerCluster);
+    const clusters = Math.floor(totalSectors / sectorsPerCluster);
+    const mapSectors = Math.floor((winFatOffset - 1 + clusters * 2) / sectorSize) + 1;
+    const mapClusters = Math.floor((mapSectors - 1) / sectorsPerCluster) + 1;
+    const root = mapClusters;
+    const firstFree = root + 1;
+    const image = new Uint8Array(totalSectors * sectorSize);
+    image.set([0x51, 0x4C, 0x57, 0x41]);
+    cpu.writePointerWord(image, winNameLengthOffset, 0);
+    image.fill(0x20, winNameOffset, winNameOffset + winNameSize);
+    cpu.writePointerWord(image, winUpdateCheckOffset, Math.floor(Math.random() * 0x10000));
+    cpu.writePointerWord(image, winSectorsPerClusterOffset, sectorsPerCluster);
+    cpu.writePointerWord(image, winClusterCountOffset, clusters);
+    cpu.writePointerWord(image, winFreeClusterCountOffset, clusters - firstFree);
+    cpu.writePointerWord(image, winMapSectorCountOffset, mapSectors);
+    cpu.writePointerWord(image, winMapCountOffset, 1);
+    cpu.writePointerWord(image, winFirstFreeClusterOffset, firstFree);
+    cpu.writePointerWord(image, winRootClusterOffset, root);
+    cpu.writePointerLong(image, winRootLengthOffset, fileHeaderSize);
+    for (let cluster = 0; cluster + 1 < mapClusters; cluster += 1) {
+        cpu.writePointerWord(image, winFatOffset + cluster * 2, cluster + 1);
+    }
+    for (let cluster = firstFree; cluster + 1 < clusters; cluster += 1) {
+        cpu.writePointerWord(image, winFatOffset + cluster * 2, cluster + 1);
+    }
+    return insert(state, image, name);
 }
 
 /**
@@ -489,9 +616,6 @@ function openChannel(state, c, bus) {
     if (name === null || (key !== openDelete && (key < openOld || key > openDirectory))) {
         return qerrBp;
     }
-    if (state.floppy && (key === openDelete || key === openNew || key === openOverwrite)) {
-        return qerrRo;
-    }
     let file = findFile(state, name, key === openDirectory);
     if (key === openDelete) {
         return deleteFile(state, file);
@@ -595,7 +719,7 @@ function driverIo(state, c, bus) {
         transferRead(state, channel, c, bus, false, c.reg[2] & 0xFFFF);
         break;
     case 5:
-        if (!channelWritable(state, channel)) {
+        if (!channelWritable(channel)) {
             c.reg[0] = qerrRo;
         } else {
             c.reg[0] = writeFileByte(state, channel, c.reg[1] & 0xFF);
@@ -634,7 +758,7 @@ function driverIo(state, c, bus) {
         transferWrite(state, channel, c, bus, Math.max(c.reg[2], 0), false);
         break;
     case 0x4B:
-        if (!channelWritable(state, channel)) {
+        if (!channelWritable(channel)) {
             c.reg[0] = qerrRo;
         } else {
             c.reg[0] = truncateFile(state, channel.file, channel.position);
@@ -750,12 +874,10 @@ function readGeometry(state) {
     }
     const slotCount = mapSlotCount(state);
     for (let slotIndex = 0; slotIndex < slotCount; slotIndex += 1) {
-        const offset = flpFileMapOffset + slotIndex * flpFileMapSlotSize;
-        const high = mapByte(state, offset);
-        if (high === flpFileMapFree) {
+        const slot = readMapSlot(state, slotIndex);
+        if (slot < 0 || (slot >>> 16) === flpFileMapFree) {
             continue;
         }
-        const slot = (high << 16) | (mapByte(state, offset + 1) << 8) | mapByte(state, offset + 2);
         if (!state.fileMap.has(slot)) {
             state.fileMap.set(slot, slotIndex * state.sectorsPerBlock);
         }
@@ -823,15 +945,6 @@ function logicalSectorOffset(state, sector) {
         return -1;
     }
     return offset;
-}
-
-/** @param {State} state @param {number} offset @returns {number} */
-function mapByte(state, offset) {
-    const base = logicalSectorOffset(state, Math.floor(offset / sectorSize));
-    if (base < 0) {
-        return 0;
-    }
-    return state.image[base + offset % sectorSize];
 }
 
 /** @param {State} state @returns {number} */
@@ -1005,11 +1118,7 @@ function findInDirectory(state, directory, name, directoriesOnly, seen) {
         }
         const entryName = readHeaderName(state.image, header).toUpperCase();
         const isDirectory = state.image[header + qdosFileType] === directoryType;
-        let id = entry;
-        if (!state.floppy) {
-            id = cpu.readPointerWord(state.image, header + fileIdOffset);
-        }
-        const file = {parent: directory.file, file: id, entry};
+        const file = {parent: directory.file, file: directoryEntryId(state, directory, entry, header), entry};
         if (entryName === name && (!directoriesOnly || isDirectory)) {
             return file;
         }
@@ -1025,6 +1134,9 @@ function findInDirectory(state, directory, name, directoriesOnly, seen) {
 
 /** @param {State} state @param {string} name @param {number} now @returns {FileId | null} */
 function createFile(state, name, now) {
+    if (state.floppy) {
+        return createFloppyFile(state, name, now);
+    }
     const parent = findParentDirectory(state, name);
     const allocated = allocateCluster(state);
     if (allocated < 0) {
@@ -1095,7 +1207,7 @@ function findParentDirectory(state, name) {
             const dirName = readHeaderName(state.image, header);
             const file = {
                 parent: directory.file,
-                file: cpu.readPointerWord(state.image, header + fileIdOffset),
+                file: directoryEntryId(state, directory, entry, header),
                 entry,
             };
             stack.push(file);
@@ -1106,6 +1218,28 @@ function findParentDirectory(state, name) {
         }
     }
     return best;
+}
+
+/**
+ * File id of directory entry `entry`, whose header is at `header`. QLWA stores
+ * the first cluster. QL5A/QL5B root entries use their position; entries in
+ * subdirectories store the map id plus one, as SMSQ/E does.
+ *
+ * @param {State} state
+ * @param {FileId} directory
+ * @param {number} entry
+ * @param {number} header
+ * @returns {number}
+ */
+function directoryEntryId(state, directory, entry, header) {
+    const stored = cpu.readPointerWord(state.image, header + fileIdOffset);
+    if (!state.floppy) {
+        return stored;
+    }
+    if (directory.entry < 0) {
+        return entry;
+    }
+    return stored - 1;
 }
 
 /** @param {State} state @returns {number} */
@@ -1155,6 +1289,19 @@ function deleteFile(state, file) {
     if (header < 0 || state.image[header + qdosFileType] === directoryType) {
         return qerrIu;
     }
+    for (const channel of state.channels.values()) {
+        if (channel.generation === state.generation && channel.file.parent === file.parent && channel.file.entry === file.entry) {
+            return qerrIu;
+        }
+    }
+    if (state.floppy) {
+        if (!releaseFloppyBlocks(state, file.file, 0)) {
+            return qerrBm;
+        }
+        state.image.fill(0, header, header + fileHeaderSize);
+        markModified(state);
+        return 0;
+    }
     releaseChain(state, file.file);
     state.image.fill(0, header, header + fileHeaderSize);
     markModified(state);
@@ -1163,6 +1310,9 @@ function deleteFile(state, file) {
 
 /** @param {State} state @param {FileId} file @param {number} byteLength @returns {boolean} */
 function ensureFileCapacity(state, file, byteLength) {
+    if (state.floppy) {
+        return ensureFloppyCapacity(state, file, byteLength);
+    }
     const neededClusters = Math.max(Math.ceil(byteLength / (state.sectorsPerCluster * sectorSize)), 1);
     let cluster = file.file;
     const seen = new Set();
@@ -1193,7 +1343,13 @@ function ensureFileCapacity(state, file, byteLength) {
 /** @param {State} state @param {FileId} file @param {number} length */
 function setStoredLength(state, file, length) {
     if (file.entry < 0) {
-        cpu.writePointerLong(state.image, winRootLengthOffset, length);
+        if (state.floppy) {
+            cpu.writePointerWord(state.image, flpRootDirSectorsOffset, Math.floor(length / sectorSize));
+            cpu.writePointerWord(state.image, flpRootDirBytesOffset, length % sectorSize);
+            state.rootLength = length;
+        } else {
+            cpu.writePointerLong(state.image, winRootLengthOffset, length);
+        }
     } else {
         const header = fileHeader(state, file);
         if (header >= 0) {
@@ -1205,6 +1361,19 @@ function setStoredLength(state, file, length) {
 
 /** @param {State} state @param {FileId} file @param {number} position @returns {number} */
 function truncateFile(state, file, position) {
+    const length = Math.max(position, fileHeaderSize);
+    if (state.floppy) {
+        const blockBytes = state.sectorsPerBlock * sectorSize;
+        let tailBlock = Math.floor(length / blockBytes);
+        if (length % blockBytes !== 0) {
+            tailBlock += 1;
+        }
+        if (!releaseFloppyBlocks(state, file.file, tailBlock)) {
+            return qerrBm;
+        }
+        setStoredLength(state, file, length);
+        return 0;
+    }
     const keepClusters = Math.max(Math.ceil(position / (state.sectorsPerCluster * sectorSize)), 1);
     let cluster = file.file;
     for (let i = 1; i < keepClusters; i += 1) {
@@ -1220,8 +1389,296 @@ function truncateFile(state, file, position) {
             releaseChain(state, tail);
         }
     }
-    setStoredLength(state, file, Math.max(position, fileHeaderSize));
+    setStoredLength(state, file, length);
     return 0;
+}
+
+/**
+ * Create a QL5A/QL5B file. A root entry's position is its implicit id, as in
+ * SMSQ/E; elsewhere the id is `0x800` plus the group holding block 0, stored
+ * plus one at `hdr_flid`, so it cannot clash with ids in other directories.
+ * Block 0 and any directory growth are claimed before the new length and
+ * header are published, and released again when either cannot be.
+ *
+ * @param {State} state
+ * @param {string} name
+ * @param {number} now
+ * @returns {FileId | null}
+ */
+function createFloppyFile(state, name, now) {
+    const blockBytes = state.sectorsPerBlock * sectorSize;
+    if (blockBytes <= 0) {
+        return null;
+    }
+    const parent = findParentDirectory(state, name);
+    const oldLength = storedFileLength(state, parent);
+    const entries = Math.floor(oldLength / fileHeaderSize);
+    let entry = 1;
+    for (; entry < entries; entry += 1) {
+        const existing = directoryHeader(state, parent, entry);
+        if (existing >= 0 && cpu.readPointerLong(state.image, existing) === 0) {
+            break;
+        }
+    }
+    let fileId = entry;
+    let slot = -1;
+    if (parent.entry >= 0) {
+        // `sectorsPerCluster` holds sectors per cylinder; cylinder 0 keeps the map.
+        slot = findFreeFloppySlot(state, Math.floor(state.sectorsPerCluster / state.sectorsPerBlock));
+        if (slot < 0) {
+            return null;
+        }
+        fileId = flpSubdirectoryIdBit | slot;
+    } else if (entry >= flpSubdirectoryIdBit) {
+        return null;
+    }
+    // Slots left for an id whose entry was cleared elsewhere would shadow its blocks.
+    if (!floppyFileIdValid(fileId) || !releaseFloppyBlocks(state, fileId, 0)) {
+        return null;
+    }
+    let claimed = false;
+    if (slot >= 0) {
+        claimed = claimFloppySlot(state, slot, fileId, 0);
+    } else {
+        claimed = allocateFloppyBlock(state, fileId, 0);
+    }
+    if (!claimed) {
+        return null;
+    }
+    const created = {parent: parent.file, file: fileId, entry};
+    const newLength = Math.max(oldLength, (entry + 1) * fileHeaderSize);
+    let header = -1;
+    let data = -1;
+    if (ensureFloppyCapacity(state, parent, newLength)) {
+        header = directoryHeader(state, parent, entry);
+        data = fileSectorOffset(state, created, 0, null);
+    }
+    if (header < 0 || data < 0) {
+        if (newLength > oldLength) {
+            releaseFloppyBlocks(state, parent.file, Math.ceil(oldLength / blockBytes));
+        }
+        releaseFloppyBlocks(state, fileId, 0);
+        return null;
+    }
+    if (newLength > oldLength) {
+        setStoredLength(state, parent, newLength);
+    }
+    state.image.fill(0, header, header + fileHeaderSize);
+    state.image.fill(0, data, data + fileHeaderSize);
+    cpu.writePointerLong(state.image, header, fileHeaderSize);
+    writeHeaderName(state.image, header, name);
+    cpu.writePointerLong(state.image, header + qdosFileUpdate, now);
+    if (parent.entry >= 0) {
+        cpu.writePointerWord(state.image, header + fileIdOffset, fileId + 1);
+    }
+    cpu.writePointerLong(state.image, header + fileBackupDate, now);
+    markModified(state);
+    return created;
+}
+
+/**
+ * Map every block that a `byteLength`-byte file needs. Blocks below the stored
+ * length are already mapped, so only its last block and new ones are checked.
+ *
+ * @param {State} state
+ * @param {FileId} file
+ * @param {number} byteLength
+ * @returns {boolean}
+ */
+function ensureFloppyCapacity(state, file, byteLength) {
+    const blockBytes = state.sectorsPerBlock * sectorSize;
+    if (blockBytes <= 0 || !floppyFileIdValid(file.file)) {
+        return false;
+    }
+    const needed = Math.max(Math.ceil(byteLength / blockBytes), 1);
+    for (let block = Math.floor(storedFileLength(state, file) / blockBytes); block < needed; block += 1) {
+        if (state.fileMap.has((file.file << flpFileMapBlockBits) | block)) {
+            continue;
+        }
+        if (!allocateFloppyBlock(state, file.file, block)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Map `block` of `fileId` to a free group. Like SMSQ/E, the search starts after
+ * the file's previous block, or after cylinder 0 for block 0.
+ *
+ * @param {State} state
+ * @param {number} fileId
+ * @param {number} block
+ * @returns {boolean}
+ */
+function allocateFloppyBlock(state, fileId, block) {
+    // `sectorsPerCluster` holds sectors per cylinder; cylinder 0 keeps the map.
+    let start = Math.floor(state.sectorsPerCluster / state.sectorsPerBlock);
+    if (block > 0) {
+        const previous = state.fileMap.get(((fileId << flpFileMapBlockBits) | block) - 1);
+        if (previous !== undefined) {
+            start = previous / state.sectorsPerBlock + 1;
+        }
+    }
+    const slot = findFreeFloppySlot(state, start);
+    if (slot < 0) {
+        return false;
+    }
+    return claimFloppySlot(state, slot, fileId, block);
+}
+
+/**
+ * Free every map slot of `fileId` from `firstBlock` on, as `$FDFFFF`.
+ *
+ * @param {State} state
+ * @param {number} fileId
+ * @param {number} firstBlock
+ * @returns {boolean}
+ */
+function releaseFloppyBlocks(state, fileId, firstBlock) {
+    const released = [];
+    const slotCount = mapSlotCount(state);
+    for (let slotIndex = 0; slotIndex < slotCount; slotIndex += 1) {
+        const slot = readMapSlot(state, slotIndex);
+        if (slot < 0 || (slot >>> 16) === flpFileMapFree) {
+            continue;
+        }
+        if ((slot >>> flpFileMapBlockBits) === fileId && (slot & flpFileMapBlockMask) >= firstBlock) {
+            released.push({slotIndex, slot});
+        }
+    }
+    if (released.length === 0) {
+        return true;
+    }
+    const free = cpu.readPointerWord(state.image, flpFreeSectorsOffset) + released.length * state.sectorsPerBlock;
+    if (free > 0xFFFF) {
+        return false;
+    }
+    for (const item of released) {
+        writeMapSlot(state, item.slotIndex, flpFileMapFreeSlot);
+        state.fileMap.delete(item.slot);
+    }
+    cpu.writePointerWord(state.image, flpFreeSectorsOffset, free);
+    markModified(state);
+    return true;
+}
+
+/**
+ * First free map slot from `start` on, wrapping round to slot 0, or -1.
+ *
+ * @param {State} state
+ * @param {number} start
+ * @returns {number}
+ */
+function findFreeFloppySlot(state, start) {
+    const slotCount = mapSlotCount(state);
+    for (let i = 0; i < slotCount; i += 1) {
+        const slotIndex = (start + i) % slotCount;
+        const offset = mapByteOffset(state, flpFileMapOffset + slotIndex * flpFileMapSlotSize);
+        if (offset >= 0 && state.image[offset] === flpFileMapFree) {
+            return slotIndex;
+        }
+    }
+    return -1;
+}
+
+/**
+ * Give free map slot `slotIndex` to `block` of `fileId`. A block that is
+ * already mapped keeps its slot: remounting keeps the first slot for a block,
+ * so a second one would change what the file reads after a download.
+ *
+ * @param {State} state
+ * @param {number} slotIndex
+ * @param {number} fileId
+ * @param {number} block
+ * @returns {boolean}
+ */
+function claimFloppySlot(state, slotIndex, fileId, block) {
+    const value = (fileId << flpFileMapBlockBits) | block;
+    if (state.fileMap.has(value)) {
+        return true;
+    }
+    const free = cpu.readPointerWord(state.image, flpFreeSectorsOffset);
+    if (!floppyFileIdValid(fileId) || block > flpFileMapBlockMask || free < state.sectorsPerBlock) {
+        return false;
+    }
+    const current = readMapSlot(state, slotIndex);
+    if (current < 0 || (current >>> 16) !== flpFileMapFree || !writeMapSlot(state, slotIndex, value)) {
+        return false;
+    }
+    state.fileMap.set(value, slotIndex * state.sectorsPerBlock);
+    cpu.writePointerWord(state.image, flpFreeSectorsOffset, free - state.sectorsPerBlock);
+    markModified(state);
+    return true;
+}
+
+/**
+ * The 24-bit map slot, or -1 when one of its bytes lies outside the image.
+ *
+ * @param {State} state
+ * @param {number} slotIndex
+ * @returns {number}
+ */
+function readMapSlot(state, slotIndex) {
+    let value = 0;
+    for (let i = 0; i < flpFileMapSlotSize; i += 1) {
+        const offset = mapByteOffset(state, flpFileMapOffset + slotIndex * flpFileMapSlotSize + i);
+        if (offset < 0) {
+            return -1;
+        }
+        value = (value << 8) | state.image[offset];
+    }
+    return value;
+}
+
+/**
+ * Write all three bytes of a map slot, which may span two sectors, or none
+ * when one of them lies outside the image.
+ *
+ * @param {State} state
+ * @param {number} slotIndex
+ * @param {number} value
+ * @returns {boolean}
+ */
+function writeMapSlot(state, slotIndex, value) {
+    const offsets = [];
+    for (let i = 0; i < flpFileMapSlotSize; i += 1) {
+        const offset = mapByteOffset(state, flpFileMapOffset + slotIndex * flpFileMapSlotSize + i);
+        if (offset < 0) {
+            return false;
+        }
+        offsets.push(offset);
+    }
+    for (let i = 0; i < offsets.length; i += 1) {
+        state.image[offsets[i]] = (value >> ((flpFileMapSlotSize - 1 - i) * 8)) & 0xFF;
+    }
+    return true;
+}
+
+/**
+ * Image offset of file-map byte `offset`; the map fills logical sectors from 0.
+ *
+ * @param {State} state
+ * @param {number} offset
+ * @returns {number}
+ */
+function mapByteOffset(state, offset) {
+    const base = logicalSectorOffset(state, Math.floor(offset / sectorSize));
+    if (base < 0) {
+        return -1;
+    }
+    return base + offset % sectorSize;
+}
+
+/**
+ * Report whether `fileId` can own map slots. From `0xF80` a slot's first byte
+ * would read as the map (`$F8`), free (`$FD`), bad (`$FE`) or `$FF` marker.
+ *
+ * @param {number} fileId
+ * @returns {boolean}
+ */
+function floppyFileIdValid(fileId) {
+    return fileId >= 0 && fileId < flpFileMapFirstSpecialId;
 }
 
 /** @param {State} state @param {FileId} file @param {number} position @returns {number} */
@@ -1341,7 +1798,7 @@ function transferRead(state, channel, c, bus, line, requested) {
 
 /** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus @param {number} requested @param {boolean} wordCount */
 function transferWrite(state, channel, c, bus, requested, wordCount) {
-    if (!channelWritable(state, channel)) {
+    if (!channelWritable(channel)) {
         c.reg[0] = qerrRo;
         return;
     }
@@ -1358,9 +1815,9 @@ function transferWrite(state, channel, c, bus, requested, wordCount) {
     c.reg[9] = address + available;
 }
 
-/** @param {State} state @param {Channel} channel @returns {boolean} */
-function channelWritable(state, channel) {
-    return !state.floppy && !channel.isDirectory && channel.key !== openShare;
+/** @param {Channel} channel @returns {boolean} */
+function channelWritable(channel) {
+    return !channel.isDirectory && channel.key !== openShare;
 }
 
 /** @param {State} state @returns {number} */
@@ -1378,11 +1835,13 @@ function mediumInfo(state, c, bus) {
         c.reg[0] = qerrBp;
         return;
     }
-    let nameOffset = winMediumNameOffset;
+    let nameOffset = winNameOffset;
     if (state.floppy) {
         nameOffset = flpMediumNameOffset;
     }
-    c.reg[1] = ((freeSectors(state) & 0xFFFF) << 16) | (state.totalSectors & 0xFFFF);
+    const free = Math.min(freeSectors(state), qdosMaxSectorCount);
+    const total = Math.min(state.totalSectors, qdosMaxSectorCount);
+    c.reg[1] = (free << 16) | total;
     bus.beforeMemoryWrite(address, mediumNameSize);
     bus.mem.set(state.image.subarray(nameOffset, nameOffset + mediumNameSize), address);
     c.reg[9] = address + mediumNameSize;
@@ -1412,7 +1871,7 @@ function readFileHeader(state, channel, c, bus) {
 
 /** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus */
 function setFileHeader(state, channel, c, bus) {
-    if (!channelWritable(state, channel)) {
+    if (!channelWritable(channel)) {
         c.reg[0] = qerrRo;
         return;
     }
@@ -1442,7 +1901,7 @@ function fileDate(state, channel, c, bus) {
         c.reg[1] = cpu.readPointerLong(state.image, header + offset) | 0;
         return;
     }
-    if (!channelWritable(state, channel)) {
+    if (!channelWritable(channel)) {
         c.reg[0] = qerrRo;
         return;
     }
@@ -1467,7 +1926,7 @@ function fileVersionOp(state, channel, c) {
         c.reg[1] = version;
         return;
     }
-    if (!channelWritable(state, channel)) {
+    if (!channelWritable(channel)) {
         c.reg[0] = qerrRo;
         return;
     }
@@ -1514,7 +1973,11 @@ function extendedInfo(state, c, bus) {
 /** @param {State} state */
 function markModified(state) {
     state.modified = true;
-    cpu.writePointerLong(state.image, updateCountOffset, (cpu.readPointerLong(state.image, updateCountOffset) + 1) >>> 0);
+    let offset = winUpdateCheckOffset;
+    if (state.floppy) {
+        offset = flpUpdateCountOffset;
+    }
+    cpu.writePointerLong(state.image, offset, (cpu.readPointerLong(state.image, offset) + 1) >>> 0);
 }
 
 /** @param {Uint8Array} bytes @param {number} offset @returns {string | null} */

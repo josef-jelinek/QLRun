@@ -6,7 +6,7 @@ QLRun is a browser emulator for the Sinclair QL. It loads a JS or JSU
 system ROM from `roms/` when those files are available, paints the ZX8301
 display, talks to the ZX8302 IPC for keyboard, beeper, and Microdrive, and
 emulates the original AY-3-8910 QSound card and the YM2203-compatible QSound2.
-It also mounts writable QLWA `.win` hard disk images as `WIN1_` and read-only
+It also mounts writable QLWA `.win` hard disk images as `WIN1_` and writable
 QL5A/QL5B `.img` floppy images as `FLP1_`, and can connect the host mouse as
 the PS/2 mouse of a QIMSI ROM-port interface.
 
@@ -57,10 +57,12 @@ defaults:
 | `crt` | `1` |
 | `qsound` | `1` |
 | `stereo` | `0` |
+| `muted` | `0` |
 | `ntsc` | `0` |
 | `ram` | `128` |
 | `mouse` | `0` |
 | `mspeed` | `1` |
+| `mcursor` | `0` |
 | `turbo` | `1` |
 | `stretch` | `0` |
 
@@ -68,8 +70,9 @@ For example, `?crt=0&keyboard=1&ntsc=1&ram=640&rom=jsu` starts with the CRT
 filter off, the onscreen keyboard shown, the US machine, and 640 KiB of RAM.
 Fullscreen is not exposed as a URL parameter. Changing a listed control
 updates its parameter without reloading the page or adding a browser-history
-entry. Selecting a local ROM removes `rom`, and selecting a local Microdrive
-image removes `url`; other parameters and the URL fragment are preserved.
+entry; changing it back to the default in the table removes the parameter.
+Selecting a local ROM removes `rom`, and selecting a local Microdrive image
+removes `url`; other parameters and the URL fragment are preserved.
 
 ## Emulator page
 
@@ -88,21 +91,71 @@ selects another.
 
 ### Command bar
 
+The top row holds the Media, ROMs, Hardware, and Display tab switches, Paused,
+Reset, and the status text: messages on the left, and the frame rate with the
+last second's audio cut and gap on the right. The section under it shows the
+selected tab and keeps the height of the tallest one, so switching tabs never
+resizes the screen. Media is selected when the page opens; the tab is not a
+URL parameter.
+
+- Paused - stop the emulated machine; clearing the switch continues from the
+  same point. Sound falls silent, and the status reads 0 fps with no audio gap.
+  Reset and media changes still apply while paused. It has no URL parameter
+  and is off when the page opens.
 - Reset - restart the 68008 from the ROM reset vector. A Microdrive cartridge
   is kept.
-- Keyboard - show or hide the QL keyboard under the screen.
-- CRT - fit the display continuously and add rounded pixels and scanlines.
-  When off, the display is square and pixel dimensions are integer-scaled in
-  physical display pixels. Both video modes use the same 512-device-pixel size
-  steps, and the canvas may therefore use fractional CSS dimensions.
-- QSound - connect the original MC6821/AY-3-8910 card and its bundled extension
-  ROM. Changing the switch resets the machine. It is enabled by default.
-- QSound2 - connect the mutually exclusive YM2203-compatible card, using the
-  same extension ROM. Its PSG and three-channel FM synthesizer run from a fixed
-  2 MHz master clock. Changing the switch resets the machine.
-- Stereo - spread either card's PSG channels A, B, and C across the stereo
-  image. Off reproduces the card's summed mono output; QSound2 FM and the IPC
-  beeper stay centred.
+
+#### Media
+
+- MDV1 / MDV2 - each physical Microdrive has independent New, Load, Save,
+  and Eject controls. Load inserts a raw QLAY `.mdv` without resetting the
+  machine. New inserts an unformatted 255-sector cartridge named `mdv1.mdv` or
+  `mdv2.mdv`; format it inside the QL with a command such as
+  `FORMAT mdv2_work`. Guest erase and track writes update the in-memory image.
+  Save downloads its current contents, while Eject discards them. A changed
+  image is labelled `(modified)` until it is downloaded.
+- The drive indicator is outlined while its motor runs, green during reads,
+  white during writes or erasure, and dark while idle. It pulses during reads
+  and writes.
+- Turbo - run the machine at up to eight times normal speed while either
+  Microdrive is transferring a read in the current field. It is enabled by
+  default. Intermediate video fields are assembled but not presented or
+  uploaded, and their audio samples are not collected. A motor left spinning
+  after the last read, writes, and other execution stay at normal speed.
+- FLP1 - Load mounts a QL5A or QL5B floppy `.img` without resetting the
+  machine. New DD and New HD instead insert an empty, formatted 720 KiB
+  QL5A or 1440 KiB QL5B image named `flp1.img`, laid out as SMSQ/E formats
+  them. Guest file creation, deletion, truncation, and writes update its
+  in-memory image. Save downloads the current image and clears the
+  `(modified)` label; Eject discards the mounted copy. The bundled JS and JSU
+  ROMs expose it as `FLP1_`; an unsupported ROM is reported in the media row.
+- WIN1 - Load mounts a QLWA `.win` hard disk image without resetting the
+  machine. New 4MB and New 16MB instead insert an empty, formatted QLWA image
+  named `win1.win`, laid out as SMSQ/E formats it: 4 MiB, or 32764 sectors
+  (just under 16 MiB), the largest disk whose free and total sectors QDOS can
+  report exactly. SuperBASIC `DIR` prints those counts as signed 16-bit
+  numbers, so the drive reports at most 32767 of each; larger images still
+  work, but show the capped counts. Guest file creation, deletion,
+  truncation, and writes update its in-memory image. Save downloads the current image and clears the
+  `(modified)` label; Eject discards the mounted copy. The bundled JS and JSU
+  ROMs expose it as `WIN1_`; an unsupported ROM is reported in the media row.
+
+
+#### ROMs
+
+- Load ROM - replace the 48 KiB system ROM and reset.
+- Load cart ROM / Load IO1 ROM / Load IO2 ROM - load a raw `.rom` or `.bin`
+  image of 1 to 16 KiB into the cartridge window at `0x0C000`, I/O ROM 1 at
+  `0x10000`, or I/O ROM 2 at `0x14000`; the Eject beside each removes that
+  slot's image. Short images are padded with zeroes. Each slot shows its own
+  filename. Loading or ejecting resets the machine, so QDOS detects the
+  change. Images survive resets and system-ROM replacement. While the QIMSI
+  mouse is on, its registers replace cartridge bytes `0x0FED0`–`0x0FEDF`.
+  These slots provide ROM storage only, not any additional peripheral
+  hardware a particular expansion ROM may require.
+
+#### Hardware
+
 - NTSC - US QL clocks (7.552445 MHz CPU from a 15.10489 MHz crystal). The
   312-line monitor field stays near 50.4 Hz; JSU TV mode (F2) sets ZX8301
   bit 6 for the 262-line field at about 60.05 Hz. CRT output then displays its
@@ -118,10 +171,21 @@ selects another.
   the second RAM expansion turns the card off; selecting either card with both
   expansions active turns +256K off, leaving 640 KiB. The selected card wins
   the same conflict during startup when its ROM is available.
-- Mouse - connect the host mouse using the model from the `mouse` parameter,
-  or QIMSI when the page was opened without one. Changing the switch resets
-  the machine.
-  - QIMSI connects the host mouse as the PS/2 mouse of a QIMSI interface,
+- QSound - connect the original MC6821/AY-3-8910 card and its bundled extension
+  ROM. Changing the switch resets the machine. It is enabled by default.
+- QSound2 - connect the mutually exclusive YM2203-compatible card, using the
+  same extension ROM. Its PSG and three-channel FM synthesizer run from a fixed
+  2 MHz master clock. Changing the switch resets the machine.
+- Stereo - spread either card's PSG channels A, B, and C across the stereo
+  image. Off reproduces the card's summed mono output; QSound2 FM and the IPC
+  beeper stay centred.
+- Muted - silence the beeper and either sound card. The machine keeps running
+  at the same speed, and the switch takes effect without a reset.
+- QIMSI Mouse / PE Mouse - connect the host mouse as one of two mutually
+  exclusive models, like the sound cards; turning one on turns the other off.
+  The `mouse` parameter follows the selection, and changing either switch
+  resets the machine.
+  - QIMSI Mouse connects the host mouse as the PS/2 mouse of a QIMSI interface,
     whose registers occupy `0x0FED0`–`0x0FEDF` in the ROM port. While it is
     on, click the screen to capture the mouse; Esc releases it, so press Esc
     again to send it to the QL. Moving across the displayed screen width
@@ -131,50 +195,27 @@ selects another.
     movement. The mouse reports itself as an IntelliMouse with left, right,
     and middle buttons and a wheel. Only the mouse is emulated, not the QIMSI
     ROM, microSD card, keyboard, serial link, or sound.
-  - PE places the Pointer Environment pointer under the host cursor over the
-    screen, as QPC and uQLX do, with no capture. The left and right buttons
-    are HIT and DO. It needs the Pointer Environment (`ptr_gen` with the
-    `PTR2` linkage) loaded in the QL and does nothing until then; `mspeed`
-    does not apply.
+  - PE Mouse places the Pointer Environment pointer under the host cursor
+    over the screen, as QPC and uQLX do, with no capture. The left and right
+    buttons are HIT and DO. It needs the Pointer Environment (`ptr_gen` with
+    the `PTR2` linkage) loaded in the QL and does nothing until then;
+    `mspeed` does not apply.
+- Cursor - show the host cursor over the screen while PE Mouse is on. It is
+  off by default, so only the QL pointer is visible over the screen; the
+  host cursor still shows elsewhere on the page. QIMSI Mouse hides the host
+  cursor through its pointer capture instead.
+
+#### Display
+
+- CRT - fit the display continuously and add rounded pixels and scanlines.
+  When off, the display is square and pixel dimensions are integer-scaled in
+  physical display pixels. Both video modes use the same 512-device-pixel size
+  steps, and the canvas may therefore use fractional CSS dimensions.
 - Stretch - fill the entire available display area, disregarding aspect ratio
   and integer scaling. It applies with CRT enabled or disabled and in both
   fullscreen and windowed modes.
+- Keyboard - show or hide the QL keyboard under the screen.
 - Fullscreen - show only the fullscreen emulator canvas (also F11).
-- MDV1 / MDV2 - each physical Microdrive has independent New, Load, Download,
-  and Eject controls. Load inserts a raw QLAY `.mdv` without resetting the
-  machine. New inserts an unformatted 255-sector cartridge named `mdv1.mdv` or
-  `mdv2.mdv`; format it inside the QL with a command such as
-  `FORMAT mdv2_work`. Guest erase and track writes update the in-memory image.
-  Download saves its current contents, while Eject discards them. A changed
-  image is labelled `(modified)` until it is downloaded.
-- The drive indicator is outlined while its motor runs, green during reads,
-  white during writes or erasure, and dark while idle. It pulses during reads
-  and writes.
-- Turbo - run the machine at up to eight times normal speed while either
-  Microdrive is transferring a read in the current field. It is enabled by
-  default. Intermediate video fields are assembled but not presented or
-  uploaded, and their audio samples are not collected. A motor left spinning
-  after the last read, writes, and other execution stay at normal speed.
-- Load ROM - replace the 48 KiB system ROM and reset.
-- Cart / IO 1 / IO 2 - select one ROM slot; tooltips show its full name and
-  address (`0x0C000`, `0x10000`, or `0x14000`). Load accepts a raw `.rom` or
-  `.bin` image of 1 to 16 KiB; Eject removes that slot's image. Short images
-  are padded with zeroes. Each slot retains its own image and filename.
-  Changing the selection does not reset the machine; loading or ejecting
-  does, so QDOS detects the change. Images survive resets and system-ROM
-  replacement. While the QIMSI mouse is on, its registers replace Cart bytes
-  `0x0FED0`–`0x0FEDF`.
-  These slots provide ROM storage only, not any additional peripheral
-  hardware a particular expansion ROM may require.
-- FLP1 - Load mounts a QL5A or QL5B floppy `.img` without resetting the
-  machine. The image is read-only to the guest. Download saves the mounted
-  copy; Eject discards it. The bundled JS and JSU ROMs expose it as `FLP1_`;
-  an unsupported ROM is reported in the media row.
-- WIN1 - Load mounts a QLWA `.win` hard disk image without resetting the
-  machine. Guest file creation, deletion, truncation, and writes update its
-  in-memory image. Download saves the current image and clears the
-  `(modified)` label; Eject discards the mounted copy. The bundled JS and JSU
-  ROMs expose it as `WIN1_`; an unsupported ROM is reported in the media row.
 
 F1 and F2 reach the emulated machine (monitor/TV select on the JS ROM). F11
 is the page fullscreen shortcut.
@@ -253,7 +294,7 @@ on the QL.
 - `io.js` - HTTP GET and local file reads.
 - `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, QSound/QSound2, QIMSI window, and frame run.
 - `cpu.js` - MC68008 state and execution core.
-- `disk.js` - writable QLWA hard disk and read-only QL5A/QL5B floppy images with their QDOS `WIN1_` and `FLP1_` host drivers.
+- `disk.js` - writable QLWA hard disk and QL5A/QL5B floppy images with their QDOS `WIN1_` and `FLP1_` host drivers.
 - `ay.js` - AY-3-8910/YM2149 PSG synthesis used by the sound cards.
 - `fm.js` - YM2203 FM synthesis used by QSound2.
 - `qimsi.js` - QIMSI mouse registers and the PS/2 mouse behind them.

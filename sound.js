@@ -230,6 +230,28 @@ export function setStereo(sfx, on) {
 }
 
 /**
+ * Silence the output while the queue keeps draining at the audio clock, so
+ * frame pacing stays unchanged.
+ *
+ * @param {Sfx} sfx
+ * @param {boolean} on
+ */
+export function setMuted(sfx, on) {
+    sfx.node.port.postMessage({type: "mute", on});
+}
+
+/**
+ * Tell the audio thread the producer has stopped on purpose, so a queue that
+ * runs dry meanwhile is not reported as a gap.
+ *
+ * @param {Sfx} sfx
+ * @param {boolean} on
+ */
+export function setPaused(sfx, on) {
+    sfx.node.port.postMessage({type: "pause", on});
+}
+
+/**
  * One frame of mixed planes the worklet will interleave, exactly as the
  * machine's `audio` record accumulates it. Aliased rather than copied so the
  * shape stays checked against its producer. This is a type-only import and
