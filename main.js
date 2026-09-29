@@ -40,6 +40,7 @@ const urlParamDefaults = {
     ntsc: "0",
     ram: String(machine.defaultRamKb),
     mouse: "0",
+    mspeed: "1",
     mcursor: "0",
     turbo: "1",
     stretch: "0",
@@ -189,12 +190,19 @@ const ui = {
     qsoundRomState:   /** @type {HTMLElement} */       (document.getElementById("qsound-rom-state")),
     soundDesc:        /** @type {HTMLElement} */       (document.getElementById("sound-desc")),
     soundNote:        /** @type {HTMLElement} */       (document.getElementById("sound-note")),
+    mouseNote:        /** @type {HTMLElement} */       (document.getElementById("mouse-note")),
+    cartNote:         /** @type {HTMLElement} */       (document.getElementById("cart-note")),
     stereo:           /** @type {HTMLInputElement} */  (document.getElementById("stereo")),
     muted:            /** @type {HTMLInputElement} */  (document.getElementById("muted")),
     mouseOff:         /** @type {HTMLInputElement} */  (document.getElementById("mouse-off")),
     mouseQimsi:       /** @type {HTMLInputElement} */  (document.getElementById("mouse-qimsi")),
     mousePe:          /** @type {HTMLInputElement} */  (document.getElementById("mouse-pe")),
     mouseDesc:        /** @type {HTMLElement} */       (document.getElementById("mouse-desc")),
+    mouseSpeeds: [
+        {speed: 1, input: /** @type {HTMLInputElement} */ (document.getElementById("mspeed-1"))},
+        {speed: 2, input: /** @type {HTMLInputElement} */ (document.getElementById("mspeed-2"))},
+        {speed: 4, input: /** @type {HTMLInputElement} */ (document.getElementById("mspeed-4"))},
+    ],
     mouseCursor:      /** @type {HTMLInputElement} */  (document.getElementById("mouse-cursor")),
     turbo:            /** @type {HTMLInputElement} */  (document.getElementById("turbo")),
     stretch:          /** @type {HTMLInputElement} */  (document.getElementById("stretch")),
@@ -208,7 +216,7 @@ const query = new URLSearchParams(window.location.search);
 let configuredRomName = query.get("rom") ?? "";
 const configuredCartName = query.get("cart") ?? "";
 /** PS/2 counts per displayed 512-mode pixel; at 1, QIMSI's PE driver follows the host 1:1. */
-const mouseCountsPerPixel = mouseSpeedFromParam(query.get("mspeed") ?? "");
+let mouseCountsPerPixel = mouseSpeedFromParam(query.get("mspeed") ?? "");
 const configuredMouseModel = mouseFromParam(query.get("mouse") ?? "");
 const keys = {
     rows: new Uint8Array(8),
@@ -299,6 +307,9 @@ applySwitchParam(ui.muted, "muted");
 ui.mouseQimsi.checked = configuredMouseModel === machine.mouseQimsi;
 ui.mousePe.checked = configuredMouseModel === machine.mousePe;
 ui.mouseOff.checked = configuredMouseModel === machine.mouseOff;
+for (const option of ui.mouseSpeeds) {
+    option.input.checked = option.speed === mouseCountsPerPixel;
+}
 applySwitchParam(ui.mouseCursor, "mcursor");
 applySwitchParam(ui.turbo, "turbo");
 applySwitchParam(ui.stretch, "stretch");
@@ -361,6 +372,9 @@ for (const option of ui.ram) {
 ui.mouseOff.onchange = selectMouse;
 ui.mouseQimsi.onchange = selectMouse;
 ui.mousePe.onchange = selectMouse;
+for (const option of ui.mouseSpeeds) {
+    option.input.onchange = selectMouseSpeed;
+}
 
 ui.mouseCursor.onchange = function () {
     updateUrlParam("mcursor", ui.mouseCursor.checked);
@@ -708,6 +722,9 @@ for (let slot = 0; slot < ui.romSlots.length; slot += 1) {
                     state.error = "";
                     state.name = file.name;
                     forgetBundledRom(slot);
+                    if (slot === cartridgeSlot) {
+                        unplugQimsiForCartridge();
+                    }
                     resetSystem();
                 } else {
                     state.error = err;
@@ -717,13 +734,8 @@ for (let slot = 0; slot < ui.romSlots.length; slot += 1) {
         );
     };
     controls.eject.onclick = function () {
-        state.generation += 1;
-        machine.ejectRomCartridge(ql, slot);
-        state.name = "";
-        state.error = "";
-        forgetBundledRom(slot);
+        ejectRomSlot(slot);
         resetSystem();
-        refreshRomSlotStatus(slot);
     };
     refreshRomSlotStatus(slot);
 }
@@ -970,91 +982,6 @@ function isTabKey(e) {
     default:
         return false;
     }
-}
-
-/**
- * Fetch `roms/<name>.rom` into the cartridge slot and restart the QL, for
- * `?cart=` and the Toolkit II button. A later load or Eject there makes the
- * fetch finish silently.
- *
- * @param {string} name
- */
-function loadBundledCartridge(name) {
-    const state = romSlotStates[cartridgeSlot];
-    state.generation += 1;
-    const generation = state.generation;
-    const fileName = name + ".rom";
-    if (!/^[A-Za-z0-9]+$/.test(name)) {
-        state.error = "Invalid cartridge ROM name.";
-        refreshRomSlotStatus(cartridgeSlot);
-        return;
-    }
-    boot.loadRom(
-        "roms/" + fileName,
-        machine.romCartridgeSize,
-        function (err, rom) {
-            if (state.generation !== generation) {
-                return;
-            }
-            let error = err;
-            if (error === null && rom !== null) {
-                error = machine.insertRomCartridge(ql, rom, cartridgeSlot);
-            }
-            if (error === null) {
-                state.error = "";
-                state.name = fileName;
-                state.bundled = name;
-                resetSystem();
-            } else {
-                state.error = error;
-            }
-            refreshRomSlotStatus(cartridgeSlot);
-        },
-    );
-}
-
-/**
- * A local image or Eject replaces a bundled ROM, and for the cartridge slot
- * drops `cart` from the URL.
- *
- * @param {number} slot
- */
-function forgetBundledRom(slot) {
-    romSlotStates[slot].bundled = "";
-    if (slot === cartridgeSlot) {
-        updateUrlParam("cart", null);
-    }
-}
-
-/**
- * Show a ROM slot's state: its name or error, whether it can be ejected, and
- * whether the address map shows it filled.
- *
- * @param {number} slot
- */
-function refreshRomSlotStatus(slot) {
-    const controls = ui.romSlots[slot];
-    const state = romSlotStates[slot];
-    controls.eject.disabled = state.name === "";
-    if (slot === cartridgeSlot) {
-        ui.romToolkit2.disabled = state.bundled === "tk2";
-    }
-    if (state.name === "") {
-        controls.card.classList.add("empty");
-        controls.map.classList.remove("full");
-    } else {
-        controls.card.classList.remove("empty");
-        controls.map.classList.add("full");
-    }
-    if (state.error !== "") {
-        showError(controls.info, state.error);
-        return;
-    }
-    let name = state.name;
-    if (name === "") {
-        name = "No ROM.";
-    }
-    showInfo(controls.info, name);
 }
 
 /**
@@ -1358,14 +1285,12 @@ function mouseFromParam(value) {
  * @returns {number}
  */
 function mouseSpeedFromParam(value) {
-    switch (value) {
-    case "2":
-        return 2;
-    case "4":
-        return 4;
-    default:
-        return 1;
+    for (const option of ui.mouseSpeeds) {
+        if (String(option.speed) === value) {
+            return option.speed;
+        }
     }
+    return 1;
 }
 
 /** Switch PAL/NTSC timing, reset, and follow it with the automatic ROM. */
@@ -1504,8 +1429,140 @@ function selectSoundCard() {
     resetSystem();
 }
 
-/** Connect the chosen mouse model, releasing any capture, and restart. */
+/**
+ * Connect the chosen mouse model and restart. QIMSI plugs into the ROM port,
+ * so choosing it ejects a cartridge ROM, and the note says so.
+ */
 function selectMouse() {
+    ui.mouseNote.hidden = true;
+    ui.cartNote.hidden = true;
+    if (selectedMouseModel() === machine.mouseQimsi && romSlotStates[cartridgeSlot].name !== "") {
+        ejectRomSlot(cartridgeSlot);
+        ui.mouseNote.hidden = false;
+    }
+    applyMouseModel();
+    resetSystem();
+}
+
+/**
+ * Fetch `roms/<name>.rom` into the cartridge slot and restart the QL, for
+ * `?cart=` and the Toolkit II button. A later load or Eject there makes the
+ * fetch finish silently.
+ *
+ * @param {string} name
+ */
+function loadBundledCartridge(name) {
+    const state = romSlotStates[cartridgeSlot];
+    state.generation += 1;
+    const generation = state.generation;
+    const fileName = name + ".rom";
+    if (!/^[A-Za-z0-9]+$/.test(name)) {
+        state.error = "Invalid cartridge ROM name.";
+        refreshRomSlotStatus(cartridgeSlot);
+        return;
+    }
+    boot.loadRom(
+        "roms/" + fileName,
+        machine.romCartridgeSize,
+        function (err, rom) {
+            if (state.generation !== generation) {
+                return;
+            }
+            let error = err;
+            if (error === null && rom !== null) {
+                error = machine.insertRomCartridge(ql, rom, cartridgeSlot);
+            }
+            if (error === null) {
+                state.error = "";
+                state.name = fileName;
+                state.bundled = name;
+                unplugQimsiForCartridge();
+                resetSystem();
+            } else {
+                state.error = error;
+            }
+            refreshRomSlotStatus(cartridgeSlot);
+        },
+    );
+}
+
+/**
+ * A cartridge ROM needs the ROM port that the QIMSI interface plugs into, so
+ * installing one switches a QIMSI mouse off, and the note says so.
+ */
+function unplugQimsiForCartridge() {
+    ui.mouseNote.hidden = true;
+    ui.cartNote.hidden = true;
+    if (selectedMouseModel() !== machine.mouseQimsi) {
+        return;
+    }
+    ui.mouseOff.checked = true;
+    applyMouseModel();
+    ui.cartNote.hidden = false;
+}
+
+/**
+ * Empty a ROM slot and cancel a load in flight there; the caller restarts the
+ * QL.
+ *
+ * @param {number} slot
+ */
+function ejectRomSlot(slot) {
+    const state = romSlotStates[slot];
+    state.generation += 1;
+    machine.ejectRomCartridge(ql, slot);
+    state.name = "";
+    state.error = "";
+    forgetBundledRom(slot);
+    refreshRomSlotStatus(slot);
+}
+
+/**
+ * A local image or Eject replaces a bundled ROM, and for the cartridge slot
+ * drops `cart` from the URL.
+ *
+ * @param {number} slot
+ */
+function forgetBundledRom(slot) {
+    romSlotStates[slot].bundled = "";
+    if (slot === cartridgeSlot) {
+        updateUrlParam("cart", null);
+    }
+}
+
+/**
+ * Show a ROM slot's state: its name or error, whether it can be ejected, and
+ * whether the address map shows it filled.
+ *
+ * @param {number} slot
+ */
+function refreshRomSlotStatus(slot) {
+    const controls = ui.romSlots[slot];
+    const state = romSlotStates[slot];
+    controls.eject.disabled = state.name === "";
+    if (slot === cartridgeSlot) {
+        ui.romToolkit2.disabled = state.bundled === "tk2";
+    }
+    if (state.name === "") {
+        controls.card.classList.add("empty");
+        controls.map.classList.remove("full");
+    } else {
+        controls.card.classList.remove("empty");
+        controls.map.classList.add("full");
+    }
+    if (state.error !== "") {
+        showError(controls.info, state.error);
+        return;
+    }
+    let name = state.name;
+    if (name === "") {
+        name = "No ROM.";
+    }
+    showInfo(controls.info, name);
+}
+
+/** Put the chosen mouse model in the URL and the machine, releasing any capture. */
+function applyMouseModel() {
     const selected = selectedMouseModel();
     updateUrlParam("mouse", mouseParam(selected));
     machine.setMouseModel(ql, selected);
@@ -1513,7 +1570,15 @@ function selectMouse() {
         document.exitPointerLock();
     }
     refreshSummary();
-    resetSystem();
+}
+
+/**
+ * Take the chosen QIMSI mouse speed for the next movement; it needs no
+ * restart.
+ */
+function selectMouseSpeed() {
+    mouseCountsPerPixel = selectedMouseSpeed();
+    updateUrlParam("mspeed", mouseCountsPerPixel);
 }
 
 /**
@@ -1547,6 +1612,9 @@ function refreshSummary() {
     ui.stereo.disabled = soundModel === machine.qsoundOff;
     const mouse = selectedMouseModel();
     ui.mouseCursor.disabled = mouse !== machine.mousePe;
+    for (const option of ui.mouseSpeeds) {
+        option.input.disabled = mouse !== machine.mouseQimsi;
+    }
     ui.chipMouse.hidden = mouse === machine.mouseOff;
     ui.mouseHint.hidden = mouse === machine.mouseOff;
     switch (mouse) {
@@ -1580,6 +1648,16 @@ function mouseParam(model) {
     default:
         return "0";
     }
+}
+
+/** @returns {number} */
+function selectedMouseSpeed() {
+    for (const option of ui.mouseSpeeds) {
+        if (option.input.checked) {
+            return option.speed;
+        }
+    }
+    return 1;
 }
 
 /** @returns {number} */

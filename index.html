@@ -802,7 +802,9 @@ body.keyboard-splitting {
     color: var(--r);
 }
 .row:has(.toggle > input:disabled) .row-label strong,
-.row:has(.toggle > input:disabled) .row-label p {
+.row:has(.toggle > input:disabled) .row-label p,
+.row:has(.seg input:disabled):not(:has(.seg input:enabled)) .row-label strong,
+.row:has(.seg input:disabled):not(:has(.seg input:enabled)) .desc {
     color: var(--r);
 }
 
@@ -1371,6 +1373,7 @@ body.screen-only #screen-slot {
                             <button id="eject-rom-cart" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
                         </div>
                     </article>
+                    <div id="cart-note" class="note" hidden><svg class="i"><use href="#i-warn"></use></svg><span>A cartridge ROM needs the ROM port that QIMSI plugs into, so the QIMSI mouse was switched off.</span></div>
                     <article id="rom-io1-card" class="card rom empty">
                         <div class="drive-ico"><svg class="i"><use href="#i-chip"></use></svg></div>
                         <div class="drive-title">
@@ -1447,10 +1450,20 @@ body.screen-only #screen-slot {
                         <div class="row-label"><strong>Pointer device<span class="resets">*</span></strong></div>
                         <div class="seg">
                             <label title="No mouse"><input id="mouse-off" type="radio" name="mouse" checked>None</label>
-                            <label title="QIMSI PS/2 mouse; click the screen to capture it, Esc releases it"><input id="mouse-qimsi" type="radio" name="mouse">QIMSI</label>
+                            <label title="QIMSI PS/2 mouse in the ROM port, which then holds no cartridge ROM; click the screen to capture it, Esc releases it"><input id="mouse-qimsi" type="radio" name="mouse">QIMSI</label>
                             <label title="Host pointer in a loaded Pointer Environment, with no capture"><input id="mouse-pe" type="radio" name="mouse">PE</label>
                         </div>
                         <p id="mouse-desc" class="desc"></p>
+                        <div id="mouse-note" class="note" hidden><svg class="i"><use href="#i-warn"></use></svg><span>QIMSI plugs into the ROM port, so the cartridge ROM was ejected.</span></div>
+                    </div>
+                    <div class="row col">
+                        <div class="row-label"><strong>Mouse speed</strong></div>
+                        <div class="seg">
+                            <label title="One QIMSI count per displayed pixel"><input id="mspeed-1" type="radio" name="mspeed" checked>1×</label>
+                            <label title="Two QIMSI counts per displayed pixel"><input id="mspeed-2" type="radio" name="mspeed">2×</label>
+                            <label title="Four QIMSI counts per displayed pixel"><input id="mspeed-4" type="radio" name="mspeed">4×</label>
+                        </div>
+                        <p class="desc">QIMSI counts per displayed pixel; 2× or 4× help software that scales counts down and drops slow movement.</p>
                     </div>
                     <div class="row">
                         <div class="row-label"><strong>Host cursor</strong><p>Keep the host cursor visible over the screen in PE mode.</p></div>

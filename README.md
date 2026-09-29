@@ -50,9 +50,8 @@ disable a switch and `1` to enable it. `qsound` accepts `0` for no card, `1`
 for QSound, or `2` for QSound2. RAM accepts `128`, `384`, `640`, or `896`.
 `mouse` accepts `0` for no mouse, `qimsi` for the QIMSI PS/2 mouse, or `pe`
 for the host pointer in the Pointer Environment.
-`mspeed` accepts `1`, `2`, or `4` mouse counts per displayed 512-mode pixel;
-it has no control on the page. Missing or invalid parameters keep the normal
-defaults:
+`mspeed` accepts `1`, `2`, or `4` mouse counts per displayed 512-mode pixel.
+Missing or invalid parameters keep the normal defaults:
 
 | Parameter | Default |
 | --- | --- |
@@ -77,9 +76,9 @@ its parameter without reloading the page or adding a browser-history entry;
 changing it back to the default in the table removes the parameter. Choosing
 Minerva sets `rom=minerva`, and selecting or dropping a local ROM, or returning
 to the automatic one, removes `rom`. Choosing Toolkit II sets `cart=tk2`, and
-loading a local cartridge ROM or ejecting it removes `cart`. Loading, dropping,
-creating, or ejecting a Microdrive in MDV1 removes `url`. Other parameters and
-the URL fragment are preserved.
+loading a local cartridge ROM, ejecting it, or choosing the QIMSI mouse removes
+`cart`. Loading, dropping, creating, or ejecting a Microdrive in MDV1 removes
+`url`. Other parameters and the URL fragment are preserved.
 
 ## Emulator page
 
@@ -190,14 +189,13 @@ The address map at the top marks the extension slots that hold an image.
   or I/O ROM 2 at `0x14000`; Eject removes that slot's image. Short images are
   padded with zeroes. Each slot shows its own filename. Loading or ejecting
   resets the machine, so QDOS detects the change. Images survive resets and
-  system-ROM replacement. While the QIMSI mouse is on, its registers replace
-  cartridge bytes `0x0FED0`–`0x0FEDF`. These slots provide ROM storage only,
-  not any additional peripheral hardware a particular expansion ROM may
-  require.
+  system-ROM replacement. The QIMSI interface plugs into the ROM port, so, as
+  on a real QL, it cannot share it with a cartridge ROM: installing one, also
+  through `cart=`, switches the QIMSI mouse off, and a note says so. These
+  slots provide ROM storage only, not any additional peripheral hardware a
+  particular expansion ROM may require.
 - Toolkit II - the cartridge card's button loads the bundled Toolkit II v2.36,
-  `tk2.rom`, and sets `cart=tk2`; a local image or Eject replaces it. With the
-  QIMSI mouse on, the replaced bytes fall in small Toolkit II helper routines;
-  the file commands tried here still work.
+  `tk2.rom`, and sets `cart=tk2`; a local image or Eject replaces it.
 
 #### Hardware
 
@@ -230,21 +228,25 @@ Choices marked `*` reset the machine when changed.
   at the same speed, and the switch takes effect without a reset.
 - Pointer device - None, QIMSI, or PE connects the host mouse as one of two
   models. The `mouse` parameter follows the selection.
-  - QIMSI connects the host mouse as the PS/2 mouse of a QIMSI interface,
-    whose registers occupy `0x0FED0`–`0x0FEDF` in the ROM port. While it is
-    on, click the screen to capture the mouse; Esc releases it, so press Esc
-    again to send it to the QL. Moving across the displayed screen width
-    sends 512 counts times `mspeed`. At the default `1`, Pointer Environment
-    software using the QIMSI mouse driver follows the host one pixel per
-    count; `2` or `4` help software that scales counts down and drops slow
-    movement. The mouse reports itself as an IntelliMouse with left, right,
-    and middle buttons and a wheel. Only the mouse is emulated, not the QIMSI
-    ROM, microSD card, keyboard, serial link, or sound.
+  - QIMSI connects the host mouse as the PS/2 mouse of a QIMSI interface, whose
+    registers occupy `0x0FED0`–`0x0FEDF` in the ROM port. Choosing it ejects a
+    cartridge ROM, and a note says so. While it is on, click the screen to
+    capture the mouse; Esc releases it, so press Esc again to send it to the QL.
+    Moving across the displayed screen width sends 512 counts times the Mouse
+    speed. At the default 1×, Pointer Environment software using the QIMSI mouse
+    driver follows the host one pixel per count; 2× or 4× help software that
+    scales counts down and drops slow movement. The mouse reports itself as an
+    IntelliMouse with left, right, and middle buttons and a wheel. Only the
+    mouse is emulated, not the QIMSI ROM, microSD card, keyboard, serial link,
+    or sound.
   - PE places the Pointer Environment pointer under the host cursor over the
     screen, as QPC and uQLX do, with no capture. The left and right buttons
     are HIT and DO. It needs the Pointer Environment (`ptr_gen` with the
-    `PTR2` linkage) loaded in the QL and does nothing until then; `mspeed`
-    does not apply.
+    `PTR2` linkage) loaded in the QL and does nothing until then; the Mouse
+    speed does not apply.
+- Mouse speed - 1×, 2×, or 4× QIMSI counts per displayed pixel, for the QIMSI
+  mouse only. It applies to the next movement without a reset, and the
+  `mspeed` parameter follows it.
 - Host cursor - show the host cursor over the screen while PE is selected. It
   is off by default, so only the QL pointer is visible over the screen; the
   host cursor still shows elsewhere on the page. QIMSI hides the host cursor
