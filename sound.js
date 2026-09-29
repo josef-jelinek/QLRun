@@ -28,8 +28,6 @@ const bufferPoolSize = 8;
  *   sentSamples: number,
  *   pool: Float32Array[],
  *   stats: SoundStats,
- *   onNeed: function(): void,
- *   onStateChange: function(boolean): void,
  * }} Sfx
  */
 
@@ -50,15 +48,14 @@ const bufferPoolSize = 8;
  * Frames per second is passed in rather than read from the emulator core, so
  * the audio host stays usable without it. `onNeed` runs the producer as soon
  * as the audio thread asks for data, without waiting for the next display
- * refresh; `onStateChange` reports whether the context is rendering after a
- * browser audio lifecycle change.
+ * refresh. A browser audio lifecycle change restarts the queue; the producer
+ * reads `context.state` to tell whether it is rendering.
  *
  * @param {number} framesPerSecond
  * @param {function(): void} onNeed
- * @param {function(boolean): void} onStateChange
  * @param {function(string | null, Sfx | null): void} onDone
  */
-export function init(framesPerSecond, onNeed, onStateChange, onDone) {
+export function init(framesPerSecond, onNeed, onDone) {
     let context = null;
     try {
         context = new AudioContext();
@@ -68,18 +65,17 @@ export function init(framesPerSecond, onNeed, onStateChange, onDone) {
         return;
     }
     if (context.audioWorklet === undefined) {
-        context.close();
+        context.close().then(function () {}, function () {});
         onDone("No AudioWorklet available.", null);
         return;
     }
 
     context.audioWorklet.addModule("sound.worklet.js").then(
         function () {
-            const frameSampleCount = Math.round(context.sampleRate / framesPerSecond);
             /** @type {Sfx} */
             const sfx = {
-                frameSampleCount,
-                lowSamples: frameSampleCount * queueLowFrames,
+                frameSampleCount: 0,
+                lowSamples: 0,
                 context,
                 node: new AudioWorkletNode(
                     context,
@@ -95,8 +91,6 @@ export function init(framesPerSecond, onNeed, onStateChange, onDone) {
                 sentSamples: 0,
                 pool: [],
                 stats: {cut: 0, gap: 0},
-                onNeed,
-                onStateChange,
             };
 
             sfx.node.port.onmessage = function (e) {
@@ -114,7 +108,7 @@ export function init(framesPerSecond, onNeed, onStateChange, onDone) {
                         const queued = data.remain + sfx.sentSamples - data.received - waited * context.sampleRate;
                         sfx.queuedSamples = Math.max(queued, 0);
                         sfx.queuedAt = performance.now();
-                        sfx.onNeed();
+                        onNeed();
                     }
                     return;
                 case "spent":
@@ -130,20 +124,15 @@ export function init(framesPerSecond, onNeed, onStateChange, onDone) {
             };
 
             sfx.node.connect(context.destination);
-            sfx.node.port.postMessage({
-                type: "queue-samples",
-                low: sfx.lowSamples,
-                cap: frameSampleCount * queueCapFrames,
-            });
+            setFrameRate(sfx, framesPerSecond);
             context.onstatechange = function () {
                 reset(sfx);
-                sfx.onStateChange(context.state === "running");
             };
             onDone(null, sfx);
         },
         function (ex) {
             console.error("AudioWorklet module fail", ex);
-            context.close();
+            context.close().then(function () {}, function () {});
             onDone("Failed to load audio worklet.", null);
         },
     );
@@ -210,7 +199,7 @@ export function resume(sfx) {
     if (sfx.context.state === "suspended") {
         // The resync belongs to the state change this causes, which lands when
         // the context has actually started rather than a moment before.
-        sfx.context.resume();
+        sfx.context.resume().then(function () {}, function () {});
     }
 }
 
@@ -267,14 +256,11 @@ export function setPaused(sfx, on) {
  * @param {AudioChunk} chunk
  */
 export function push(sfx, chunk) {
-    let n = chunk.n;
     // The machine reuses one 8192-sample buffer. A view of it can deserialize
     // with the full backing store, so later frames would replay stale loader
     // audio. Copy a cap of two frames, nothing more.
     const maxN = sfx.frameSampleCount * 2;
-    if (n > maxN) {
-        n = maxN;
-    }
+    const n = Math.min(chunk.n, maxN);
     if (n <= 0) {
         return;
     }

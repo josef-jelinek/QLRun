@@ -1,4 +1,20 @@
 /**
+ * One key of an onscreen keyboard row, `units` 1U keys wide. `legend` is the
+ * shifted character printed above the label.
+ *
+ * @typedef {{
+ *   label: string,
+ *   code: number,
+ *   codes: string[],
+ *   units: number,
+ *   legend?: string,
+ * }} OverlayRowKey
+ */
+
+/**
+ * A placed onscreen key, in board units. `className` marks the function keys
+ * and the L-shaped ENTER.
+ *
  * @typedef {{
  *   label: string,
  *   code: number,
@@ -7,7 +23,8 @@
  *   y: number,
  *   w: number,
  *   h: number,
- *   title?: string,
+ *   legend: string,
+ *   className: string,
  * }} OverlayKeySpec
  */
 
@@ -19,6 +36,8 @@
  */
 
 /**
+ * A pointer holding an onscreen key since `at`, in `Date.now()` milliseconds.
+ *
  * @typedef {{
  *   id: number,
  *   code: number,
@@ -27,6 +46,9 @@
  */
 
 /**
+ * A key kept pressed until `until`, in `Date.now()` milliseconds, so a quick
+ * tap still reaches the QL.
+ *
  * @typedef {{
  *   code: number,
  *   until: number,
@@ -46,6 +68,9 @@
  */
 
 /**
+ * Onscreen keyboard state: the host keys and pointers holding QL keys, the
+ * rendered keys, and the pulses that keep quick taps pressed.
+ *
  * @typedef {{
  *   keys: KeyState,
  *   hostHeld: string[],
@@ -133,88 +158,109 @@ const keyPound = 0x2D;
 const keyMinus = 0x15;
 const keyEqual = 0x25;
 
-const keyArtW = 768;
+// Onscreen keyboard in board units: 1U keys are 28 square with a 6 gap both
+// ways, F1-F5 stand in their own column, and the main block starts at x 48.
+// ENTER is a mirrored L whose upright fills the 1U left over at the end of
+// the TAB row; the stylesheet draws the upright, so its box is the 1.75U foot.
+const keyUnit = 28;
+const keyGap = 6;
+const keyPitch = keyUnit + keyGap;
+const keyArtW = 560;
 const keyArtH = 180;
+const keyArtMargin = 8;
+const mainBlockX = 48;
 const minPointerHoldMs = 50;
 const maxQueuedKeys = 50;
 
-/** @type {OverlayKeySpec[]} */
-const overlayKeys = [
-    {label: "F1", code: keyF1, codes: ["F1"], x: 8, y: 8, w: 40, h: 28},
-    {label: "F2", code: keyF2, codes: ["F2"], x: 8, y: 42, w: 40, h: 28},
-    {label: "F3", code: keyF3, codes: ["F3"], x: 8, y: 76, w: 40, h: 28},
-    {label: "F4", code: keyF4, codes: ["F4"], x: 8, y: 110, w: 40, h: 28},
-    {label: "F5", code: keyF5, codes: ["F5"], x: 8, y: 144, w: 40, h: 28},
-
-    {label: "ESC", code: keyEscape, codes: ["Escape"], x: 64, y: 8, w: 40, h: 28, title: "\u00A9"},
-    {label: "1", code: key1, codes: ["Digit1", "Numpad1"], x: 108, y: 8, w: 40, h: 28, title: "!"},
-    {label: "2", code: key2, codes: ["Digit2", "Numpad2"], x: 152, y: 8, w: 40, h: 28, title: "@"},
-    {label: "3", code: key3, codes: ["Digit3", "Numpad3"], x: 196, y: 8, w: 40, h: 28, title: "#"},
-    {label: "4", code: key4, codes: ["Digit4", "Numpad4"], x: 240, y: 8, w: 40, h: 28, title: "$"},
-    {label: "5", code: key5, codes: ["Digit5", "Numpad5"], x: 284, y: 8, w: 40, h: 28, title: "%"},
-    {label: "6", code: key6, codes: ["Digit6", "Numpad6"], x: 328, y: 8, w: 40, h: 28, title: "^"},
-    {label: "7", code: key7, codes: ["Digit7", "Numpad7"], x: 372, y: 8, w: 40, h: 28, title: "&"},
-    {label: "8", code: key8, codes: ["Digit8", "Numpad8"], x: 416, y: 8, w: 40, h: 28, title: "*"},
-    {label: "9", code: key9, codes: ["Digit9", "Numpad9"], x: 460, y: 8, w: 40, h: 28, title: "("},
-    {label: "0", code: key0, codes: ["Digit0", "Numpad0"], x: 504, y: 8, w: 40, h: 28, title: ")"},
-    {label: "-", code: keyMinus, codes: ["Minus", "NumpadSubtract"], x: 548, y: 8, w: 40, h: 28, title: "_"},
-    {label: "=", code: keyEqual, codes: ["Equal"], x: 592, y: 8, w: 40, h: 28, title: "+"},
-    {label: "\u00A3", code: keyPound, codes: ["Backquote"], x: 636, y: 8, w: 40, h: 28, title: "~"},
-    {label: "\\", code: keyBackslash, codes: ["Backslash"], x: 680, y: 8, w: 40, h: 28, title: "|"},
-
-    {label: "TAB", code: keyTab, codes: ["Tab"], x: 64, y: 42, w: 62, h: 28},
-    {label: "Q", code: letterQ, codes: ["KeyQ"], x: 130, y: 42, w: 40, h: 28},
-    {label: "W", code: letterW, codes: ["KeyW"], x: 174, y: 42, w: 40, h: 28},
-    {label: "E", code: letterE, codes: ["KeyE"], x: 218, y: 42, w: 40, h: 28},
-    {label: "R", code: letterR, codes: ["KeyR"], x: 262, y: 42, w: 40, h: 28},
-    {label: "T", code: letterT, codes: ["KeyT"], x: 306, y: 42, w: 40, h: 28},
-    {label: "Y", code: letterY, codes: ["KeyY"], x: 350, y: 42, w: 40, h: 28},
-    {label: "U", code: letterU, codes: ["KeyU"], x: 394, y: 42, w: 40, h: 28},
-    {label: "I", code: letterI, codes: ["KeyI"], x: 438, y: 42, w: 40, h: 28},
-    {label: "O", code: letterO, codes: ["KeyO"], x: 482, y: 42, w: 40, h: 28},
-    {label: "P", code: letterP, codes: ["KeyP"], x: 526, y: 42, w: 40, h: 28},
-    {label: "[", code: keyLBracket, codes: ["BracketLeft"], x: 570, y: 42, w: 40, h: 28, title: "{"},
-    {label: "]", code: keyRBracket, codes: ["BracketRight"], x: 614, y: 42, w: 40, h: 28, title: "}"},
-
-    {label: "CAPS", code: keyCapsLock, codes: ["CapsLock"], x: 64, y: 76, w: 73, h: 28},
-    {label: "A", code: letterA, codes: ["KeyA"], x: 141, y: 76, w: 40, h: 28},
-    {label: "S", code: letterS, codes: ["KeyS"], x: 185, y: 76, w: 40, h: 28},
-    {label: "D", code: letterD, codes: ["KeyD"], x: 229, y: 76, w: 40, h: 28},
-    {label: "F", code: letterF, codes: ["KeyF"], x: 273, y: 76, w: 40, h: 28},
-    {label: "G", code: letterG, codes: ["KeyG"], x: 317, y: 76, w: 40, h: 28},
-    {label: "H", code: letterH, codes: ["KeyH"], x: 361, y: 76, w: 40, h: 28},
-    {label: "J", code: letterJ, codes: ["KeyJ"], x: 405, y: 76, w: 40, h: 28},
-    {label: "K", code: letterK, codes: ["KeyK"], x: 449, y: 76, w: 40, h: 28},
-    {label: "L", code: letterL, codes: ["KeyL"], x: 493, y: 76, w: 40, h: 28},
-    {label: ";", code: keySemicolon, codes: ["Semicolon"], x: 537, y: 76, w: 40, h: 28, title: ":"},
-    {label: "'", code: keyQuote, codes: ["Quote"], x: 581, y: 76, w: 40, h: 28, title: "\""},
-    {label: "ENTER", code: keyEnter, codes: ["Enter", "NumpadEnter"], x: 625, y: 76, w: 73, h: 28},
-
-    {label: "SHIFT", code: keyShift, codes: ["ShiftLeft"], x: 64, y: 110, w: 95, h: 28},
-    {label: "Z", code: letterZ, codes: ["KeyZ"], x: 163, y: 110, w: 40, h: 28},
-    {label: "X", code: letterX, codes: ["KeyX"], x: 207, y: 110, w: 40, h: 28},
-    {label: "C", code: letterC, codes: ["KeyC"], x: 251, y: 110, w: 40, h: 28},
-    {label: "V", code: letterV, codes: ["KeyV"], x: 295, y: 110, w: 40, h: 28},
-    {label: "B", code: letterB, codes: ["KeyB"], x: 339, y: 110, w: 40, h: 28},
-    {label: "N", code: letterN, codes: ["KeyN"], x: 383, y: 110, w: 40, h: 28},
-    {label: "M", code: letterM, codes: ["KeyM"], x: 427, y: 110, w: 40, h: 28},
-    {label: ",", code: keyComma, codes: ["Comma"], x: 471, y: 110, w: 40, h: 28, title: "<"},
-    {label: ".", code: keyPeriod, codes: ["Period", "NumpadDecimal"], x: 515, y: 110, w: 40, h: 28, title: ">"},
-    {label: "/", code: keySlash, codes: ["Slash", "NumpadDivide"], x: 559, y: 110, w: 40, h: 28, title: "?"},
-    {label: "SHIFT", code: keyShift, codes: ["ShiftRight"], x: 603, y: 110, w: 95, h: 28},
-
-    {label: "CTRL", code: keyCtrl, codes: ["ControlLeft", "ControlRight"], x: 64, y: 144, w: 73, h: 28},
-    {label: "\u2190", code: keyLeft, codes: ["ArrowLeft"], x: 141, y: 144, w: 40, h: 28},
-    {label: "\u2192", code: keyRight, codes: ["ArrowRight"], x: 185, y: 144, w: 40, h: 28},
-    {label: "SPACE", code: keySpace, codes: ["Space"], x: 229, y: 144, w: 304, h: 28},
-    {label: "\u2191", code: keyUp, codes: ["ArrowUp"], x: 537, y: 144, w: 40, h: 28},
-    {label: "\u2193", code: keyDown, codes: ["ArrowDown"], x: 581, y: 144, w: 40, h: 28},
-    {label: "ALT", code: keyAlt, codes: ["AltLeft", "AltRight"], x: 625, y: 144, w: 73, h: 28},
+/** @type {OverlayRowKey[]} */
+const functionKeys = [
+    {label: "F1", code: keyF1, codes: ["F1"], units: 1},
+    {label: "F2", code: keyF2, codes: ["F2"], units: 1},
+    {label: "F3", code: keyF3, codes: ["F3"], units: 1},
+    {label: "F4", code: keyF4, codes: ["F4"], units: 1},
+    {label: "F5", code: keyF5, codes: ["F5"], units: 1},
 ];
 
+/** @type {OverlayRowKey[][]} */
+const overlayRows = [
+    [
+        {label: "ESC", code: keyEscape, codes: ["Escape"], units: 1, legend: "\u00A9"},
+        {label: "1", code: key1, codes: ["Digit1", "Numpad1"], units: 1, legend: "!"},
+        {label: "2", code: key2, codes: ["Digit2", "Numpad2"], units: 1, legend: "@"},
+        {label: "3", code: key3, codes: ["Digit3", "Numpad3"], units: 1, legend: "#"},
+        {label: "4", code: key4, codes: ["Digit4", "Numpad4"], units: 1, legend: "$"},
+        {label: "5", code: key5, codes: ["Digit5", "Numpad5"], units: 1, legend: "%"},
+        {label: "6", code: key6, codes: ["Digit6", "Numpad6"], units: 1, legend: "^"},
+        {label: "7", code: key7, codes: ["Digit7", "Numpad7"], units: 1, legend: "&"},
+        {label: "8", code: key8, codes: ["Digit8", "Numpad8"], units: 1, legend: "*"},
+        {label: "9", code: key9, codes: ["Digit9", "Numpad9"], units: 1, legend: "("},
+        {label: "0", code: key0, codes: ["Digit0", "Numpad0"], units: 1, legend: ")"},
+        {label: "-", code: keyMinus, codes: ["Minus", "NumpadSubtract"], units: 1, legend: "_"},
+        {label: "=", code: keyEqual, codes: ["Equal"], units: 1, legend: "+"},
+        {label: "\u00A3", code: keyPound, codes: ["Backquote"], units: 1, legend: "~"},
+        {label: "\\", code: keyBackslash, codes: ["Backslash"], units: 1, legend: "|"},
+    ],
+    [
+        {label: "TAB", code: keyTab, codes: ["Tab"], units: 1.5},
+        {label: "Q", code: letterQ, codes: ["KeyQ"], units: 1},
+        {label: "W", code: letterW, codes: ["KeyW"], units: 1},
+        {label: "E", code: letterE, codes: ["KeyE"], units: 1},
+        {label: "R", code: letterR, codes: ["KeyR"], units: 1},
+        {label: "T", code: letterT, codes: ["KeyT"], units: 1},
+        {label: "Y", code: letterY, codes: ["KeyY"], units: 1},
+        {label: "U", code: letterU, codes: ["KeyU"], units: 1},
+        {label: "I", code: letterI, codes: ["KeyI"], units: 1},
+        {label: "O", code: letterO, codes: ["KeyO"], units: 1},
+        {label: "P", code: letterP, codes: ["KeyP"], units: 1},
+        {label: "[", code: keyLBracket, codes: ["BracketLeft"], units: 1, legend: "{"},
+        {label: "]", code: keyRBracket, codes: ["BracketRight"], units: 1, legend: "}"},
+    ],
+    [
+        {label: "CAPS", code: keyCapsLock, codes: ["CapsLock"], units: 1.75},
+        {label: "A", code: letterA, codes: ["KeyA"], units: 1},
+        {label: "S", code: letterS, codes: ["KeyS"], units: 1},
+        {label: "D", code: letterD, codes: ["KeyD"], units: 1},
+        {label: "F", code: letterF, codes: ["KeyF"], units: 1},
+        {label: "G", code: letterG, codes: ["KeyG"], units: 1},
+        {label: "H", code: letterH, codes: ["KeyH"], units: 1},
+        {label: "J", code: letterJ, codes: ["KeyJ"], units: 1},
+        {label: "K", code: letterK, codes: ["KeyK"], units: 1},
+        {label: "L", code: letterL, codes: ["KeyL"], units: 1},
+        {label: ";", code: keySemicolon, codes: ["Semicolon"], units: 1, legend: ":"},
+        {label: "'", code: keyQuote, codes: ["Quote"], units: 1, legend: "\""},
+        {label: "ENTER", code: keyEnter, codes: ["Enter", "NumpadEnter"], units: 1.75},
+    ],
+    [
+        {label: "SHIFT", code: keyShift, codes: ["ShiftLeft"], units: 2.25},
+        {label: "Z", code: letterZ, codes: ["KeyZ"], units: 1},
+        {label: "X", code: letterX, codes: ["KeyX"], units: 1},
+        {label: "C", code: letterC, codes: ["KeyC"], units: 1},
+        {label: "V", code: letterV, codes: ["KeyV"], units: 1},
+        {label: "B", code: letterB, codes: ["KeyB"], units: 1},
+        {label: "N", code: letterN, codes: ["KeyN"], units: 1},
+        {label: "M", code: letterM, codes: ["KeyM"], units: 1},
+        {label: ",", code: keyComma, codes: ["Comma"], units: 1, legend: "<"},
+        {label: ".", code: keyPeriod, codes: ["Period", "NumpadDecimal"], units: 1, legend: ">"},
+        {label: "/", code: keySlash, codes: ["Slash", "NumpadDivide"], units: 1, legend: "?"},
+        {label: "SHIFT", code: keyShift, codes: ["ShiftRight"], units: 2.25},
+    ],
+    [
+        {label: "CTRL", code: keyCtrl, codes: ["ControlLeft", "ControlRight"], units: 1.75},
+        {label: "\u2190", code: keyLeft, codes: ["ArrowLeft"], units: 1},
+        {label: "\u2192", code: keyRight, codes: ["ArrowRight"], units: 1},
+        {label: "", code: keySpace, codes: ["Space"], units: 7},
+        {label: "\u2191", code: keyUp, codes: ["ArrowUp"], units: 1},
+        {label: "\u2193", code: keyDown, codes: ["ArrowDown"], units: 1},
+        {label: "ALT", code: keyAlt, codes: ["AltLeft", "AltRight"], units: 1.75},
+    ],
+];
+
+const overlayKeys = layoutOverlayKeys();
+
 /**
- * Host key codes to QL matrix codes: every overlay key plus host-only keys
- * that map onto QL cursor combinations.
+ * Host key codes to QL matrix codes: every overlay key, plus host-only editing
+ * keys mapped onto QL cursor combinations and keypad + and * mapped onto the
+ * keys that carry them.
  *
  * @type {Object<string, number>}
  */
@@ -236,20 +282,24 @@ for (let i = 0; i < overlayKeys.length; i += 1) {
 }
 
 /**
- * Extra QL modifier pseudo-code forced by a host key, held with Shift/Ctrl/Alt.
+ * QL modifier a host key holds along with its mapped key: Ctrl turns the
+ * cursor keys into Backspace and Delete, and Shift gives keypad + and *.
  *
  * @type {Object<string, number>}
  */
-const hostForcedMods = {Backspace: keyCtrl, Delete: keyCtrl};
+const hostForcedMods = {Backspace: keyCtrl, Delete: keyCtrl, NumpadAdd: keyShift, NumpadMultiply: keyShift};
 
 /**
- * Bind host and pointer input to the QL matrix and onscreen keyboard.
+ * Build the onscreen keyboard and bind its pointer input to the QL matrix.
+ * Host key events reach the matrix through `handleKeyDown`, `handleKeyUp`,
+ * and `handleBlur`.
  *
  * @param {HTMLElement} el
  * @param {KeyState} keys
  * @returns {Keyboard}
  */
 export function init(el, keys) {
+    /** @type {Keyboard} */
     const kbd = {
         keys,
         hostHeld: [],
@@ -261,55 +311,66 @@ export function init(el, keys) {
     el.oncontextmenu = function (e) {
         e.preventDefault();
     };
-    window.addEventListener("pointerup", function (e) {
-        releasePointerSoon(kbd, e.pointerId);
-    }, true);
-    window.addEventListener("pointercancel", function (e) {
-        releasePointer(kbd, e.pointerId);
-        syncKeys(kbd);
-    }, true);
+    window.addEventListener(
+        "pointerup",
+        function (e) {
+            releasePointerSoon(kbd, e.pointerId);
+        },
+        true,
+    );
+    window.addEventListener(
+        "pointercancel",
+        function (e) {
+            // Drop the hold at once, with no pulse.
+            for (let i = 0; i < kbd.pointerHeld.length; i += 1) {
+                if (kbd.pointerHeld[i].id === e.pointerId) {
+                    kbd.pointerHeld.splice(i, 1);
+                    syncKeys(kbd);
+                    return;
+                }
+            }
+        },
+        true,
+    );
     const face = el.querySelector(".keyboard-face");
     if (face !== null) {
         for (let i = 0; i < overlayKeys.length; i += 1) {
             face.appendChild(makeHit(kbd, overlayKeys[i]));
         }
-        setScale(el, 1);
     }
-    syncKeys(kbd);
     return kbd;
 }
 
+/**
+ * Rendered height of the keyboard face in CSS pixels.
+ *
+ * @param {HTMLElement} el
+ * @returns {number}
+ */
+export function faceHeight(el) {
+    const face = el.querySelector(".keyboard-face");
+    if (!(face instanceof HTMLElement)) {
+        return 0;
+    }
+    return face.getBoundingClientRect().height;
+}
 
 /**
- * Set scale from a vertical drag of the bar above the keyboard.
+ * Size the keyboard face to a height, between 45 CSS pixels and `maxHeight`.
+ * The stylesheet still keeps it within the available width.
  *
- * @param {HTMLElement} keyboardEl
- * @param {HTMLElement} splitEl
- * @param {number} clientY
+ * @param {HTMLElement} el
+ * @param {number} height
+ * @param {number} maxHeight
  */
-export function scaleFromY(keyboardEl, splitEl, clientY) {
-    const parent = keyboardEl.parentElement;
-    if (parent === null) {
+export function setFaceHeight(el, height, maxHeight) {
+    const face = el.querySelector(".keyboard-face");
+    if (!(face instanceof HTMLElement)) {
         return;
     }
-    const parentRect = parent.getBoundingClientRect();
-    const splitRect = splitEl.getBoundingClientRect();
-    const style = getComputedStyle(keyboardEl);
-    const padTop = Number.parseFloat(style.paddingTop);
-    const padBot = Number.parseFloat(style.paddingBottom);
-    let padY = 0;
-    if (Number.isFinite(padTop)) {
-        padY += padTop;
-    }
-    if (Number.isFinite(padBot)) {
-        padY += padBot;
-    }
-    const minRemain = 80;
-    const minH = keyArtH * 0.25;
-    let imgH = parentRect.bottom - clientY - splitRect.height - padY;
-    const maxH = parentRect.height - minRemain - splitRect.height - padY;
-    imgH = Math.min(Math.max(imgH, minH), Math.max(minH, maxH));
-    setScale(keyboardEl, imgH / keyArtH);
+    const minHeight = keyArtH * 0.25;
+    const clamped = Math.min(Math.max(height, minHeight), Math.max(minHeight, maxHeight));
+    face.style.width = (clamped * keyArtW / keyArtH) + "px";
 }
 
 /**
@@ -365,20 +426,10 @@ export function handleBlur(kbd) {
 }
 
 /**
- * 1 is one image pixel per CSS pixel.
+ * Create one onscreen key, placed in percent of the board, with its legends.
+ * A left click holds the key until release, and a pointer in contact holds a
+ * key it enters: a mouse with a button down, a touch, or a pen.
  *
- * @param {HTMLElement} el
- * @param {number} scale
- */
-function setScale(el, scale) {
-    const face = el.querySelector(".keyboard-face");
-    if (!(face instanceof HTMLElement)) {
-        return;
-    }
-    face.style.width = (keyArtW * Math.min(Math.max(scale, 0.25), 8)) + "px";
-}
-
-/**
  * @param {Keyboard} kbd
  * @param {OverlayKeySpec} spec
  * @returns {HTMLElement}
@@ -386,24 +437,33 @@ function setScale(el, scale) {
 function makeHit(kbd, spec) {
     const hit = document.createElement("div");
     hit.className = "keyboard-hit";
+    if (spec.className !== "") {
+        hit.classList.add(spec.className);
+    }
     hit.style.left = (spec.x * 100 / keyArtW) + "%";
     hit.style.top = (spec.y * 100 / keyArtH) + "%";
     hit.style.width = (spec.w * 100 / keyArtW) + "%";
     hit.style.height = (spec.h * 100 / keyArtH) + "%";
-    hit.textContent = spec.label;
-    if (spec.title !== undefined) {
-        hit.title = spec.title;
-    }
+    const legend = document.createElement("small");
+    legend.textContent = spec.legend;
+    const label = document.createElement("span");
+    label.textContent = spec.label;
+    hit.append(legend, label);
     kbd.overlayKeys.push({el: hit, code: spec.code});
-    hit.oncontextmenu = function (e) {
-        e.preventDefault();
-    };
-    hit.addEventListener("touchstart", function (e) {
-        e.preventDefault();
-    }, {passive: false});
-    hit.addEventListener("touchend", function (e) {
-        e.preventDefault();
-    }, {passive: false});
+    hit.addEventListener(
+        "touchstart",
+        function (e) {
+            e.preventDefault();
+        },
+        {passive: false},
+    );
+    hit.addEventListener(
+        "touchend",
+        function (e) {
+            e.preventDefault();
+        },
+        {passive: false},
+    );
     hit.onpointerenter = function (e) {
         if (isCompatMouse(e)) {
             return;
@@ -435,20 +495,150 @@ function makeHit(kbd, spec) {
         }
         syncKeys(kbd);
     };
-    hit.onpointerup = function (e) {
-        releasePointerSoon(kbd, e.pointerId);
-    };
-    hit.onpointercancel = function (e) {
-        releasePointer(kbd, e.pointerId);
-        syncKeys(kbd);
-    };
-    hit.onlostpointercapture = function (e) {
-        releasePointerSoon(kbd, e.pointerId);
-    };
     return hit;
 }
 
-/** @param {Keyboard} kbd */
+/**
+ * Hold a host key and queue its QL code once, with any forced modifier
+ * applied first.
+ *
+ * @param {Keyboard} kbd
+ * @param {string} code
+ */
+function holdHost(kbd, code) {
+    for (let i = 0; i < kbd.hostHeld.length; i += 1) {
+        if (kbd.hostHeld[i] === code) {
+            return;
+        }
+    }
+    kbd.hostHeld.push(code);
+    const qlCode = hostCodes[code];
+    if (qlCode >= 0) {
+        /** @type {number[]} */
+        const pressed = [];
+        addHostHeld(pressed, code);
+        applyPressed(kbd.keys, pressed);
+        queueKey(kbd.keys, qlCode);
+    }
+}
+
+/**
+ * @param {Keyboard} kbd
+ * @param {string} code
+ */
+function releaseHost(kbd, code) {
+    for (let i = 0; i < kbd.hostHeld.length; i += 1) {
+        if (kbd.hostHeld[i] === code) {
+            kbd.hostHeld.splice(i, 1);
+            return;
+        }
+    }
+}
+
+/**
+ * Hold an onscreen key for a pointer and queue its code. A pointer already
+ * holding a key moves the hold without queueing again.
+ *
+ * @param {Keyboard} kbd
+ * @param {number} id
+ * @param {number} code
+ */
+function holdPointer(kbd, id, code) {
+    for (let i = 0; i < kbd.pointerHeld.length; i += 1) {
+        const p = kbd.pointerHeld[i];
+        if (p.id === id) {
+            p.code = code;
+            p.at = Date.now();
+            return;
+        }
+    }
+    kbd.pointerHeld.push({id, code, at: Date.now()});
+    if (code >= 0) {
+        queueKey(kbd.keys, code);
+    }
+}
+
+/**
+ * Queue a newly pressed character key for the IPC read-keys command.
+ *
+ * @param {KeyState} keys
+ * @param {number} code
+ */
+function queueKey(keys, code) {
+    let modifiers = 0;
+    if (keys.shift) {
+        modifiers |= keyModShift;
+    }
+    if (keys.ctrl) {
+        modifiers |= keyModCtrl;
+    }
+    if (keys.alt) {
+        modifiers |= keyModAlt;
+    }
+    keys.queue.push({modifiers, code});
+    if (keys.queue.length > maxQueuedKeys) {
+        keys.queue.shift();
+    }
+}
+
+/**
+ * Release a pointer's key, keeping it pressed as a pulse until it has been
+ * held for `minPointerHoldMs`, so the QL sees a quick tap.
+ *
+ * @param {Keyboard} kbd
+ * @param {number} id
+ */
+function releasePointerSoon(kbd, id) {
+    for (let i = 0; i < kbd.pointerHeld.length; i += 1) {
+        const p = kbd.pointerHeld[i];
+        if (p.id !== id) {
+            continue;
+        }
+        const remain = minPointerHoldMs - (Date.now() - p.at);
+        if (remain > 0) {
+            kbd.pulses.push({code: p.code, until: Date.now() + remain});
+            watchPulses(kbd);
+        }
+        kbd.pointerHeld.splice(i, 1);
+        syncKeys(kbd);
+        return;
+    }
+}
+
+/**
+ * Expire key pulses on animation frames until none remain.
+ *
+ * @param {Keyboard} kbd
+ */
+function watchPulses(kbd) {
+    if (kbd.pulseRaf !== 0) {
+        return;
+    }
+    kbd.pulseRaf = requestAnimationFrame(function tick() {
+        kbd.pulseRaf = 0;
+        const now = Date.now();
+        let expired = 0;
+        for (let i = kbd.pulses.length - 1; i >= 0; i -= 1) {
+            if (kbd.pulses[i].until <= now) {
+                kbd.pulses.splice(i, 1);
+                expired += 1;
+            }
+        }
+        if (expired !== 0) {
+            syncKeys(kbd);
+        }
+        if (kbd.pulses.length !== 0) {
+            kbd.pulseRaf = requestAnimationFrame(tick);
+        }
+    });
+}
+
+/**
+ * Rebuild the matrix and modifiers from every host key, pointer, and pulse
+ * holding a QL key. The overlay shows the held keys, without the pulses.
+ *
+ * @param {Keyboard} kbd
+ */
 function syncKeys(kbd) {
     const keys = kbd.keys;
     for (let i = 0; i < 8; i += 1) {
@@ -474,6 +664,17 @@ function syncKeys(kbd) {
 }
 
 /**
+ * Include a host key's QL code and any forced modifier in the pressed set.
+ *
+ * @param {number[]} pressed
+ * @param {string} hostCode
+ */
+function addHostHeld(pressed, hostCode) {
+    addPressed(pressed, hostCodes[hostCode]);
+    addPressed(pressed, hostForcedMods[hostCode]);
+}
+
+/**
  * @param {number[]} pressed
  * @param {number | undefined} code
  */
@@ -487,17 +688,6 @@ function addPressed(pressed, code) {
         }
     }
     pressed.push(code);
-}
-
-/**
- * Include a host key's QL code and any forced modifier in the pressed set.
- *
- * @param {number[]} pressed
- * @param {string} hostCode
- */
-function addHostHeld(pressed, hostCode) {
-    addPressed(pressed, hostCodes[hostCode]);
-    addPressed(pressed, hostForcedMods[hostCode]);
 }
 
 /**
@@ -524,53 +714,12 @@ function applyPressed(keys, pressed) {
             keys.rows[7] |= 4;
             break;
         default:
-            setMatrixBit(keys, code, true);
+            // Matrix codes 0-63 count rows from the bottom, eight keys to a row.
+            if (code >= 0 && code < 64) {
+                keys.rows[7 - Math.floor(code / 8)] |= 1 << (code % 8);
+            }
             break;
         }
-    }
-}
-
-/**
- * @param {KeyState} keys
- * @param {number} code
- * @param {boolean} down
- */
-function setMatrixBit(keys, code, down) {
-    if (code < 0 || code >= 64) {
-        return;
-    }
-    const row = 7 - Math.floor(code / 8);
-    const col = 1 << (code % 8);
-    if (down) {
-        keys.rows[row] |= col;
-    } else {
-        keys.rows[row] &= ~col;
-    }
-}
-
-/**
- * Queue a newly pressed character key for the IPC read-keys command.
- *
- * @param {KeyState} keys
- * @param {number} code
- */
-function queueKey(keys, code) {
-    if (code < 0) {
-        return;
-    }
-    let modifiers = 0;
-    if (keys.shift) {
-        modifiers |= keyModShift;
-    }
-    if (keys.ctrl) {
-        modifiers |= keyModCtrl;
-    }
-    if (keys.alt) {
-        modifiers |= keyModAlt;
-    }
-    keys.queue.push({modifiers, code});
-    if (keys.queue.length > maxQueuedKeys) {
-        keys.queue.shift();
     }
 }
 
@@ -597,142 +746,27 @@ function paintOverlay(kbd, pressed) {
 }
 
 /**
- * @param {Keyboard} kbd
- * @param {string} code
- */
-function holdHost(kbd, code) {
-    for (let i = 0; i < kbd.hostHeld.length; i += 1) {
-        if (kbd.hostHeld[i] === code) {
-            return;
-        }
-    }
-    kbd.hostHeld.push(code);
-    const qlCode = hostCodes[code];
-    if (qlCode !== undefined && qlCode >= 0) {
-        /** @type {number[]} */
-        const pressed = [];
-        addHostHeld(pressed, code);
-        applyPressed(kbd.keys, pressed);
-        queueKey(kbd.keys, qlCode);
-    }
-}
-
-/**
- * @param {Keyboard} kbd
- * @param {string} code
- */
-function releaseHost(kbd, code) {
-    for (let i = 0; i < kbd.hostHeld.length; i += 1) {
-        if (kbd.hostHeld[i] === code) {
-            kbd.hostHeld.splice(i, 1);
-            return;
-        }
-    }
-}
-
-/**
- * @param {Keyboard} kbd
- * @param {number} id
- * @param {number} code
- */
-function holdPointer(kbd, id, code) {
-    for (let i = 0; i < kbd.pointerHeld.length; i += 1) {
-        const p = kbd.pointerHeld[i];
-        if (p.id === id) {
-            p.code = code;
-            p.at = Date.now();
-            return;
-        }
-    }
-    kbd.pointerHeld.push({id, code, at: Date.now()});
-    if (code >= 0) {
-        applyPressed(kbd.keys, [code]);
-        queueKey(kbd.keys, code);
-    }
-}
-
-/**
- * @param {Keyboard} kbd
- * @param {number} id
- */
-function releasePointerSoon(kbd, id) {
-    for (let i = 0; i < kbd.pointerHeld.length; i += 1) {
-        const p = kbd.pointerHeld[i];
-        if (p.id !== id) {
-            continue;
-        }
-        const remain = minPointerHoldMs - (Date.now() - p.at);
-        if (remain > 0) {
-            kbd.pulses.push({code: p.code, until: Date.now() + remain});
-            watchPulses(kbd);
-        }
-        kbd.pointerHeld.splice(i, 1);
-        syncKeys(kbd);
-        return;
-    }
-}
-
-/**
- * @param {Keyboard} kbd
- * @param {number} id
- */
-function releasePointer(kbd, id) {
-    for (let i = 0; i < kbd.pointerHeld.length; i += 1) {
-        if (kbd.pointerHeld[i].id === id) {
-            kbd.pointerHeld.splice(i, 1);
-            return;
-        }
-    }
-}
-
-/** @param {Keyboard} kbd */
-function watchPulses(kbd) {
-    if (kbd.pulseRaf !== 0) {
-        return;
-    }
-    kbd.pulseRaf = requestAnimationFrame(function tick() {
-        kbd.pulseRaf = 0;
-        const now = Date.now();
-        let expired = 0;
-        for (let i = kbd.pulses.length - 1; i >= 0; i -= 1) {
-            if (kbd.pulses[i].until <= now) {
-                kbd.pulses.splice(i, 1);
-                expired += 1;
-            }
-        }
-        if (expired !== 0) {
-            syncKeys(kbd);
-        }
-        if (kbd.pulses.length !== 0) {
-            kbd.pulseRaf = requestAnimationFrame(tick);
-        }
-    });
-}
-
-/**
+ * Whether a pointer entering a key presses it: a touch always, a pen in
+ * contact, and a mouse with a button down or a touch-sized contact area.
+ *
  * @param {PointerEvent} e
  * @returns {boolean}
  */
 function isContactPointer(e) {
-    if (isCompatMouse(e)) {
-        return false;
-    }
-    if (e.pointerType === "mouse") {
-        if (e.buttons !== 0) {
-            return true;
-        }
-        if (e.width > 1 || e.height > 1) {
-            return true;
-        }
-        return false;
-    }
-    if (e.pointerType === "pen") {
+    switch (e.pointerType) {
+    case "mouse":
+        return e.buttons !== 0 || e.width > 1 || e.height > 1;
+    case "pen":
         return e.buttons !== 0;
+    default:
+        return true;
     }
-    return true;
 }
 
 /**
+ * A mouse event the browser made from a touch, which the touch handling
+ * already covers.
+ *
  * @param {PointerEvent} e
  * @returns {boolean}
  */
@@ -740,18 +774,57 @@ function isCompatMouse(e) {
     if (e.pointerType !== "mouse") {
         return false;
     }
-    return eventFromTouch(e);
+    const rec = /** @type {{sourceCapabilities?: {firesTouchEvents: boolean} | null}} */ (e);
+    const caps = rec.sourceCapabilities;
+    return caps !== undefined && caps !== null && caps.firesTouchEvents;
 }
 
 /**
- * @param {Event} e
- * @returns {boolean}
+ * Place the F-key column and the main rows on the board, left to right.
+ *
+ * @returns {OverlayKeySpec[]}
  */
-function eventFromTouch(e) {
-    const rec = /** @type {{sourceCapabilities?: {firesTouchEvents: boolean} | null}} */ (e);
-    const caps = rec.sourceCapabilities;
-    if (caps === undefined || caps === null) {
-        return false;
+function layoutOverlayKeys() {
+    /** @type {OverlayKeySpec[]} */
+    const specs = [];
+    for (let row = 0; row < overlayRows.length; row += 1) {
+        const y = keyArtMargin + row * keyPitch;
+        const fn = functionKeys[row];
+        specs.push({
+            label: fn.label,
+            code: fn.code,
+            codes: fn.codes,
+            x: keyArtMargin,
+            y,
+            w: keySpan(fn.units),
+            h: keyUnit,
+            legend: "",
+            className: "fn",
+        });
+        let x = mainBlockX;
+        for (const key of overlayRows[row]) {
+            const w = keySpan(key.units);
+            let className = "";
+            if (key.code === keyEnter) {
+                className = "enter";
+            }
+            let legend = "";
+            if (key.legend !== undefined) {
+                legend = key.legend;
+            }
+            specs.push({label: key.label, code: key.code, codes: key.codes, x, y, w, h: keyUnit, legend, className});
+            x += w + keyGap;
+        }
     }
-    return caps.firesTouchEvents;
+    return specs;
+}
+
+/**
+ * Width of a key `units` 1U keys wide, including the gaps it spans.
+ *
+ * @param {number} units
+ * @returns {number}
+ */
+function keySpan(units) {
+    return units * keyUnit + (units - 1) * keyGap;
 }

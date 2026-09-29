@@ -189,7 +189,11 @@ export function writeReg(state, reg, value) {
     refreshLevels(state);
 }
 
-/** @param {State} state @param {number} reg @returns {number} */
+/**
+ * @param {State} state
+ * @param {number} reg
+ * @returns {number}
+ */
 export function readReg(state, reg) {
     return state.regs[reg & 0x0F];
 }
@@ -256,21 +260,29 @@ function advanceTo(state, t, collect) {
     }
 }
 
-/** @param {State} state */
+/**
+ * One PSG clock after the input divider: the tones step on every tick, the
+ * noise on every other one, and the envelope on every other one too, except on
+ * a YM2149, where it steps on every tick.
+ *
+ * @param {State} state
+ */
 function tick(state) {
     const clock16 = !state.clockDividerPhase;
     state.clockDividerPhase = !state.clockDividerPhase;
     for (let channel = 0; channel < 3; channel += 1) {
         if (state.toneCounter[channel] === 0) {
             state.toneLevel[channel] ^= 1;
-            state.toneCounter[channel] = tonePeriod(state, channel) - 1;
+            // A zero period counts as one.
+            const period = ((state.regs[channel * 2 + 1] & 0x0F) << 8) | state.regs[channel * 2];
+            state.toneCounter[channel] = Math.max(period, 1) - 1;
         } else {
             state.toneCounter[channel] -= 1;
         }
     }
     if (clock16) {
         if (state.noiseCounter === 0) {
-            state.noiseCounter = noisePeriod(state) - 1;
+            state.noiseCounter = Math.max(state.regs[regNoise] & 0x1F, 1) - 1;
             const feedback = (state.noiseLfsr ^ (state.noiseLfsr >> 3)) & 1;
             state.noiseLfsr = (state.noiseLfsr >> 1) | (feedback << 16);
             state.noiseLevel = state.noiseLfsr & 1;
@@ -322,7 +334,13 @@ function resetEnvelope(state) {
     setEnvelopeLevel(state);
 }
 
-/** @param {State} state */
+/**
+ * Advance the envelope one level. At the end of a ramp the shape either holds
+ * at 0 or at the top level, or starts another ramp, reversing when it
+ * alternates.
+ *
+ * @param {State} state
+ */
 function stepEnvelope(state) {
     if (state.env.holding) {
         return;
@@ -366,17 +384,10 @@ function setEnvelopeLevel(state) {
     }
 }
 
-/** @param {State} state @param {number} channel @returns {number} */
-function tonePeriod(state, channel) {
-    return Math.max((state.regs[channel * 2 + 1] & 0x0F) << 8 | state.regs[channel * 2], 1);
-}
-
-/** @param {State} state @returns {number} */
-function noisePeriod(state) {
-    return Math.max(state.regs[regNoise] & 0x1F, 1);
-}
-
-/** @param {State} state @returns {number} */
+/**
+ * @param {State} state
+ * @returns {number}
+ */
 function envelopePeriod(state) {
     return Math.max(state.regs[regEnvFine] | state.regs[regEnvCoarse] << 8, 1);
 }

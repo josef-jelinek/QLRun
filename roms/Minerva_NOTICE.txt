@@ -1,0 +1,28 @@
+Minerva ROM notice
+
+Bundled file:
+  minerva.rom
+
+Version:
+  Minerva 1.98a1, English (upstream file name Minerva_1.98a1.bin)
+
+Binary source:
+  https://www.kilgus.net/soft/minerva_1.98a1.zip
+
+Source code:
+  https://github.com/MarcelKilgus/Minerva
+
+Source revision inspected:
+  29e5365f6c0333d47410160a75f66fda3532ff1c
+
+The 49152-byte minerva.rom file is byte-identical to Minerva_1.98a1.bin in
+the binary archive above, which the source repository builds as its English
+1.98 A1 ROM.
+
+SHA-256:
+  bc954b7b5fb12b1ed98cc54d8cf13f425d97b79997e9bc967a8715f1ccbf5555
+
+Minerva was written by Laurence Reeves at QView, who released its sources,
+and is maintained by Marcel Kilgus. The source repository is licensed under
+the GNU General Public License version 2. The license text is included next
+to the ROM as Minerva_GPL-2.0.txt.

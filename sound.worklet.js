@@ -68,7 +68,12 @@ const dcBlockPole = 1 - 2 * Math.PI * dcBlockHz / sampleRate;
  * }} WorkletProc
  */
 
-/** @returns {WorkletProc} */
+/**
+ * Build the processor instance without `class` syntax. Its state lives on the
+ * instance, and `process` and `onmessage` forward to plain functions.
+ *
+ * @returns {WorkletProc}
+ */
 function QLRunProcessor() {
     const p = /** @type {WorkletProc} */ (Reflect.construct(AudioWorkletProcessor, [], QLRunProcessor));
     p.chunks = [];
@@ -115,12 +120,15 @@ function QLRunProcessor() {
 
     return p;
 }
+
 QLRunProcessor.prototype = Object.create(AudioWorkletProcessor.prototype);
 QLRunProcessor.prototype.constructor = QLRunProcessor;
 
 registerProcessor("qlrun-out", QLRunProcessor);
 
 /**
+ * Apply a control message from sound.js, or queue a chunk of samples.
+ *
  * @param {WorkletProc} p
  * @param {WorkletMessage} data
  */
@@ -165,12 +173,16 @@ function handleMessage(p, data) {
         p.chunks.push({samples: data.samples, length: data.length});
         trimOldAudio(p);
         p.waiting = false;
-        request(p, 128);
+        request(p);
         return;
     }
 }
 
 /**
+ * Fill one render quantum from the queue. An underrun plays silence, counted
+ * as a gap unless paused, and the next audio fades in. Stats go out once a
+ * second.
+ *
  * @param {WorkletProc} p
  * @param {Float32Array[]} output
  */
@@ -178,8 +190,7 @@ function process(p, output) {
     const ol = output[0];
     const or = output[1];
     const n = ol.length;
-    let i = 0;
-    while (i < n) {
+    for (let i = 0; i < n;) {
         if (p.head >= p.chunks.length) {
             if (!p.fadeInPending) {
                 beginTransition(p);
@@ -235,7 +246,7 @@ function process(p, output) {
         p.statsSamples = 0;
         p.port.postMessage({type: "stats", cut: p.cutSamples, gap: p.gapSamples});
     }
-    request(p, n);
+    request(p);
 }
 
 /**
@@ -251,9 +262,8 @@ function process(p, output) {
  * message some way into the audio it describes.
  *
  * @param {WorkletProc} p
- * @param {number} quantum
  */
-function request(p, quantum) {
+function request(p) {
     const remain = queuedLength(p);
     if (remain >= p.lowSamples) {
         return;
@@ -263,22 +273,7 @@ function request(p, quantum) {
     }
     p.waiting = true;
     p.waitSamples = 0;
-    p.port.postMessage({type: "need", remain, quantum, received: p.receivedSamples, time: currentTime});
-}
-
-/** @param {WorkletProc} p */
-function queuedLength(p) {
-    let remain = 0;
-    for (let i = p.head; i < p.chunks.length; i += 1) {
-        let len = p.chunks[i].length;
-        if (i === p.head) {
-            len -= p.offset;
-        }
-        if (len > 0) {
-            remain += len;
-        }
-    }
-    return remain;
+    p.port.postMessage({type: "need", remain, received: p.receivedSamples, time: currentTime});
 }
 
 /** @param {WorkletProc} p */
@@ -302,6 +297,24 @@ function trimOldAudio(p) {
         }
     }
     dropPlayed(p);
+}
+
+/**
+ * @param {WorkletProc} p
+ * @returns {number}
+ */
+function queuedLength(p) {
+    let remain = 0;
+    for (let i = p.head; i < p.chunks.length; i += 1) {
+        let len = p.chunks[i].length;
+        if (i === p.head) {
+            len -= p.offset;
+        }
+        if (len > 0) {
+            remain += len;
+        }
+    }
+    return remain;
 }
 
 /**

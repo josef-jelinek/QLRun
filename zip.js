@@ -1,9 +1,9 @@
 // Minimal ZIP reader: central directory listing and single-entry extraction,
 // with the entry name decoded and the extracted bytes checked against the
 // CRC-32 the directory carries. Deflate is done by the browser's
-// DecompressionStream, so no library is needed. ZIP64, multi-disk and encrypted
-// archives are refused, as is any compression method other than stored and
-// deflate.
+// DecompressionStream, so no library is needed. ZIP64 and multi-disk archives
+// are refused; an encrypted entry, or one compressed other than stored or
+// deflated, is refused on its own.
 
 const eocdSig = 0x06054B50;
 const centralSig = 0x02014B50;
@@ -175,7 +175,8 @@ export function readEntry(bytes, entry, onDone) {
         return;
     }
     const comp = u8.subarray(start, end);
-    if (entry.method === 0) {
+    switch (entry.method) {
+    case 0:
         const err = entryFail(entry, comp);
         if (err !== null) {
             onDone(err, null);
@@ -183,8 +184,9 @@ export function readEntry(bytes, entry, onDone) {
         }
         onDone(null, comp.slice().buffer);
         return;
-    }
-    if (entry.method !== 8) {
+    case 8:
+        break;
+    default:
         onDone("ZIP entry " + entry.name + " uses unsupported compression " + entry.method + ".", null);
         return;
     }

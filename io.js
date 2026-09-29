@@ -7,7 +7,9 @@
  */
 
 /**
- * Fetch a bounded HTTP resource and return a callback-driven abort operation.
+ * Fetch a bounded HTTP resource and return a callback-driven abort operation,
+ * or null when the request could not start and `onDone` has already run.
+ * Aborting reports "Canceled." through `onDone`.
  *
  * @param {string} url
  * @param {XMLHttpRequestResponseType} responseType
@@ -23,41 +25,44 @@ export function httpGet(url, responseType, maxBytes, onDone) {
     xhr.responseType = responseType;
 
     xhr.onprogress = function (e) {
-        if (xhr !== null) {
-            if ((Number.isFinite(e.total) && e.total > maxBytes) || (Number.isFinite(e.loaded) && e.loaded > maxBytes)) {
-                const r = xhr;
-                xhr = null; // set to null before abort as onabort is called immediately
-                r.abort();
-                onDone(errLead + ": Response is larger than " + maxBytes + " bytes.", null);
-            }
+        const tooLarge = (Number.isFinite(e.total) && e.total > maxBytes) || (Number.isFinite(e.loaded) && e.loaded > maxBytes);
+        if (xhr === null || !tooLarge) {
+            return;
         }
+        const r = xhr;
+        xhr = null; // set to null before abort as onabort is called immediately
+        r.abort();
+        onDone(errLead + ": Response is larger than " + maxBytes + " bytes.", null);
     };
 
     xhr.onload = function () {
-        if (xhr !== null) {
-            const status = xhr.status;
-            const response = xhr.response;
-            xhr = null;
-            if (status !== 200 && status !== 0) {
-                onDone(errLead + " (HTTP " + status + ").", null);
-                return;
-            }
-            onDone(null, response);
+        if (xhr === null) {
+            return;
         }
+        const status = xhr.status;
+        const response = xhr.response;
+        xhr = null;
+        if (status !== 200 && status !== 0) {
+            onDone(errLead + " (HTTP " + status + ").", null);
+            return;
+        }
+        onDone(null, response);
     };
 
     xhr.onerror = function () {
-        if (xhr !== null) {
-            xhr = null;
-            onDone(errLead + ".", null);
+        if (xhr === null) {
+            return;
         }
+        xhr = null;
+        onDone(errLead + ".", null);
     };
 
     xhr.onabort = function () {
-        if (xhr !== null) {
-            xhr = null;
-            onDone(errLead + ": Canceled.", null);
+        if (xhr === null) {
+            return;
         }
+        xhr = null;
+        onDone(errLead + ": Canceled.", null);
     };
 
     try {

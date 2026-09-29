@@ -12,16 +12,21 @@ import * as sound from "./sound.js";
 
 const statsWindowMs = 1000;
 const carryFloorMs = -80;
-const mdvActivityHoldMs = 50;
+const activityHoldMs = 50;
 const turboMultiplier = 8;
 const sectorsPerMebibyte = 2048;
+const sectorBytes = 512;
 const guestColumns = 512;
 const guestRows = 256;
 const ntscCrtRows = 192;
 const wheelPixelsPerStep = 100;
 const wheelLinesPerStep = 3;
+const maxFrameStepMs = 80;
+const maxFramesPerRefresh = 4;
+const fullRamKb = 896;
+const ramBesideSoundCardKb = 640;
 /**
- * Page defaults of the URL parameters that controls write back. A control
+ * Page defaults of the URL parameters that the controls write back. A control
  * changed to its default removes its parameter instead of repeating it.
  *
  * @type {Record<string, string>}
@@ -40,98 +45,168 @@ const urlParamDefaults = {
     stretch: "0",
 };
 
+/**
+ * One drive card: its status line, meter, activity light, and file actions.
+ *
+ * @typedef {{
+ *   card: HTMLElement,
+ *   info: HTMLElement,
+ *   modified: HTMLElement,
+ *   led: HTMLElement,
+ *   statusLed: HTMLElement,
+ *   meter: HTMLElement,
+ *   meterBar: HTMLElement,
+ *   size: HTMLElement,
+ *   free: HTMLElement,
+ *   load: HTMLButtonElement,
+ *   file: HTMLInputElement,
+ *   download: HTMLButtonElement,
+ *   eject: HTMLButtonElement,
+ * }} DriveControls
+ */
+
+/**
+ * What a drive card last showed, so unchanged drives leave the DOM alone, and
+ * the transfer counts behind its activity light. `spaceWrites` is the write
+ * count the space meter shows, or -1 to redraw it; `state` and `lit` are the
+ * light's activity and whether a medium is in, and `until` holds a brief
+ * transfer visible. `driverReady` and `generation` apply to the hard disk and
+ * floppy only.
+ *
+ * @typedef {{
+ *   inserted: boolean,
+ *   name: string,
+ *   modified: boolean,
+ *   driverReady: boolean,
+ *   generation: number,
+ *   readCount: number,
+ *   writeCount: number,
+ *   spaceWrites: number,
+ *   until: number,
+ *   state: string,
+ *   lit: boolean,
+ * }} DriveStatus
+ */
+
 const ui = {
-    pageHeader:       /** @type {HTMLElement} */       (document.getElementById("page-header")),
+    chipVideoMain:    /** @type {HTMLElement} */       (document.getElementById("chip-video-main")),
+    chipVideoSub:     /** @type {HTMLElement} */       (document.getElementById("chip-video-sub")),
+    chipRamMain:      /** @type {HTMLElement} */       (document.getElementById("chip-ram-main")),
+    chipSoundMain:    /** @type {HTMLElement} */       (document.getElementById("chip-sound-main")),
+    chipRomMain:      /** @type {HTMLElement} */       (document.getElementById("chip-rom-main")),
+    chipRomSub:       /** @type {HTMLElement} */       (document.getElementById("chip-rom-sub")),
+    chipMouse:        /** @type {HTMLElement} */       (document.getElementById("chip-mouse")),
+    chipMouseMain:    /** @type {HTMLElement} */       (document.getElementById("chip-mouse-main")),
     tabs: [
         /** @type {HTMLInputElement} */ (document.getElementById("tab-media")),
         /** @type {HTMLInputElement} */ (document.getElementById("tab-roms")),
         /** @type {HTMLInputElement} */ (document.getElementById("tab-hardware")),
         /** @type {HTMLInputElement} */ (document.getElementById("tab-display")),
     ],
+    tabPanels:        /** @type {HTMLElement} */       (document.getElementById("tab-panels")),
     initInfo:         /** @type {HTMLElement} */       (document.getElementById("init-info")),
     qsoundInfo:       /** @type {HTMLElement} */       (document.getElementById("qsound-info")),
-    soundInfo:        /** @type {HTMLElement} */       (document.getElementById("sound-info")),
+    audioInfo:        /** @type {HTMLElement} */       (document.getElementById("audio-info")),
     startupFileInfo:  /** @type {HTMLElement} */       (document.getElementById("startup-file-info")),
+    dropInfo:         /** @type {HTMLElement} */       (document.getElementById("drop-info")),
+    fps:              /** @type {HTMLElement} */       (document.getElementById("fps")),
+    cut:              /** @type {HTMLElement} */       (document.getElementById("cut")),
+    gap:              /** @type {HTMLElement} */       (document.getElementById("gap")),
     mdv: [
-        {
-            newMdv:   /** @type {HTMLButtonElement} */ (document.getElementById("new-mdv1")),
-            load:     /** @type {HTMLButtonElement} */ (document.getElementById("load-mdv1")),
-            file:     /** @type {HTMLInputElement} */  (document.getElementById("file-mdv1")),
-            download: /** @type {HTMLButtonElement} */ (document.getElementById("download-mdv1")),
-            eject:    /** @type {HTMLButtonElement} */ (document.getElementById("eject-mdv1")),
-            info:     /** @type {HTMLElement} */       (document.getElementById("mdv1-info")),
-        },
-        {
-            newMdv:   /** @type {HTMLButtonElement} */ (document.getElementById("new-mdv2")),
-            load:     /** @type {HTMLButtonElement} */ (document.getElementById("load-mdv2")),
-            file:     /** @type {HTMLInputElement} */  (document.getElementById("file-mdv2")),
-            download: /** @type {HTMLButtonElement} */ (document.getElementById("download-mdv2")),
-            eject:    /** @type {HTMLButtonElement} */ (document.getElementById("eject-mdv2")),
-            info:     /** @type {HTMLElement} */       (document.getElementById("mdv2-info")),
-        },
+        driveControls("mdv1", "led-mdv1"),
+        driveControls("mdv2", "led-mdv2"),
     ],
+    newMdv: [
+        /** @type {HTMLButtonElement} */ (document.getElementById("new-mdv1")),
+        /** @type {HTMLButtonElement} */ (document.getElementById("new-mdv2")),
+    ],
+    hdd:              driveControls("hdd", "led-win1"),
+    newHddMenu:       /** @type {HTMLDetailsElement} */ (document.getElementById("new-hdd-menu")),
+    newHdd4:          /** @type {HTMLButtonElement} */ (document.getElementById("new-hdd-4")),
+    newHdd16:         /** @type {HTMLButtonElement} */ (document.getElementById("new-hdd-16")),
+    fdd:              driveControls("fdd", "led-flp1"),
+    newFddMenu:       /** @type {HTMLDetailsElement} */ (document.getElementById("new-fdd-menu")),
+    newFddDd:         /** @type {HTMLButtonElement} */ (document.getElementById("new-fdd-dd")),
+    newFddHd:         /** @type {HTMLButtonElement} */ (document.getElementById("new-fdd-hd")),
     loadRom:          /** @type {HTMLButtonElement} */ (document.getElementById("load-rom")),
     fileRom:          /** @type {HTMLInputElement} */  (document.getElementById("file-rom")),
     romInfo:          /** @type {HTMLElement} */       (document.getElementById("rom-info")),
+    romMinerva:       /** @type {HTMLButtonElement} */ (document.getElementById("rom-minerva")),
+    romToolkit2:      /** @type {HTMLButtonElement} */ (document.getElementById("rom-toolkit2")),
+    romAuto:          /** @type {HTMLButtonElement} */ (document.getElementById("rom-auto")),
+    romAutoBadge:     /** @type {HTMLElement} */       (document.getElementById("rom-auto-badge")),
     romSlots: [
         {
+            card:     /** @type {HTMLElement} */       (document.getElementById("rom-cart-card")),
+            map:      /** @type {HTMLElement} */       (document.getElementById("map-cart")),
             load:     /** @type {HTMLButtonElement} */ (document.getElementById("load-rom-cart")),
             file:     /** @type {HTMLInputElement} */  (document.getElementById("file-rom-cart")),
             eject:    /** @type {HTMLButtonElement} */ (document.getElementById("eject-rom-cart")),
             info:     /** @type {HTMLElement} */       (document.getElementById("rom-cart-info")),
         },
         {
+            card:     /** @type {HTMLElement} */       (document.getElementById("rom-io1-card")),
+            map:      /** @type {HTMLElement} */       (document.getElementById("map-io1")),
             load:     /** @type {HTMLButtonElement} */ (document.getElementById("load-rom-io1")),
             file:     /** @type {HTMLInputElement} */  (document.getElementById("file-rom-io1")),
             eject:    /** @type {HTMLButtonElement} */ (document.getElementById("eject-rom-io1")),
             info:     /** @type {HTMLElement} */       (document.getElementById("rom-io1-info")),
         },
         {
+            card:     /** @type {HTMLElement} */       (document.getElementById("rom-io2-card")),
+            map:      /** @type {HTMLElement} */       (document.getElementById("map-io2")),
             load:     /** @type {HTMLButtonElement} */ (document.getElementById("load-rom-io2")),
             file:     /** @type {HTMLInputElement} */  (document.getElementById("file-rom-io2")),
             eject:    /** @type {HTMLButtonElement} */ (document.getElementById("eject-rom-io2")),
             info:     /** @type {HTMLElement} */       (document.getElementById("rom-io2-info")),
         },
     ],
-    newHdd4:          /** @type {HTMLButtonElement} */ (document.getElementById("new-hdd-4")),
-    newHdd16:         /** @type {HTMLButtonElement} */ (document.getElementById("new-hdd-16")),
-    loadHdd:          /** @type {HTMLButtonElement} */ (document.getElementById("load-hdd")),
-    fileHdd:          /** @type {HTMLInputElement} */  (document.getElementById("file-hdd")),
-    downloadHdd:      /** @type {HTMLButtonElement} */ (document.getElementById("download-hdd")),
-    ejectHdd:         /** @type {HTMLButtonElement} */ (document.getElementById("eject-hdd")),
-    hddInfo:          /** @type {HTMLElement} */       (document.getElementById("hdd-info")),
-    newFddDd:         /** @type {HTMLButtonElement} */ (document.getElementById("new-fdd-dd")),
-    newFddHd:         /** @type {HTMLButtonElement} */ (document.getElementById("new-fdd-hd")),
-    loadFdd:          /** @type {HTMLButtonElement} */ (document.getElementById("load-fdd")),
-    fileFdd:          /** @type {HTMLInputElement} */  (document.getElementById("file-fdd")),
-    downloadFdd:      /** @type {HTMLButtonElement} */ (document.getElementById("download-fdd")),
-    ejectFdd:         /** @type {HTMLButtonElement} */ (document.getElementById("eject-fdd")),
-    fddInfo:          /** @type {HTMLElement} */       (document.getElementById("fdd-info")),
     paused:           /** @type {HTMLInputElement} */  (document.getElementById("paused")),
     reset:            /** @type {HTMLButtonElement} */ (document.getElementById("reset")),
+    monitor:          /** @type {HTMLElement} */       (document.getElementById("monitor")),
+    screenInfo:       /** @type {HTMLElement} */       (document.getElementById("screen-info")),
     screenSlot:       /** @type {HTMLElement} */       (document.getElementById("screen-slot")),
     screen:           /** @type {HTMLCanvasElement} */ (document.getElementById("screen")),
+    mouseHint:        /** @type {HTMLElement} */       (document.getElementById("mouse-hint")),
+    keyboardPanel:    /** @type {HTMLElement} */       (document.getElementById("keyboard-panel")),
     keyboardSplit:    /** @type {HTMLElement} */       (document.getElementById("keyboard-split")),
     keyboard:         /** @type {HTMLElement} */       (document.getElementById("keyboard")),
     keyboardToggle:   /** @type {HTMLInputElement} */  (document.getElementById("keyboard-toggle")),
     crt:              /** @type {HTMLInputElement} */  (document.getElementById("crt")),
+    pal:              /** @type {HTMLInputElement} */  (document.getElementById("pal")),
+    ntsc:             /** @type {HTMLInputElement} */  (document.getElementById("ntsc")),
+    videoDesc:        /** @type {HTMLElement} */       (document.getElementById("video-desc")),
+    ram: [
+        {kb: 128, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-128"))},
+        {kb: 384, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-384"))},
+        {kb: 640, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-640"))},
+        {kb: 896, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-896"))},
+    ],
+    ramNote:          /** @type {HTMLElement} */       (document.getElementById("ram-note")),
+    qsoundOff:        /** @type {HTMLInputElement} */  (document.getElementById("qsound-off")),
     qsound:           /** @type {HTMLInputElement} */  (document.getElementById("qsound")),
     qsound2:          /** @type {HTMLInputElement} */  (document.getElementById("qsound2")),
+    qsoundRomState:   /** @type {HTMLElement} */       (document.getElementById("qsound-rom-state")),
+    soundDesc:        /** @type {HTMLElement} */       (document.getElementById("sound-desc")),
+    soundNote:        /** @type {HTMLElement} */       (document.getElementById("sound-note")),
     stereo:           /** @type {HTMLInputElement} */  (document.getElementById("stereo")),
     muted:            /** @type {HTMLInputElement} */  (document.getElementById("muted")),
-    ntsc:             /** @type {HTMLInputElement} */  (document.getElementById("ntsc")),
-    ram256:           /** @type {HTMLInputElement} */  (document.getElementById("ram-256")),
-    ram512:           /** @type {HTMLInputElement} */  (document.getElementById("ram-512")),
+    mouseOff:         /** @type {HTMLInputElement} */  (document.getElementById("mouse-off")),
     mouseQimsi:       /** @type {HTMLInputElement} */  (document.getElementById("mouse-qimsi")),
     mousePe:          /** @type {HTMLInputElement} */  (document.getElementById("mouse-pe")),
+    mouseDesc:        /** @type {HTMLElement} */       (document.getElementById("mouse-desc")),
     mouseCursor:      /** @type {HTMLInputElement} */  (document.getElementById("mouse-cursor")),
     turbo:            /** @type {HTMLInputElement} */  (document.getElementById("turbo")),
     stretch:          /** @type {HTMLInputElement} */  (document.getElementById("stretch")),
     fullscreenToggle: /** @type {HTMLButtonElement} */ (document.getElementById("fullscreen-toggle")),
+    fullscreenQuick:  /** @type {HTMLButtonElement} */ (document.getElementById("fullscreen-quick")),
+    fullscreenCtrl:   /** @type {HTMLButtonElement} */ (document.getElementById("fullscreen-ctrl")),
+    drop:             /** @type {HTMLElement} */       (document.getElementById("drop")),
 };
 
 const query = new URLSearchParams(window.location.search);
-const configuredRomName = query.get("rom") ?? "";
+let configuredRomName = query.get("rom") ?? "";
+const configuredCartName = query.get("cart") ?? "";
 /** PS/2 counts per displayed 512-mode pixel; at 1, QIMSI's PE driver follows the host 1:1. */
 const mouseCountsPerPixel = mouseSpeedFromParam(query.get("mspeed") ?? "");
 const configuredMouseModel = mouseFromParam(query.get("mouse") ?? "");
@@ -145,8 +220,9 @@ const keys = {
 const ql = machine.create(keys);
 const configuredRamKb = ramKbFromParam(query.get("ram") ?? "");
 machine.setRamKb(ql, configuredRamKb);
-ui.ram256.checked = configuredRamKb === 384 || configuredRamKb === 896;
-ui.ram512.checked = configuredRamKb === 640 || configuredRamKb === 896;
+for (const option of ui.ram) {
+    option.input.checked = option.kb === configuredRamKb;
+}
 const kbd = keyboard.init(ui.keyboard, keys);
 
 /** @type {import("./screen.js").Gfx | null} */
@@ -155,69 +231,84 @@ let gfx = null;
 let sfx = null;
 /** @type {(function(): void) | null} */
 let abortLoadRom = null;
+/**
+ * Bumped when a system ROM fetch starts or is canceled, so that a canceled
+ * fetch finishes silently.
+ */
+let systemRomLoads = 0;
 /** @type {(function(): void) | null} */
 let abortLoadStartupFile = null;
+let startupFileCanceled = false;
 /** @type {string | null} */
 let startupFileName = null;
 /** @type {ArrayBuffer | null} */
 let startupFileBytes = null;
 let startupRomReady = false;
-let defaultRomSelected = configuredRomName === "";
+let systemRomFromFile = false;
+let systemRomName = "";
 let lastNow = 0;
 let carryMs = 0;
 let framesRun = 0;
 let statsAt = 0;
 let statsCut = 0;
 let statsGap = 0;
-const mdvActivity = [
-    {readCount: 0, writeCount: 0, until: 0, state: "idle", inserted: false, name: "", modified: false},
-    {readCount: 0, writeCount: 0, until: 0, state: "idle", inserted: false, name: "", modified: false},
-];
+/** @type {DriveStatus[]} */
+const mdvStatus = [newDriveStatus(), newDriveStatus()];
+const hddStatus = newDriveStatus();
+const fddStatus = newDriveStatus();
 /**
- * @typedef {{
- *   inserted: boolean,
- *   name: string,
- *   modified: boolean,
- *   driverReady: boolean,
- *   generation: number,
- * }} DriveStatus
+ * Per extension-ROM slot: the image's name, its load error, a generation that
+ * makes superseded loads finish silently, and the `roms/` name of a bundled
+ * image, or "".
  */
-const hddStatus = {inserted: false, name: "", modified: false, driverReady: false, generation: 1};
-const fddStatus = {inserted: false, name: "", modified: false, driverReady: false, generation: 1};
 const romSlotStates = [
-    {name: "", error: "", generation: 0},
-    {name: "", error: "", generation: 0},
-    {name: "", error: "", generation: 0},
+    {name: "", error: "", generation: 0, bundled: ""},
+    {name: "", error: "", generation: 0, bundled: ""},
+    {name: "", error: "", generation: 0, bundled: ""},
 ];
+const cartridgeSlot = 0;
 let wheelSteps = 0;
-let keyboardVisible = false;
 let screenOnly = false;
 let screenOnlyFallback = false;
+let shownMode8 = false;
+let dragDepth = 0;
+let splitStartY = 0;
+let splitStartHeight = 0;
+let splitMaxHeight = 0;
 
 const ntscOn = (query.get("ntsc") ?? "") === "1";
 ui.ntsc.checked = ntscOn;
+ui.pal.checked = !ntscOn;
 machine.setNtsc(ql, ntscOn);
 let frameMs = 1000 / machine.frameHz(ql);
 
-applySwitchParam(ui.keyboardToggle, "keyboard", "1", "01");
-applySwitchParam(ui.crt, "crt", "1", "01");
-applySwitchParam(ui.qsound, "qsound", "1", "012");
-applySwitchParam(ui.qsound2, "qsound", "2", "012");
-applySwitchParam(ui.stereo, "stereo", "1", "01");
-applySwitchParam(ui.muted, "muted", "1", "01");
+applySwitchParam(ui.keyboardToggle, "keyboard");
+applySwitchParam(ui.crt, "crt");
+switch (query.get("qsound") ?? "") {
+case "0":
+    ui.qsoundOff.checked = true;
+    break;
+case "2":
+    ui.qsound2.checked = true;
+    break;
+default:
+    break;
+}
+applySwitchParam(ui.stereo, "stereo");
+applySwitchParam(ui.muted, "muted");
 ui.mouseQimsi.checked = configuredMouseModel === machine.mouseQimsi;
 ui.mousePe.checked = configuredMouseModel === machine.mousePe;
-applySwitchParam(ui.mouseCursor, "mcursor", "1", "01");
-applySwitchParam(ui.turbo, "turbo", "1", "01");
-applySwitchParam(ui.stretch, "stretch", "1", "01");
+ui.mouseOff.checked = configuredMouseModel === machine.mouseOff;
+applySwitchParam(ui.mouseCursor, "mcursor");
+applySwitchParam(ui.turbo, "turbo");
+applySwitchParam(ui.stretch, "stretch");
 ui.paused.checked = false;
-keyboardVisible = ui.keyboardToggle.checked;
 applyVisibility();
 machine.setMouseModel(ql, configuredMouseModel);
+refreshSummary();
+refreshSystemRom();
 
-ui.reset.onclick = function () {
-    resetSystem();
-};
+ui.reset.onclick = resetSystem;
 
 ui.paused.onchange = function () {
     if (sfx === null) {
@@ -235,7 +326,6 @@ ui.paused.onchange = function () {
 
 ui.keyboardToggle.onchange = function () {
     updateUrlParam("keyboard", ui.keyboardToggle.checked);
-    keyboardVisible = ui.keyboardToggle.checked;
     applyVisibility();
 };
 
@@ -260,34 +350,17 @@ ui.muted.onchange = function () {
     }
 };
 
-ui.qsound.onchange = function () {
-    updateQsoundSelection(ui.qsound, machine.qsoundOriginal);
-};
-
-ui.qsound2.onchange = function () {
-    updateQsoundSelection(ui.qsound2, machine.qsound2);
-};
-
-ui.ntsc.onchange = function () {
-    updateUrlParam("ntsc", ui.ntsc.checked);
-    machine.setNtsc(ql, ui.ntsc.checked);
-    resetSystem();
-    syncFrameTiming();
-    if (defaultRomSelected) {
-        loadSystemRom();
-    }
-};
-
-ui.ram256.onchange = updateRamSize;
-ui.ram512.onchange = updateRamSize;
-
-ui.mouseQimsi.onchange = function () {
-    updateMouseSelection(ui.mouseQimsi, machine.mouseQimsi);
-};
-
-ui.mousePe.onchange = function () {
-    updateMouseSelection(ui.mousePe, machine.mousePe);
-};
+ui.qsoundOff.onchange = selectSoundCard;
+ui.qsound.onchange = selectSoundCard;
+ui.qsound2.onchange = selectSoundCard;
+ui.pal.onchange = selectVideoStandard;
+ui.ntsc.onchange = selectVideoStandard;
+for (const option of ui.ram) {
+    option.input.onchange = selectRamSize;
+}
+ui.mouseOff.onchange = selectMouse;
+ui.mouseQimsi.onchange = selectMouse;
+ui.mousePe.onchange = selectMouse;
 
 ui.mouseCursor.onchange = function () {
     updateUrlParam("mcursor", ui.mouseCursor.checked);
@@ -304,11 +377,16 @@ ui.stretch.onchange = function () {
     }
 };
 
-ui.fullscreenToggle.onclick = function () {
-    toggleCanvasFullscreen();
-};
+ui.fullscreenToggle.onclick = toggleCanvasFullscreen;
+ui.fullscreenQuick.onclick = toggleCanvasFullscreen;
+ui.fullscreenCtrl.onclick = toggleCanvasFullscreen;
 
 ui.screen.onmousedown = function (/** @type {MouseEvent} */ e) {
+    // Keys go to the QL after a click on the screen, even where the mouse
+    // models below keep the click from moving the page focus.
+    if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+    }
     switch (ql.mouseModel) {
     case machine.mousePe:
         e.preventDefault();
@@ -399,13 +477,18 @@ ui.keyboardSplit.onpointerdown = function (/** @type {PointerEvent} */ e) {
     }
     e.preventDefault();
     document.body.classList.add("keyboard-splitting");
-    keyboard.scaleFromY(ui.keyboard, ui.keyboardSplit, e.clientY);
+    // Dragging up by a pixel grows the face by a pixel, down to a minimum
+    // screen window above it.
+    splitStartY = e.clientY;
+    splitStartHeight = keyboard.faceHeight(ui.keyboard);
+    const monitorSlack = ui.monitor.getBoundingClientRect().height - parseFloat(getComputedStyle(ui.monitor).minHeight);
+    splitMaxHeight = splitStartHeight + Math.max(monitorSlack, 0);
     ui.keyboardSplit.setPointerCapture(e.pointerId);
 };
 
 ui.keyboardSplit.onpointermove = function (/** @type {PointerEvent} */ e) {
     if (ui.keyboardSplit.hasPointerCapture(e.pointerId)) {
-        keyboard.scaleFromY(ui.keyboard, ui.keyboardSplit, e.clientY);
+        keyboard.setFaceHeight(ui.keyboard, splitStartHeight + splitStartY - e.clientY, splitMaxHeight);
     }
 };
 
@@ -446,16 +529,17 @@ window.onkeydown = function (e) {
         }
         return;
     }
-    const selectingSwitch = isSwitchTarget(e.target);
-    if (!selectingSwitch || e.code.startsWith("F")) {
+    if (!isTabKey(e)) {
         keyboard.handleKeyDown(kbd, e);
     }
 };
 
-window.onpointerdown = function () {
+window.onpointerdown = function (e) {
     if (sfx !== null) {
         sound.resume(sfx);
     }
+    closeMenuOutside(ui.newHddMenu, e.target);
+    closeMenuOutside(ui.newFddMenu, e.target);
 };
 
 window.onkeyup = function (e) {
@@ -463,8 +547,7 @@ window.onkeyup = function (e) {
         e.preventDefault();
         return;
     }
-    const selectingSwitch = isSwitchTarget(e.target);
-    if (!selectingSwitch || kbd.hostHeld.includes(e.code)) {
+    if (!isTabKey(e) || kbd.hostHeld.includes(e.code)) {
         keyboard.handleKeyUp(kbd, e);
     }
 };
@@ -473,11 +556,51 @@ window.onblur = function () {
     keyboard.handleBlur(kbd);
 };
 
+window.ondragenter = function (e) {
+    if (!carriesFiles(e)) {
+        return;
+    }
+    e.preventDefault();
+    dragDepth += 1;
+    ui.drop.classList.add("on");
+};
+
+window.ondragover = function (e) {
+    if (!carriesFiles(e)) {
+        return;
+    }
+    e.preventDefault();
+    if (e.dataTransfer !== null) {
+        e.dataTransfer.dropEffect = "copy";
+    }
+};
+
+window.ondragleave = function (e) {
+    if (!carriesFiles(e)) {
+        return;
+    }
+    dragDepth = Math.max(dragDepth - 1, 0);
+    if (dragDepth === 0) {
+        ui.drop.classList.remove("on");
+    }
+};
+
+window.ondrop = function (e) {
+    if (!carriesFiles(e) || e.dataTransfer === null) {
+        return;
+    }
+    e.preventDefault();
+    dragDepth = 0;
+    ui.drop.classList.remove("on");
+    if (e.dataTransfer.files.length > 0) {
+        loadDroppedFile(e.dataTransfer.files[0]);
+    }
+};
+
 for (let drive = 0; drive < ui.mdv.length; drive += 1) {
     const controls = ui.mdv[drive];
-    controls.newMdv.onclick = function () {
+    ui.newMdv[drive].onclick = function () {
         if (drive === 0) {
-            updateUrlParam("url", null);
             cancelStartupFile();
         }
         const name = "mdv" + (drive + 1) + ".mdv";
@@ -493,25 +616,18 @@ for (let drive = 0; drive < ui.mdv.length; drive += 1) {
         controls.file.click();
     };
     controls.file.onchange = function () {
-        const chosen = readChosenFile(controls.file, 0, function (file, err, buf) {
-            if (err !== null || buf === null) {
-                let message = "Empty read.";
-                if (err !== null) {
-                    message = err;
+        const chosen = readChosenFile(
+            controls.file,
+            0,
+            function (file, err, buf) {
+                if (err !== null || buf === null) {
+                    showReadError(controls.info, err);
+                    return;
                 }
-                showError(controls.info, message);
-                return;
-            }
-            const mdvErr = machine.insertMdv(ql, drive, buf, file.name);
-            if (mdvErr !== null) {
-                showError(controls.info, mdvErr);
-                return;
-            }
-            showInfo(controls.info, file.name);
-            showInfo(ui.startupFileInfo, "");
-        });
+                insertMdvFile(drive, file.name, buf);
+            },
+        );
         if (chosen && drive === 0) {
-            updateUrlParam("url", null);
             cancelStartupFile();
         }
     };
@@ -524,11 +640,9 @@ for (let drive = 0; drive < ui.mdv.length; drive += 1) {
     };
     controls.eject.onclick = function () {
         if (drive === 0) {
-            updateUrlParam("url", null);
             cancelStartupFile();
         }
         machine.ejectMdv(ql, drive);
-        showInfo(controls.info, "No cartridge.");
     };
 }
 
@@ -537,34 +651,33 @@ ui.loadRom.onclick = function () {
 };
 
 ui.fileRom.onchange = function () {
-    const files = ui.fileRom.files;
-    if (files === null || files.length === 0) {
-        ui.fileRom.value = "";
-        return;
-    }
-    if (abortLoadRom !== null) {
-        abortLoadRom();
-        abortLoadRom = null;
-    }
-    updateUrlParam("rom", null);
-    readChosenFile(ui.fileRom, 0, function (file, err, buf) {
-        if (err !== null || buf === null) {
-            let message = "Empty read.";
-            if (err !== null) {
-                message = err;
+    readChosenFile(
+        ui.fileRom,
+        0,
+        function (file, err, buf) {
+            if (err !== null || buf === null) {
+                showReadError(ui.romInfo, err);
+                return;
             }
-            showError(ui.romInfo, message);
-            return;
-        }
-        const romErr = machine.setSysRom(ql, buf);
-        if (romErr !== null) {
-            showError(ui.romInfo, romErr);
-            return;
-        }
-        defaultRomSelected = false;
-        resetSystem();
-        showInfo(ui.romInfo, file.name);
-    });
+            installSystemRomFile(file.name, buf);
+        },
+    );
+};
+
+ui.romMinerva.onclick = function () {
+    configuredRomName = "minerva";
+    systemRomFromFile = false;
+    updateUrlParam("rom", configuredRomName);
+    refreshSystemRom();
+    loadSystemRom();
+};
+
+ui.romAuto.onclick = function () {
+    configuredRomName = "";
+    systemRomFromFile = false;
+    updateUrlParam("rom", null);
+    refreshSystemRom();
+    loadSystemRom();
 };
 
 for (let slot = 0; slot < ui.romSlots.length; slot += 1) {
@@ -581,124 +694,105 @@ for (let slot = 0; slot < ui.romSlots.length; slot += 1) {
         }
         state.generation += 1;
         const generation = state.generation;
-        readChosenFile(controls.file, machine.romCartridgeSize, function (file, err, buf) {
-            if (state.generation !== generation) {
-                return;
-            }
-            if (err === null && buf !== null) {
-                err = machine.insertRomCartridge(ql, buf, slot);
-            }
-            state.error = "";
-            if (err !== null) {
-                state.error = err;
-            }
-            if (err === null) {
-                state.name = file.name;
-                resetSystem();
-            }
-            refreshRomSlotStatus(slot);
-        });
+        readChosenFile(
+            controls.file,
+            machine.romCartridgeSize,
+            function (file, err, buf) {
+                if (state.generation !== generation) {
+                    return;
+                }
+                if (err === null && buf !== null) {
+                    err = machine.insertRomCartridge(ql, buf, slot);
+                }
+                if (err === null) {
+                    state.error = "";
+                    state.name = file.name;
+                    forgetBundledRom(slot);
+                    resetSystem();
+                } else {
+                    state.error = err;
+                }
+                refreshRomSlotStatus(slot);
+            },
+        );
     };
     controls.eject.onclick = function () {
         state.generation += 1;
         machine.ejectRomCartridge(ql, slot);
         state.name = "";
         state.error = "";
+        forgetBundledRom(slot);
         resetSystem();
         refreshRomSlotStatus(slot);
     };
     refreshRomSlotStatus(slot);
 }
 
+ui.romToolkit2.onclick = function () {
+    updateUrlParam("cart", "tk2");
+    loadBundledCartridge("tk2");
+};
+
+if (configuredCartName !== "") {
+    loadBundledCartridge(configuredCartName);
+}
+
 ui.newHdd4.onclick = function () {
+    ui.newHddMenu.open = false;
     insertNewHardDisk(4 * sectorsPerMebibyte);
 };
 
 ui.newHdd16.onclick = function () {
+    ui.newHddMenu.open = false;
     insertNewHardDisk(disk.maxReportedSectors);
 };
 
-ui.loadHdd.onclick = function () {
-    ui.fileHdd.click();
-};
-
-ui.fileHdd.onchange = function () {
-    readChosenFile(ui.fileHdd, 0, function (file, err, buf) {
-        if (err !== null || buf === null) {
-            let message = "Empty read.";
-            if (err !== null) {
-                message = err;
-            }
-            showError(ui.hddInfo, message);
-            return;
-        }
-        const hddErr = disk.insert(ql.disks.win, buf, file.name);
-        if (hddErr !== null) {
-            showError(ui.hddInfo, hddErr);
-            return;
-        }
-        refreshMountedDrives();
-    });
-};
-
-ui.downloadHdd.onclick = function () {
-    const saved = disk.save(ql.disks.win);
-    if (saved === null) {
-        return;
-    }
-    downloadBytes(saved.name, saved.bytes, "win1.win", media.isWinName, ".win");
-    refreshMountedDrives();
-};
-
-ui.ejectHdd.onclick = function () {
-    disk.eject(ql.disks.win);
-    refreshMountedDrives();
-};
-
 ui.newFddDd.onclick = function () {
+    ui.newFddMenu.open = false;
     insertNewFloppy(false);
 };
 
 ui.newFddHd.onclick = function () {
+    ui.newFddMenu.open = false;
     insertNewFloppy(true);
 };
 
-ui.loadFdd.onclick = function () {
-    ui.fileFdd.click();
-};
-
-ui.fileFdd.onchange = function () {
-    readChosenFile(ui.fileFdd, 0, function (file, err, buf) {
-        if (err !== null || buf === null) {
-            let message = "Empty read.";
-            if (err !== null) {
-                message = err;
-            }
-            showError(ui.fddInfo, message);
+const diskDrives = [
+    {state: ql.disks.win, controls: ui.hdd, menu: ui.newHddMenu, fallbackName: "win1.win", isName: media.isWinName, extension: ".win"},
+    {state: ql.disks.flp, controls: ui.fdd, menu: ui.newFddMenu, fallbackName: "flp1.img", isName: media.isImgName, extension: ".img"},
+];
+for (const drive of diskDrives) {
+    const controls = drive.controls;
+    drive.menu.ontoggle = function () {
+        placeMenu(drive.menu);
+    };
+    controls.load.onclick = function () {
+        controls.file.click();
+    };
+    controls.file.onchange = function () {
+        readChosenFile(
+            controls.file,
+            0,
+            function (file, err, buf) {
+                if (err !== null || buf === null) {
+                    showReadError(controls.info, err);
+                    return;
+                }
+                insertDiskFile(drive.state, controls, file.name, buf);
+            },
+        );
+    };
+    controls.download.onclick = function () {
+        const saved = disk.save(drive.state);
+        if (saved === null) {
             return;
         }
-        const fddErr = disk.insert(ql.disks.flp, buf, file.name);
-        if (fddErr !== null) {
-            showError(ui.fddInfo, fddErr);
-            return;
-        }
-        refreshMountedDrives();
-    });
-};
-
-ui.downloadFdd.onclick = function () {
-    const saved = disk.save(ql.disks.flp);
-    if (saved === null) {
-        return;
-    }
-    downloadBytes(saved.name, saved.bytes, "flp1.img", media.isImgName, ".img");
-    refreshMountedDrives();
-};
-
-ui.ejectFdd.onclick = function () {
-    disk.eject(ql.disks.flp);
-    refreshMountedDrives();
-};
+        downloadBytes(saved.name, saved.bytes, drive.fallbackName, drive.isName, drive.extension);
+    };
+    controls.eject.onclick = function () {
+        disk.eject(drive.state);
+    };
+}
 
 boot.loadShaders(function (err, shaders) {
     if (err !== null) {
@@ -732,53 +826,56 @@ boot.loadShaders(function (err, shaders) {
 sound.init(
     machine.frameHz(ql),
     fillSoundQueue,
-    function (running) {
-        machine.enableSound(ql, running);
-    },
     function (err, initializedSfx) {
         if (err !== null) {
-            showError(ui.soundInfo, "No sound: " + err);
+            showError(ui.audioInfo, "No sound: " + err);
             return;
         }
         if (initializedSfx === null) {
-            showError(ui.soundInfo, "No sound.");
+            showError(ui.audioInfo, "No sound.");
             return;
         }
         sfx = initializedSfx;
         sound.setStereo(initializedSfx, ui.stereo.checked);
         sound.setMuted(initializedSfx, ui.muted.checked);
         machine.setSoundRate(ql, initializedSfx.context.sampleRate);
-        machine.enableSound(ql, initializedSfx.context.state === "running");
     },
 );
 
-boot.loadRom(boot.qsoundRomUrl, machine.qsoundRomSize, function (err, rom) {
-    if (rom === null) {
-        ui.qsound.checked = false;
-        ui.qsound2.checked = false;
-        let message = "QSound ROM unavailable.";
-        if (err !== null) {
-            message = err;
-        }
-        showError(ui.qsoundInfo, message);
-    } else {
-        const romErr = machine.setQsoundRom(ql, rom);
-        if (romErr !== null) {
-            ui.qsound.checked = false;
-            ui.qsound2.checked = false;
-            showError(ui.qsoundInfo, "QSound: " + romErr);
-        } else {
-            if (selectedQsoundModel() !== machine.qsoundOff && ui.ram256.checked && ui.ram512.checked) {
-                ui.ram256.checked = false;
-                applyRamSize();
+boot.loadRom(
+    boot.qsoundRomUrl,
+    machine.qsoundRomSize,
+    function (err, rom) {
+        if (rom === null) {
+            ui.qsoundOff.checked = true;
+            let message = "QSound ROM unavailable.";
+            if (err !== null) {
+                message = err;
             }
-            machine.setQsoundModel(ql, selectedQsoundModel());
-            ui.qsound.disabled = false;
-            ui.qsound2.disabled = false;
+            showError(ui.qsoundInfo, message);
+            showError(ui.qsoundRomState, "ROM unavailable");
+        } else {
+            const romErr = machine.setQsoundRom(ql, rom);
+            if (romErr !== null) {
+                ui.qsoundOff.checked = true;
+                showError(ui.qsoundInfo, "QSound: " + romErr);
+                showError(ui.qsoundRomState, "ROM unusable");
+            } else {
+                fitRamBesideSoundCard();
+                machine.setQsoundModel(ql, selectedQsoundModel());
+                ui.qsound.disabled = false;
+                ui.qsound2.disabled = false;
+                showInfo(ui.qsoundRomState, "ROM loaded");
+            }
         }
-    }
-    loadSystemRom();
-});
+        refreshSummary();
+        if (systemRomFromFile) {
+            resetSystem();
+        } else {
+            loadSystemRom();
+        }
+    },
+);
 
 const startupFileUrl = query.get("url") ?? "";
 if (startupFileUrl !== "") {
@@ -786,6 +883,9 @@ if (startupFileUrl !== "") {
         startupFileUrl,
         function (err, name, bytes) {
             abortLoadStartupFile = null;
+            if (startupFileCanceled) {
+                return;
+            }
             if (err !== null) {
                 showError(ui.startupFileInfo, err);
                 return;
@@ -802,66 +902,150 @@ if (startupFileUrl !== "") {
 
 requestAnimationFrame(onFrame);
 
-/** Fetch and install the selected system ROM after QSound configuration. */
-function loadSystemRom() {
-    if (abortLoadRom !== null) {
-        abortLoadRom();
-        abortLoadRom = null;
-    }
-    let romName = configuredRomName;
-    if (romName === "") {
-        romName = "js";
-        if (ui.ntsc.checked) {
-            romName = "jsu";
-        }
-    }
-    const name = romName + ".rom";
-    if (!/^[A-Za-z0-9]+$/.test(romName)) {
-        onRom("Invalid ROM name.", null);
-        return;
-    }
-    abortLoadRom = boot.loadRom("roms/" + name, machine.sysRomSize, onRom);
+/**
+ * Collect one drive card's elements around its base id, for example
+ * `mdv1-info` and `load-mdv1`, plus its light in the status bar.
+ *
+ * @param {string} base
+ * @param {string} statusLedId
+ * @returns {DriveControls}
+ */
+function driveControls(base, statusLedId) {
+    const prefix = base + "-";
+    const suffix = "-" + base;
+    return {
+        card: /** @type {HTMLElement} */ (document.getElementById(base + "-card")),
+        info: /** @type {HTMLElement} */ (document.getElementById(prefix + "info")),
+        modified: /** @type {HTMLElement} */ (document.getElementById(prefix + "modified")),
+        led: /** @type {HTMLElement} */ (document.getElementById(prefix + "led")),
+        statusLed: /** @type {HTMLElement} */ (document.getElementById(statusLedId)),
+        meter: /** @type {HTMLElement} */ (document.getElementById(prefix + "meter")),
+        meterBar: /** @type {HTMLElement} */ (document.getElementById(prefix + "meter-bar")),
+        size: /** @type {HTMLElement} */ (document.getElementById(prefix + "size")),
+        free: /** @type {HTMLElement} */ (document.getElementById(prefix + "free")),
+        load: /** @type {HTMLButtonElement} */ (document.getElementById("load" + suffix)),
+        file: /** @type {HTMLInputElement} */ (document.getElementById("file" + suffix)),
+        download: /** @type {HTMLButtonElement} */ (document.getElementById("download" + suffix)),
+        eject: /** @type {HTMLButtonElement} */ (document.getElementById("eject" + suffix)),
+    };
+}
 
-    /**
-     * @param {string | null} err
-     * @param {ArrayBuffer | null} rom
-     */
-    function onRom(err, rom) {
-        abortLoadRom = null;
-        startupRomReady = true;
-        if (rom !== null) {
-            const romErr = machine.setSysRom(ql, rom);
-            if (romErr === null) {
-                resetSystem();
-                showInfo(ui.romInfo, name);
-            } else {
-                showError(ui.romInfo, romErr);
-            }
-        } else if (err !== null) {
-            showError(ui.romInfo, err);
-        }
-        if (startupFileName !== null && startupFileBytes !== null) {
-            applyStartupFile(startupFileName, startupFileBytes);
-        }
+/** @returns {DriveStatus} */
+function newDriveStatus() {
+    return {
+        inserted: false,
+        name: "",
+        modified: false,
+        driverReady: false,
+        generation: 1,
+        readCount: 0,
+        writeCount: 0,
+        spaceWrites: -1,
+        until: 0,
+        state: "idle",
+        lit: false,
+    };
+}
+
+/**
+ * Report whether a key belongs to a focused tab switch: the arrows, Space,
+ * Enter, and Tab keep their native behavior, and other keys reach the QL.
+ *
+ * @param {KeyboardEvent} e
+ * @returns {boolean}
+ */
+function isTabKey(e) {
+    if (!ui.tabs.includes(/** @type {HTMLInputElement} */ (e.target))) {
+        return false;
+    }
+    switch (e.code) {
+    case "ArrowLeft":
+    case "ArrowRight":
+    case "ArrowUp":
+    case "ArrowDown":
+    case "Space":
+    case "Enter":
+    case "Tab":
+        return true;
+    default:
+        return false;
     }
 }
 
 /**
- * Report whether a key event targets a tab switch, whose arrow, Space, and
- * Enter keys keep their native selection behavior.
+ * Fetch `roms/<name>.rom` into the cartridge slot and restart the QL, for
+ * `?cart=` and the Toolkit II button. A later load or Eject there makes the
+ * fetch finish silently.
  *
- * @param {EventTarget | null} target
- * @returns {boolean}
+ * @param {string} name
  */
-function isSwitchTarget(target) {
-    return ui.tabs.includes(/** @type {HTMLInputElement} */ (target));
+function loadBundledCartridge(name) {
+    const state = romSlotStates[cartridgeSlot];
+    state.generation += 1;
+    const generation = state.generation;
+    const fileName = name + ".rom";
+    if (!/^[A-Za-z0-9]+$/.test(name)) {
+        state.error = "Invalid cartridge ROM name.";
+        refreshRomSlotStatus(cartridgeSlot);
+        return;
+    }
+    boot.loadRom(
+        "roms/" + fileName,
+        machine.romCartridgeSize,
+        function (err, rom) {
+            if (state.generation !== generation) {
+                return;
+            }
+            let error = err;
+            if (error === null && rom !== null) {
+                error = machine.insertRomCartridge(ql, rom, cartridgeSlot);
+            }
+            if (error === null) {
+                state.error = "";
+                state.name = fileName;
+                state.bundled = name;
+                resetSystem();
+            } else {
+                state.error = error;
+            }
+            refreshRomSlotStatus(cartridgeSlot);
+        },
+    );
 }
 
-/** @param {number} slot */
+/**
+ * A local image or Eject replaces a bundled ROM, and for the cartridge slot
+ * drops `cart` from the URL.
+ *
+ * @param {number} slot
+ */
+function forgetBundledRom(slot) {
+    romSlotStates[slot].bundled = "";
+    if (slot === cartridgeSlot) {
+        updateUrlParam("cart", null);
+    }
+}
+
+/**
+ * Show a ROM slot's state: its name or error, whether it can be ejected, and
+ * whether the address map shows it filled.
+ *
+ * @param {number} slot
+ */
 function refreshRomSlotStatus(slot) {
     const controls = ui.romSlots[slot];
     const state = romSlotStates[slot];
     controls.eject.disabled = state.name === "";
+    if (slot === cartridgeSlot) {
+        ui.romToolkit2.disabled = state.bundled === "tk2";
+    }
+    if (state.name === "") {
+        controls.card.classList.add("empty");
+        controls.map.classList.remove("full");
+    } else {
+        controls.card.classList.remove("empty");
+        controls.map.classList.add("full");
+    }
     if (state.error !== "") {
         showError(controls.info, state.error);
         return;
@@ -893,22 +1077,188 @@ function readChosenFile(input, maxBytes, onFile) {
     // first. Clearing lets the same file be chosen again.
     const file = files[0];
     input.value = "";
+    readLocalFile(
+        file,
+        maxBytes,
+        function (err, buf) {
+            onFile(file, err, buf);
+        },
+    );
+    return true;
+}
+
+/**
+ * Route a dropped file to the drive or ROM its name belongs to: `.mdv` to
+ * MDV1, or MDV2 while MDV1 holds a cartridge; the first `.mdv` in a `.zip`
+ * likewise; `.win` to WIN1; `.img` to FLP1; `.rom` and `.bin` to the system ROM.
+ *
+ * @param {File} file
+ */
+function loadDroppedFile(file) {
+    const name = file.name;
+    showInfo(ui.dropInfo, "");
+    const zip = media.isZipName(name);
+    if (!zip && !media.isMdvName(name) && !media.isWinName(name) && !media.isImgName(name) && !media.isRomName(name)) {
+        showError(ui.dropInfo, "Unsupported file type: " + name + ".");
+        return;
+    }
+    let maxBytes = 0;
+    if (zip) {
+        maxBytes = load.maxZipBytes;
+    }
+    readLocalFile(
+        file,
+        maxBytes,
+        function (err, buf) {
+            if (err !== null || buf === null) {
+                showReadError(ui.dropInfo, err);
+                return;
+            }
+            if (zip) {
+                load.zipMember(
+                    buf,
+                    "",
+                    function (zipErr, memberName, bytes) {
+                        if (zipErr !== null || memberName === null || bytes === null) {
+                            showReadError(ui.dropInfo, zipErr);
+                            return;
+                        }
+                        insertDroppedMdv(memberName, bytes);
+                    },
+                );
+            } else if (media.isMdvName(name)) {
+                insertDroppedMdv(name, buf);
+            } else if (media.isWinName(name)) {
+                insertDiskFile(ql.disks.win, ui.hdd, name, buf);
+            } else if (media.isImgName(name)) {
+                insertDiskFile(ql.disks.flp, ui.fdd, name, buf);
+            } else {
+                installSystemRomFile(name, buf);
+            }
+        },
+    );
+}
+
+/**
+ * Read a local file from a picker or a drop, with the same size checks.
+ *
+ * @param {File} file
+ * @param {number} maxBytes
+ * @param {function(string | null, ArrayBuffer | null): void} onDone
+ */
+function readLocalFile(file, maxBytes, onDone) {
     if (file.size === 0 || (maxBytes > 0 && file.size > maxBytes)) {
         let err = "Empty read.";
         if (maxBytes > 0) {
             err = "Expected 1 to " + maxBytes + ", got " + file.size + " bytes.";
         }
-        onFile(file, err, null);
-        return true;
+        onDone(err, null);
+        return;
     }
-    io.readFile(file, function (err, buf) {
-        if (err !== null) {
-            onFile(file, err, null);
-            return;
-        }
-        onFile(file, null, /** @type {ArrayBuffer} */ (buf));
-    });
-    return true;
+    io.readFile(file, onDone);
+}
+
+/**
+ * @param {HTMLElement} el
+ * @param {string | null} err
+ */
+function showReadError(el, err) {
+    let message = "Empty read.";
+    if (err !== null) {
+        message = err;
+    }
+    showError(el, message);
+}
+
+/**
+ * Mount a hard disk or floppy image without resetting the machine.
+ *
+ * @param {import("./disk.js").State} state
+ * @param {DriveControls} controls
+ * @param {string} name
+ * @param {ArrayBuffer} buf
+ */
+function insertDiskFile(state, controls, name, buf) {
+    const diskErr = disk.insert(state, buf, name);
+    if (diskErr !== null) {
+        showError(controls.info, diskErr);
+    }
+}
+
+/**
+ * Install a local system ROM in place of the automatic one, then restart.
+ *
+ * @param {string} name
+ * @param {ArrayBuffer} buf
+ */
+function installSystemRomFile(name, buf) {
+    const romErr = machine.setSysRom(ql, buf);
+    if (romErr !== null) {
+        showError(ui.romInfo, romErr);
+        return;
+    }
+    cancelSystemRomLoad();
+    updateUrlParam("rom", null);
+    systemRomFromFile = true;
+    resetSystem();
+    showSystemRom(name);
+    markSystemRomReady();
+}
+
+/**
+ * Insert a dropped Microdrive image into MDV1, or MDV2 while MDV1 holds a
+ * cartridge. The drive is chosen once the image is read, so quick successive
+ * drops fill both drives.
+ *
+ * @param {string} name
+ * @param {ArrayBuffer} buf
+ */
+function insertDroppedMdv(name, buf) {
+    let drive = 0;
+    if (machine.mdvInfo(ql, 0).inserted) {
+        drive = 1;
+    }
+    if (drive === 0) {
+        cancelStartupFile();
+    }
+    insertMdvFile(drive, name, buf);
+}
+
+/**
+ * @param {DragEvent} e
+ * @returns {boolean}
+ */
+function carriesFiles(e) {
+    return e.dataTransfer !== null && e.dataTransfer.types.includes("Files");
+}
+
+/**
+ * Open a New menu upward when the settings panel has no room below it.
+ *
+ * @param {HTMLDetailsElement} menu
+ */
+function placeMenu(menu) {
+    menu.classList.remove("up");
+    if (!menu.open) {
+        return;
+    }
+    const list = menu.lastElementChild;
+    if (list === null) {
+        return;
+    }
+    if (list.getBoundingClientRect().bottom > ui.tabPanels.getBoundingClientRect().bottom) {
+        menu.classList.add("up");
+    }
+}
+
+/**
+ * @param {HTMLDetailsElement} menu
+ * @param {EventTarget | null} target
+ */
+function closeMenuOutside(menu, target) {
+    if (menu.open && !(target instanceof Node && menu.contains(target))) {
+        menu.open = false;
+    }
 }
 
 /**
@@ -956,41 +1306,346 @@ function leafName(path) {
 }
 
 /**
- * Set informational text and clear its error presentation.
- *
- * @param {HTMLElement} el
- * @param {string} text
- */
-function showInfo(el, text) {
-    el.textContent = text;
-    el.classList.remove("error");
-}
-
-/**
- * Set error text and apply its error presentation.
- *
- * @param {HTMLElement} el
- * @param {string} text
- */
-function showError(el, text) {
-    el.textContent = text;
-    el.classList.add("error");
-}
-
-/**
- * Set a switch from its URL parameter: `on` selects it, any other digit in
- * `values` clears it, and an absent or invalid value keeps the page default.
+ * Set a switch from its URL parameter: `1` turns it on, `0` off, and an absent
+ * or invalid value keeps the page default.
  *
  * @param {HTMLInputElement} input
  * @param {string} name
- * @param {string} on
- * @param {string} values
  */
-function applySwitchParam(input, name, on, values) {
+function applySwitchParam(input, name) {
     const value = query.get(name) ?? "";
-    if (value.length === 1 && values.includes(value)) {
-        input.checked = value === on;
+    if (value === "0" || value === "1") {
+        input.checked = value === "1";
     }
+}
+
+/**
+ * Accept a supported whole-KiB RAM size and otherwise use the stock size.
+ *
+ * @param {string} value
+ * @returns {number}
+ */
+function ramKbFromParam(value) {
+    for (const option of ui.ram) {
+        if (String(option.kb) === value) {
+            return option.kb;
+        }
+    }
+    return machine.defaultRamKb;
+}
+
+/**
+ * Accept a supported mouse model and otherwise leave the mouse disconnected.
+ *
+ * @param {string} value
+ * @returns {number}
+ */
+function mouseFromParam(value) {
+    switch (value) {
+    case "qimsi":
+        return machine.mouseQimsi;
+    case "pe":
+        return machine.mousePe;
+    default:
+        return machine.mouseOff;
+    }
+}
+
+/**
+ * Accept a supported count rate per displayed 512-mode pixel, defaulting to 1.
+ *
+ * @param {string} value
+ * @returns {number}
+ */
+function mouseSpeedFromParam(value) {
+    switch (value) {
+    case "2":
+        return 2;
+    case "4":
+        return 4;
+    default:
+        return 1;
+    }
+}
+
+/** Switch PAL/NTSC timing, reset, and follow it with the automatic ROM. */
+function selectVideoStandard() {
+    updateUrlParam("ntsc", ui.ntsc.checked);
+    machine.setNtsc(ql, ui.ntsc.checked);
+    resetSystem();
+    syncFrameTiming();
+    refreshSummary();
+    // Only the automatic system ROM follows the video standard.
+    if (configuredRomName === "" && !systemRomFromFile) {
+        loadSystemRom();
+    }
+}
+
+/**
+ * Fetch and install the `?rom=` or automatic system ROM: at startup once the
+ * sound card is set up, after Auto, and when the video standard changes it.
+ */
+function loadSystemRom() {
+    cancelSystemRomLoad();
+    const romLoad = systemRomLoads;
+    let romName = configuredRomName;
+    if (romName === "") {
+        romName = "js";
+        if (ui.ntsc.checked) {
+            romName = "jsu";
+        }
+    }
+    const name = romName + ".rom";
+    if (!/^[A-Za-z0-9]+$/.test(romName)) {
+        onRom("Invalid ROM name.", null);
+        return;
+    }
+    abortLoadRom = boot.loadRom("roms/" + name, machine.sysRomSize, onRom);
+
+    /**
+     * @param {string | null} err
+     * @param {ArrayBuffer | null} rom
+     */
+    function onRom(err, rom) {
+        if (romLoad !== systemRomLoads) {
+            return;
+        }
+        abortLoadRom = null;
+        if (rom !== null) {
+            const romErr = machine.setSysRom(ql, rom);
+            if (romErr === null) {
+                resetSystem();
+                showSystemRom(name);
+            } else {
+                showError(ui.romInfo, romErr);
+            }
+        } else if (err !== null) {
+            showError(ui.romInfo, err);
+        }
+        markSystemRomReady();
+    }
+}
+
+/** Stop a system ROM fetch that a local ROM or a newer choice replaces. */
+function cancelSystemRomLoad() {
+    systemRomLoads += 1;
+    if (abortLoadRom !== null) {
+        abortLoadRom();
+        abortLoadRom = null;
+    }
+}
+
+/**
+ * Let a waiting `?url=` Microdrive image in once the system ROM load has
+ * settled, installed or failed.
+ */
+function markSystemRomReady() {
+    startupRomReady = true;
+    if (startupFileName !== null && startupFileBytes !== null) {
+        applyStartupFile(startupFileName, startupFileBytes);
+    }
+}
+
+/**
+ * Show the installed system ROM, which also names the summary chip.
+ *
+ * @param {string} name
+ */
+function showSystemRom(name) {
+    systemRomName = name;
+    showInfo(ui.romInfo, name);
+    refreshSystemRom();
+}
+
+/** Reflect whether the system ROM follows PAL/NTSC, is Minerva, or was chosen. */
+function refreshSystemRom() {
+    const automatic = configuredRomName === "" && !systemRomFromFile;
+    ui.romAutoBadge.hidden = !automatic;
+    ui.romAuto.disabled = automatic;
+    ui.romMinerva.disabled = configuredRomName === "minerva" && !systemRomFromFile;
+    let name = systemRomName;
+    if (name === "") {
+        name = "no ROM";
+    }
+    ui.chipRomMain.textContent = name;
+    ui.chipRomSub.hidden = !automatic;
+}
+
+/**
+ * Apply the chosen memory size and restart the QL. 896K reaches the sound
+ * card's 0xC0000, so it removes a fitted card.
+ */
+function selectRamSize() {
+    ui.ramNote.hidden = true;
+    ui.soundNote.hidden = true;
+    if (selectedRamKb() === fullRamKb && selectedQsoundModel() !== machine.qsoundOff) {
+        ui.qsoundOff.checked = true;
+        machine.setQsoundModel(ql, machine.qsoundOff);
+        updateUrlParam("qsound", machine.qsoundOff);
+        ui.ramNote.hidden = false;
+    }
+    applyRamSize();
+    refreshSummary();
+    resetSystem();
+}
+
+/**
+ * Fit the chosen sound card and restart the QL. A card needs 0xC0000, so 896K
+ * drops to 640K.
+ */
+function selectSoundCard() {
+    ui.ramNote.hidden = true;
+    ui.soundNote.hidden = true;
+    fitRamBesideSoundCard();
+    const selected = selectedQsoundModel();
+    updateUrlParam("qsound", selected);
+    machine.setQsoundModel(ql, selected);
+    refreshSummary();
+    resetSystem();
+}
+
+/** Connect the chosen mouse model, releasing any capture, and restart. */
+function selectMouse() {
+    const selected = selectedMouseModel();
+    updateUrlParam("mouse", mouseParam(selected));
+    machine.setMouseModel(ql, selected);
+    if (document.pointerLockElement === ui.screen) {
+        document.exitPointerLock();
+    }
+    refreshSummary();
+    resetSystem();
+}
+
+/**
+ * Keep the summary chips, screen title, and choice descriptions in step with
+ * the hardware controls.
+ */
+function refreshSummary() {
+    let standard = "PAL";
+    ui.videoDesc.textContent = "UK/European 50 Hz timing, and js.rom while the system ROM is automatic.";
+    if (ui.ntsc.checked) {
+        standard = "NTSC";
+        ui.videoDesc.textContent = "US clocks with 60 Hz fields in TV mode (F2), and jsu.rom while the system ROM is automatic.";
+    }
+    ui.chipVideoMain.textContent = standard;
+    ui.chipRamMain.textContent = selectedRamKb() + "K";
+    const soundModel = selectedQsoundModel();
+    switch (soundModel) {
+    case machine.qsoundOriginal:
+        ui.chipSoundMain.textContent = "QSound";
+        ui.soundDesc.textContent = "MC6821 and AY-3-8910 PSG: three square-wave channels and noise.";
+        break;
+    case machine.qsound2:
+        ui.chipSoundMain.textContent = "QSound2";
+        ui.soundDesc.textContent = "YM2203: the same PSG plus three FM channels from a 2 MHz clock.";
+        break;
+    default:
+        ui.chipSoundMain.textContent = "No card";
+        ui.soundDesc.textContent = "No sound card; only the IPC beeper plays.";
+        break;
+    }
+    ui.stereo.disabled = soundModel === machine.qsoundOff;
+    const mouse = selectedMouseModel();
+    ui.mouseCursor.disabled = mouse !== machine.mousePe;
+    ui.chipMouse.hidden = mouse === machine.mouseOff;
+    ui.mouseHint.hidden = mouse === machine.mouseOff;
+    switch (mouse) {
+    case machine.mouseQimsi:
+        ui.chipMouseMain.textContent = "QIMSI";
+        ui.mouseDesc.textContent = "A PS/2 mouse on the QIMSI registers in the ROM port.";
+        ui.mouseHint.textContent = "Click the screen to capture the mouse; Esc releases it.";
+        break;
+    case machine.mousePe:
+        ui.chipMouseMain.textContent = "PE";
+        ui.mouseDesc.textContent = "The Pointer Environment pointer follows the host cursor, with no capture.";
+        ui.mouseHint.textContent = "The QL pointer follows your cursor once the Pointer Environment is loaded.";
+        break;
+    default:
+        ui.mouseDesc.textContent = "No mouse is connected.";
+        break;
+    }
+    refreshScreenInfo();
+}
+
+/**
+ * @param {number} model
+ * @returns {string}
+ */
+function mouseParam(model) {
+    switch (model) {
+    case machine.mouseQimsi:
+        return "qimsi";
+    case machine.mousePe:
+        return "pe";
+    default:
+        return "0";
+    }
+}
+
+/** @returns {number} */
+function selectedMouseModel() {
+    if (ui.mousePe.checked) {
+        return machine.mousePe;
+    }
+    if (ui.mouseQimsi.checked) {
+        return machine.mouseQimsi;
+    }
+    return machine.mouseOff;
+}
+
+/**
+ * A fitted sound card needs 0xC0000, so 896K drops to 640K, and the note says so.
+ */
+function fitRamBesideSoundCard() {
+    if (selectedQsoundModel() === machine.qsoundOff || selectedRamKb() !== fullRamKb) {
+        return;
+    }
+    for (const option of ui.ram) {
+        option.input.checked = option.kb === ramBesideSoundCardKb;
+    }
+    applyRamSize();
+    ui.soundNote.hidden = false;
+}
+
+/** Apply the chosen memory size and reflect it in the URL. */
+function applyRamSize() {
+    const ramKb = selectedRamKb();
+    machine.setRamKb(ql, ramKb);
+    updateUrlParam("ram", ramKb);
+}
+
+/** @returns {number} */
+function selectedQsoundModel() {
+    if (ui.qsound2.checked) {
+        return machine.qsound2;
+    }
+    if (ui.qsound.checked) {
+        return machine.qsoundOriginal;
+    }
+    return machine.qsoundOff;
+}
+
+/** Reset machine and audio state, then resume available sound. */
+function resetSystem() {
+    if (sfx === null) {
+        machine.reset(ql);
+        return;
+    }
+    sound.reset(sfx);
+    machine.reset(ql);
+    sound.resume(sfx);
+}
+
+/** Drop the `?url=` startup file, fetched or still loading, and its parameter. */
+function cancelStartupFile() {
+    updateUrlParam("url", null);
+    startupFileCanceled = true;
+    if (abortLoadStartupFile !== null) {
+        abortLoadStartupFile();
+        abortLoadStartupFile = null;
+    }
+    startupFileName = null;
+    startupFileBytes = null;
 }
 
 /**
@@ -1018,186 +1673,8 @@ function updateUrlParam(name, value) {
 }
 
 /**
- * Accept a supported whole-KiB RAM size and otherwise use the stock size.
- *
- * @param {string} value
- * @returns {number}
- */
-function ramKbFromParam(value) {
-    switch (value) {
-    case "384":
-        return 384;
-    case "640":
-        return 640;
-    case "896":
-        return 896;
-    case "128":
-    default:
-        return machine.defaultRamKb;
-    }
-}
-
-/**
- * Accept a supported mouse model and otherwise leave the mouse disconnected.
- *
- * @param {string} value
- * @returns {number}
- */
-function mouseFromParam(value) {
-    switch (value) {
-    case "qimsi":
-        return machine.mouseQimsi;
-    case "pe":
-        return machine.mousePe;
-    case "0":
-    default:
-        return machine.mouseOff;
-    }
-}
-
-/**
- * @param {number} model
- * @returns {string}
- */
-function mouseParam(model) {
-    switch (model) {
-    case machine.mouseQimsi:
-        return "qimsi";
-    case machine.mousePe:
-        return "pe";
-    default:
-        return "0";
-    }
-}
-
-/**
- * Accept a supported count rate per displayed 512-mode pixel, defaulting to 1.
- *
- * @param {string} value
- * @returns {number}
- */
-function mouseSpeedFromParam(value) {
-    switch (value) {
-    case "2":
-        return 2;
-    case "4":
-        return 4;
-    case "1":
-    default:
-        return 1;
-    }
-}
-
-/** Apply the selected RAM expansions, update the URL, and restart the QL. */
-function updateRamSize() {
-    if (ui.ram256.checked && ui.ram512.checked && selectedQsoundModel() !== machine.qsoundOff) {
-        ui.qsound.checked = false;
-        ui.qsound2.checked = false;
-        machine.setQsoundModel(ql, machine.qsoundOff);
-        updateUrlParam("qsound", machine.qsoundOff);
-    }
-    applyRamSize();
-    resetSystem();
-}
-
-/**
- * Apply one card switch, including mutual exclusion and the expansion conflict.
- *
- * @param {HTMLInputElement} changed
- * @param {number} model
- */
-function updateQsoundSelection(changed, model) {
-    if (changed.checked) {
-        ui.qsound.checked = model === machine.qsoundOriginal;
-        ui.qsound2.checked = model === machine.qsound2;
-        if (ui.ram256.checked && ui.ram512.checked) {
-            ui.ram256.checked = false;
-            applyRamSize();
-        }
-    }
-    const selected = selectedQsoundModel();
-    updateUrlParam("qsound", selected);
-    machine.setQsoundModel(ql, selected);
-    resetSystem();
-}
-
-/**
- * Apply one mouse switch: at most one model is connected, like the sound cards.
- *
- * @param {HTMLInputElement} changed
- * @param {number} model
- */
-function updateMouseSelection(changed, model) {
-    if (changed.checked) {
-        ui.mouseQimsi.checked = model === machine.mouseQimsi;
-        ui.mousePe.checked = model === machine.mousePe;
-    }
-    const selected = selectedMouseModel();
-    updateUrlParam("mouse", mouseParam(selected));
-    machine.setMouseModel(ql, selected);
-    if (document.pointerLockElement === ui.screen) {
-        document.exitPointerLock();
-    }
-    resetSystem();
-}
-
-/** @returns {number} */
-function selectedMouseModel() {
-    if (ui.mousePe.checked) {
-        return machine.mousePe;
-    }
-    if (ui.mouseQimsi.checked) {
-        return machine.mouseQimsi;
-    }
-    return machine.mouseOff;
-}
-
-/** Apply the selected RAM expansions and reflect their total in the URL. */
-function applyRamSize() {
-    let ramKb = machine.defaultRamKb;
-    if (ui.ram256.checked) {
-        ramKb += 256;
-    }
-    if (ui.ram512.checked) {
-        ramKb += 512;
-    }
-    machine.setRamKb(ql, ramKb);
-    updateUrlParam("ram", ramKb);
-}
-
-/** @returns {number} */
-function selectedQsoundModel() {
-    if (ui.qsound2.checked) {
-        return machine.qsound2;
-    }
-    if (ui.qsound.checked) {
-        return machine.qsoundOriginal;
-    }
-    return machine.qsoundOff;
-}
-
-/** Reset machine and audio state, then resume available sound. */
-function resetSystem() {
-    if (sfx === null) {
-        machine.reset(ql);
-        return;
-    }
-    sound.reset(sfx);
-    machine.reset(ql);
-    sound.resume(sfx);
-}
-
-function cancelStartupFile() {
-    if (abortLoadStartupFile !== null) {
-        abortLoadStartupFile();
-        abortLoadStartupFile = null;
-    }
-    startupFileName = null;
-    startupFileBytes = null;
-}
-
-/**
- * Load a URL-supplied Microdrive image after any prerequisite ROM load.
+ * Insert the URL-supplied Microdrive image into MDV1 once the system ROM load
+ * has settled; `load.fromUrl` only delivers `.mdv` images.
  *
  * @param {string} name
  * @param {ArrayBuffer} bytes
@@ -1205,18 +1682,31 @@ function cancelStartupFile() {
 function applyStartupFile(name, bytes) {
     startupFileName = null;
     startupFileBytes = null;
-    if (media.isMdvName(name)) {
-        const mdvErr = machine.insertMdv(ql, 0, bytes, name);
-        if (mdvErr !== null) {
-            showError(ui.mdv[0].info, mdvErr);
-            return;
-        }
-        showInfo(ui.mdv[0].info, name);
-        return;
-    }
-    showError(ui.startupFileInfo, "Unsupported startup file type: " + name + ".");
+    insertMdvFile(0, name, bytes);
 }
 
+/**
+ * Insert a Microdrive image and show its name; the next frame refreshes the
+ * rest of the card.
+ *
+ * @param {number} drive
+ * @param {string} name
+ * @param {ArrayBuffer} buf
+ */
+function insertMdvFile(drive, name, buf) {
+    const mdvErr = machine.insertMdv(ql, drive, buf, name);
+    if (mdvErr !== null) {
+        showError(ui.mdv[drive].info, mdvErr);
+        return;
+    }
+    showInfo(ui.mdv[drive].info, name);
+    showInfo(ui.startupFileInfo, "");
+}
+
+/**
+ * Enter or leave fullscreen with the screen slot. Where fullscreen is missing
+ * or refused, the page shows only the screen instead.
+ */
 function toggleCanvasFullscreen() {
     if (document.fullscreenElement !== null || screenOnlyFallback) {
         screenOnlyFallback = false;
@@ -1235,14 +1725,13 @@ function toggleCanvasFullscreen() {
         return;
     }
 
-    const slot = ui.screen.parentElement;
-    if (slot === null || slot.requestFullscreen === undefined) {
+    if (ui.screenSlot.requestFullscreen === undefined) {
         screenOnlyFallback = true;
         screenOnly = true;
         applyVisibility();
         return;
     }
-    slot.requestFullscreen().then(
+    ui.screenSlot.requestFullscreen().then(
         function () {},
         function () {
             screenOnlyFallback = true;
@@ -1253,22 +1742,16 @@ function toggleCanvasFullscreen() {
 }
 
 /**
- * Hide or show the page chrome and keyboard. Clearing the inline display
- * lets the stylesheet rule apply again; the screen slot's ResizeObserver
- * refits the canvas.
+ * Show only the screen in screen-only mode, and the keyboard window while it
+ * is switched on. The screen slot's ResizeObserver refits the canvas.
  */
 function applyVisibility() {
-    let chromeDisplay = "";
     if (screenOnly) {
-        chromeDisplay = "none";
+        document.body.classList.add("screen-only");
+    } else {
+        document.body.classList.remove("screen-only");
     }
-    let keyboardDisplay = "";
-    if (screenOnly || !keyboardVisible) {
-        keyboardDisplay = "none";
-    }
-    ui.pageHeader.style.display = chromeDisplay;
-    ui.keyboardSplit.style.display = keyboardDisplay;
-    ui.keyboard.style.display = keyboardDisplay;
+    ui.keyboardPanel.hidden = screenOnly || !ui.keyboardToggle.checked;
 }
 
 /** @param {number} pointerId */
@@ -1299,59 +1782,107 @@ function movePePointer(e) {
     pe.move(ql.pe, Math.min(Math.max(x, 0), guestColumns - 1), Math.min(Math.max(y, 0), rows - 1));
 }
 
-/** Follow the current PAL or US ZX8301 field rate. */
-function syncFrameTiming() {
-    const hz = machine.frameHz(ql);
-    frameMs = 1000 / hz;
-    if (sfx !== null) {
-        sound.setFrameRate(sfx, hz);
-    }
-}
-
-/** @param {number} now */
+/**
+ * Run fields at the ZX8301 field rate on each display refresh: the elapsed
+ * time, capped at `maxFrameStepMs`, runs up to `maxFramesPerRefresh` fields
+ * and carries at most one field's time over. The audio queue may ask for
+ * more; then the cards, stats, and screen are refreshed.
+ *
+ * @param {number} now
+ */
 function onFrame(now) {
     requestAnimationFrame(onFrame);
     if (lastNow === 0) {
         lastNow = now;
         carryMs = frameMs;
     }
-    const dt = Math.min(now - lastNow, 80);
+    const dt = Math.min(now - lastNow, maxFrameStepMs);
     lastNow = now;
     let ran = 0;
     if (!ui.paused.checked) {
         carryMs += dt;
-        while (carryMs >= frameMs && ran < 4) {
+        while (carryMs >= frameMs && ran < maxFramesPerRefresh) {
             stepTurboGroup();
             carryMs -= frameMs;
             ran += 1;
         }
+        // Past one field, time the refresh cap left over is dropped rather than
+        // replayed later.
+        carryMs = Math.min(carryMs, frameMs);
     }
     syncFrameTiming();
-    if (ran < 4) {
+    if (ran < maxFramesPerRefresh) {
         fillSoundQueue();
     }
-    refreshMdvActivity(now);
-    refreshMountedDrives();
-    refreshSoundStatus(now);
+    refreshMdvCards(now);
+    refreshDiskCard(ql.disks.win, hddStatus, ui.hdd, now, "No hard disk.", "WIN1");
+    refreshDiskCard(ql.disks.flp, fddStatus, ui.fdd, now, "No floppy.", "FLP1");
+    refreshStats(now);
+    if (ql.displayMode8 !== shownMode8) {
+        refreshScreenInfo();
+    }
     if (gfx !== null) {
         screen.draw(gfx, ql.pixels, ql.frameNtsc, ql.frameVersion);
     }
 }
 
+/** Name the display mode, timing, and memory in the screen window title. */
+function refreshScreenInfo() {
+    shownMode8 = ql.displayMode8;
+    let mode = "MODE 4";
+    if (shownMode8) {
+        mode = "MODE 8";
+    }
+    let standard = "PAL";
+    if (ui.ntsc.checked) {
+        standard = "NTSC";
+    }
+    ui.screenInfo.textContent = mode + " · " + standard + " · " + selectedRamKb() + "K";
+}
+
+/** @returns {number} */
+function selectedRamKb() {
+    for (const option of ui.ram) {
+        if (option.input.checked) {
+            return option.kb;
+        }
+    }
+    return machine.defaultRamKb;
+}
+
+/** Follow the current PAL or US ZX8301 field rate, and show it on the video chip. */
+function syncFrameTiming() {
+    const hz = machine.frameHz(ql);
+    frameMs = 1000 / hz;
+    if (sfx !== null) {
+        sound.setFrameRate(sfx, hz);
+    }
+    const label = Math.round(hz) + " Hz";
+    if (ui.chipVideoSub.textContent !== label) {
+        ui.chipVideoSub.textContent = label;
+    }
+}
+
+/**
+ * Run up to `maxFramesPerRefresh` frames ahead of the display clock while the
+ * audio queue wants more, on each request from the audio thread and after each
+ * refresh. The borrowed time comes out of the frame carry, which may run
+ * negative down to its floor.
+ */
 function fillSoundQueue() {
     if (sfx === null || sfx.context.state !== "running" || ui.paused.checked) {
         return;
     }
-    for (let ran = 0; ran < 4 && sound.wantsFrame(sfx); ran += 1) {
+    for (let ran = 0; ran < maxFramesPerRefresh && sound.wantsFrame(sfx); ran += 1) {
         stepTurboGroup();
         carryMs = Math.max(carryMs - frameMs, carryFloorMs);
     }
 }
 
 /**
- * Run hidden fields while either Microdrive remains in an active read, then
- * one visible field. The per-field read flag is consumed so Turbo does not
- * stay on after the last transfer.
+ * Run one visible field, after `turboMultiplier - 1` hidden ones when Turbo is
+ * on and a Microdrive read happened during the previous group. Taking the
+ * read flag clears it, so Turbo stops with the last transfer.
  */
 function stepTurboGroup() {
     const reading = machine.takeMdvReading(ql);
@@ -1365,72 +1896,53 @@ function stepTurboGroup() {
 }
 
 /**
- * Keep brief transfers visible, then show the current motor state.
+ * Keep both Microdrive cards aligned with their cartridges, holding brief
+ * transfers visible on the activity lights.
  *
  * @param {number} now
  */
-function refreshMdvActivity(now) {
+function refreshMdvCards(now) {
     for (let drive = 0; drive < ui.mdv.length; drive += 1) {
         const controls = ui.mdv[drive];
-        const activity = mdvActivity[drive];
+        const status = mdvStatus[drive];
         const info = machine.mdvInfo(ql, drive);
-        let state = activity.state;
-        if (info.writing || info.writeCount !== activity.writeCount) {
-            state = "write";
-            activity.until = now + mdvActivityHoldMs;
-        } else if (info.readCount !== activity.readCount) {
-            state = "read";
-            activity.until = now + mdvActivityHoldMs;
-        } else if (now >= activity.until) {
-            state = "idle";
+        // The counts restart with each cartridge, so only a rise is activity.
+        let activity = status.state;
+        if (info.writing || info.writeCount > status.writeCount) {
+            activity = "write";
+            status.until = now + activityHoldMs;
+        } else if (info.readCount > status.readCount) {
+            activity = "read";
+            status.until = now + activityHoldMs;
+        } else if (now >= status.until) {
+            activity = "idle";
             if (info.motorOn) {
-                state = "motor";
+                activity = "motor";
             }
         }
-        activity.readCount = info.readCount;
-        activity.writeCount = info.writeCount;
+        status.readCount = info.readCount;
         if (
-            info.inserted !== activity.inserted ||
-            info.name !== activity.name ||
-            info.modified !== activity.modified
+            info.inserted !== status.inserted ||
+            info.name !== status.name ||
+            info.modified !== status.modified
         ) {
-            let label = "No cartridge.";
-            if (info.inserted) {
-                label = info.name;
-                if (info.modified) {
-                    label += " (modified)";
-                }
+            showDrive(controls, info.inserted, info.name, info.modified, "No cartridge.");
+            status.inserted = info.inserted;
+            status.name = info.name;
+            status.modified = info.modified;
+            status.spaceWrites = -1;
+        }
+        if (status.spaceWrites !== info.writeCount && activity !== "write") {
+            const space = machine.mdvSpace(ql, drive);
+            if (space === null) {
+                showSpace(controls, 0, 0);
+            } else {
+                showSpace(controls, space.free, space.good);
             }
-            showInfo(controls.info, label);
-            controls.download.disabled = !info.inserted;
-            controls.eject.disabled = !info.inserted;
-            activity.inserted = info.inserted;
-            activity.name = info.name;
-            activity.modified = info.modified;
+            status.spaceWrites = info.writeCount;
         }
-        if (state === activity.state) {
-            continue;
-        }
-        controls.info.classList.remove("mdv-motor", "mdv-read", "mdv-write");
-        let title = "Microdrive " + (drive + 1) + " idle";
-        switch (state) {
-        case "motor":
-            controls.info.classList.add("mdv-motor");
-            title = "Microdrive " + (drive + 1) + " motor running";
-            break;
-        case "read":
-            controls.info.classList.add("mdv-read");
-            title = "Microdrive " + (drive + 1) + " reading";
-            break;
-        case "write":
-            controls.info.classList.add("mdv-write");
-            title = "Microdrive " + (drive + 1) + " writing";
-            break;
-        default:
-            break;
-        }
-        controls.info.title = title;
-        activity.state = state;
+        status.writeCount = info.writeCount;
+        showActivity(controls, status, activity, info.inserted, "MDV" + (drive + 1));
     }
 }
 
@@ -1440,12 +1952,7 @@ function refreshMdvActivity(now) {
  * @param {boolean} highDensity
  */
 function insertNewFloppy(highDensity) {
-    const error = disk.insertBlankFloppy(ql.disks.flp, highDensity, "flp1.img");
-    if (error !== null) {
-        showError(ui.fddInfo, error);
-        return;
-    }
-    refreshMountedDrives();
+    disk.insertBlankFloppy(ql.disks.flp, highDensity, "flp1.img");
 }
 
 /**
@@ -1454,82 +1961,178 @@ function insertNewFloppy(highDensity) {
  * @param {number} sectors
  */
 function insertNewHardDisk(sectors) {
-    const error = disk.insertBlankHardDisk(ql.disks.win, sectors, "win1.win");
-    if (error !== null) {
-        showError(ui.hddInfo, error);
-        return;
-    }
-    refreshMountedDrives();
-}
-
-/** Keep both mounted-drive rows aligned with their images. */
-function refreshMountedDrives() {
-    refreshDriveStatus(
-        ql.disks.win,
-        hddStatus,
-        ui.hddInfo,
-        ui.downloadHdd,
-        ui.ejectHdd,
-        "No hard disk.",
-        "WIN1",
-    );
-    refreshDriveStatus(
-        ql.disks.flp,
-        fddStatus,
-        ui.fddInfo,
-        ui.downloadFdd,
-        ui.ejectFdd,
-        "No floppy.",
-        "FLP1",
-    );
+    disk.insertBlankHardDisk(ql.disks.win, sectors, "win1.win");
 }
 
 /**
- * Keep one drive row aligned with its image. Unchanged fields leave the DOM alone.
+ * Set error text and apply its error presentation.
+ *
+ * @param {HTMLElement} el
+ * @param {string} text
+ */
+function showError(el, text) {
+    el.textContent = text;
+    el.classList.add("error");
+}
+
+/**
+ * Keep one hard disk or floppy card aligned with its image. Unchanged fields
+ * leave the DOM alone; the meter follows writes once they settle.
  *
  * @param {import("./disk.js").State} state
  * @param {DriveStatus} status
- * @param {HTMLElement} infoEl
- * @param {HTMLButtonElement} download
- * @param {HTMLButtonElement} eject
+ * @param {DriveControls} controls
+ * @param {number} now
  * @param {string} emptyLabel
- * @param {string} unavailableLabel
+ * @param {string} driveName
  */
-function refreshDriveStatus(state, status, infoEl, download, eject, emptyLabel, unavailableLabel) {
+function refreshDiskCard(state, status, controls, now, emptyLabel, driveName) {
+    const info = disk.info(state);
+    let activity = status.state;
+    if (info.writeCount !== status.writeCount) {
+        activity = "write";
+        status.until = now + activityHoldMs;
+    } else if (info.readCount !== status.readCount) {
+        activity = "read";
+        status.until = now + activityHoldMs;
+    } else if (now >= status.until) {
+        activity = "idle";
+    }
+    status.readCount = info.readCount;
+    status.writeCount = info.writeCount;
     if (
-        state.inserted === status.inserted &&
-        state.name === status.name &&
-        state.modified === status.modified &&
-        state.driverReady === status.driverReady &&
-        state.generation === status.generation
+        info.inserted !== status.inserted ||
+        info.name !== status.name ||
+        info.modified !== status.modified ||
+        info.driverReady !== status.driverReady ||
+        info.generation !== status.generation
     ) {
-        return;
-    }
-    let label = emptyLabel;
-    if (state.inserted) {
-        label = state.name;
-        if (state.modified) {
-            label += " (modified)";
+        let name = info.name;
+        if (info.inserted && !info.driverReady) {
+            name += " (" + driveName + " unavailable)";
         }
-        if (!state.driverReady) {
-            label += " (" + unavailableLabel + " unavailable)";
-        }
+        showDrive(controls, info.inserted, name, info.modified, emptyLabel);
+        status.inserted = info.inserted;
+        status.name = info.name;
+        status.modified = info.modified;
+        status.driverReady = info.driverReady;
+        status.generation = info.generation;
+        status.spaceWrites = -1;
     }
-    showInfo(infoEl, label);
-    download.disabled = !state.inserted;
-    eject.disabled = !state.inserted;
-    status.inserted = state.inserted;
-    status.name = state.name;
-    status.modified = state.modified;
-    status.driverReady = state.driverReady;
-    status.generation = state.generation;
+    if (status.spaceWrites !== info.writeCount && activity !== "write") {
+        showSpace(controls, info.freeSectors, info.totalSectors);
+        status.spaceWrites = info.writeCount;
+    }
+    showActivity(controls, status, activity, info.inserted, driveName);
 }
 
-/** @param {number} now */
-function refreshSoundStatus(now) {
-    if (sfx === null) {
+/**
+ * Show a drive's medium name, modified badge, and empty state.
+ *
+ * @param {DriveControls} controls
+ * @param {boolean} inserted
+ * @param {string} name
+ * @param {boolean} modified
+ * @param {string} emptyLabel
+ */
+function showDrive(controls, inserted, name, modified, emptyLabel) {
+    let label = emptyLabel;
+    if (inserted) {
+        label = name;
+        controls.card.classList.remove("empty");
+    } else {
+        controls.card.classList.add("empty");
+    }
+    showInfo(controls.info, label);
+    controls.modified.hidden = !(inserted && modified);
+    controls.download.disabled = !inserted;
+    controls.eject.disabled = !inserted;
+}
+
+/**
+ * Set informational text and clear its error presentation.
+ *
+ * @param {HTMLElement} el
+ * @param {string} text
+ */
+function showInfo(el, text) {
+    el.textContent = text;
+    el.classList.remove("error");
+}
+
+/**
+ * Show free and usable sectors on a drive's meter, or hide it without them.
+ *
+ * @param {DriveControls} controls
+ * @param {number} free
+ * @param {number} total
+ */
+function showSpace(controls, free, total) {
+    if (total <= 0) {
+        controls.meter.hidden = true;
         return;
     }
+    controls.meter.hidden = false;
+    const used = Math.min(Math.max(total - free, 0), total);
+    controls.meterBar.style.width = (used * 100 / total) + "%";
+    const kib = total * sectorBytes / 1024;
+    let size = Math.round(kib) + " KB";
+    if (kib >= 1024) {
+        size = (kib / 1024).toFixed(1) + " MB";
+    }
+    controls.size.textContent = size;
+    controls.free.textContent = free + "/" + total + " sectors free";
+}
+
+/**
+ * Light a drive's card and status-bar activity lights for its state:
+ * `idle`, `motor`, `read`, or `write`.
+ *
+ * @param {DriveControls} controls
+ * @param {DriveStatus} status
+ * @param {string} state
+ * @param {boolean} inserted
+ * @param {string} driveName
+ */
+function showActivity(controls, status, state, inserted, driveName) {
+    if (state === status.state && inserted === status.lit) {
+        return;
+    }
+    status.state = state;
+    status.lit = inserted;
+    let title = driveName + " idle";
+    switch (state) {
+    case "motor":
+        title = driveName + " motor running";
+        break;
+    case "read":
+        title = driveName + " reading";
+        break;
+    case "write":
+        title = driveName + " writing";
+        break;
+    default:
+        break;
+    }
+    for (const led of [controls.led, controls.statusLed]) {
+        led.classList.remove("on", "motor", "read", "write");
+        if (inserted) {
+            led.classList.add("on");
+        }
+        if (state !== "idle") {
+            led.classList.add(state);
+        }
+        led.title = title;
+    }
+}
+
+/**
+ * Once a second, show the frame rate, and the audio cut and gap when there is
+ * sound.
+ *
+ * @param {number} now
+ */
+function refreshStats(now) {
     if (statsAt === 0) {
         statsAt = now;
         framesRun = 0;
@@ -1539,15 +2142,17 @@ function refreshSoundStatus(now) {
     if (span < statsWindowMs) {
         return;
     }
-    const stats = sfx.stats;
-    const fps = framesRun * 1000 / span;
-    const cut = Math.round(stats.cut - statsCut);
-    const gap = Math.round(stats.gap - statsGap);
+    ui.fps.textContent = (framesRun * 1000 / span).toFixed(1);
     statsAt = now;
     framesRun = 0;
+    if (sfx === null) {
+        return;
+    }
+    const stats = sfx.stats;
+    ui.cut.textContent = String(Math.round(stats.cut - statsCut));
+    ui.gap.textContent = String(Math.round(stats.gap - statsGap));
     statsCut = stats.cut;
     statsGap = stats.gap;
-    showInfo(ui.soundInfo, fps.toFixed(1) + " fps, cut " + cut + " ms, gap " + gap + " ms");
 }
 
 /**
@@ -1565,7 +2170,7 @@ function stepMachine(visible) {
     machine.runFrame(ql);
     framesRun += 1;
     const chunk = ql.audio;
-    if (chunk.n > 0 && sfx !== null && (sfx.context.state === "running" || sound.wantsFrame(sfx))) {
+    if (chunk.n > 0 && sfx !== null) {
         sound.push(sfx, chunk);
     }
     chunk.n = 0;

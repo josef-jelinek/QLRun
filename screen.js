@@ -39,23 +39,28 @@ const crtViewH = 384;
  * @param {function(string | null, Gfx | null): void} onGfx
  */
 export function init(canvas, shaders, onGfx) {
+    canvas.addEventListener(
+        "webglcontextlost",
+        function (e) {
+            e.preventDefault();
+            onGfx("WebGL2 context lost.", null);
+        },
+    );
 
-    canvas.addEventListener("webglcontextlost", function (e) {
-        e.preventDefault();
-        onGfx("WebGL2 context lost.", null);
-    });
-
-    canvas.addEventListener("webglcontextrestored", function () {
-        console.info("WebGL2 context restored");
-        initGfx();
-    });
+    canvas.addEventListener(
+        "webglcontextrestored",
+        function () {
+            console.info("WebGL2 context restored");
+            initGfx();
+        },
+    );
 
     initGfx();
 
     function initGfx() {
         const gfx = createGfx(canvas, shaders.vert, shaders.frag);
         if (gfx === null) {
-            onGfx("Failed to create WebGL2 context.", null);
+            onGfx("Could not set up the WebGL2 display.", null);
             return;
         }
         resize(gfx);
@@ -96,6 +101,36 @@ export function setStretch(gfx, on) {
         gfx.dirty = true;
     }
     resize(gfx);
+}
+
+/**
+ * Upload new pixel versions and redraw when the frame or display state changes.
+ *
+ * @param {Gfx} gfx
+ * @param {Uint8Array} pixels
+ * @param {boolean} ntsc
+ * @param {number} frameVersion Advances whenever the pixel buffer is rewritten.
+ */
+export function draw(gfx, pixels, ntsc, frameVersion) {
+    if (gfx.pixelRatio !== window.devicePixelRatio) {
+        resize(gfx);
+    }
+    const gl = gfx.gl;
+    if (gfx.ntscOn !== ntsc) {
+        gl.uniform1i(gfx.ntscLoc, Number(ntsc));
+        gfx.ntscOn = ntsc;
+        gfx.dirty = true;
+    }
+    if (gfx.pixels !== pixels || gfx.frameVersion !== frameVersion) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frameW, frameH, gl.RED_INTEGER, gl.UNSIGNED_BYTE, pixels);
+        gfx.pixels = pixels;
+        gfx.frameVersion = frameVersion;
+        gfx.dirty = true;
+    }
+    if (gfx.dirty) {
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gfx.dirty = false;
+    }
 }
 
 /**
@@ -164,36 +199,9 @@ export function resize(gfx) {
 }
 
 /**
- * Upload new pixel versions and redraw when the frame or display state changes.
+ * Set up the WebGL2 context, display program and texture on the canvas, or
+ * return null where WebGL2 or the shaders are unavailable.
  *
- * @param {Gfx} gfx
- * @param {Uint8Array} pixels
- * @param {boolean} ntsc
- * @param {number} frameVersion Advances whenever the pixel buffer is rewritten.
- */
-export function draw(gfx, pixels, ntsc, frameVersion) {
-    if (gfx.pixelRatio !== window.devicePixelRatio) {
-        resize(gfx);
-    }
-    const gl = gfx.gl;
-    if (gfx.ntscOn !== ntsc) {
-        gl.uniform1i(gfx.ntscLoc, Number(ntsc));
-        gfx.ntscOn = ntsc;
-        gfx.dirty = true;
-    }
-    if (gfx.pixels !== pixels || gfx.frameVersion !== frameVersion) {
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frameW, frameH, gl.RED_INTEGER, gl.UNSIGNED_BYTE, pixels);
-        gfx.pixels = pixels;
-        gfx.frameVersion = frameVersion;
-        gfx.dirty = true;
-    }
-    if (gfx.dirty) {
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        gfx.dirty = false;
-    }
-}
-
-/**
  * @param {HTMLCanvasElement} canvas
  * @param {string} vertGLSL
  * @param {string} fragGLSL
@@ -236,7 +244,6 @@ function createGfx(canvas, vertGLSL, fragGLSL) {
     gl.uniform1i(texLoc, 0);
     gl.uniform1i(crtLoc, 0);
     gl.uniform1i(ntscLoc, 0);
-    gl.viewport(0, 0, frameW, frameH);
     return {
         gl,
         pixels: null,
@@ -277,12 +284,21 @@ function createProgram(gl, vertGLSL, fragGLSL) {
     gl.attachShader(p, vs);
     gl.attachShader(p, fs);
     gl.linkProgram(p);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+        // A shader that failed to compile fails the link; its own log says why.
+        for (const shader of [vs, fs]) {
+            const log = (gl.getShaderInfoLog(shader) ?? "").replace(/\0/g, "\n").trim();
+            if (log !== "") {
+                console.error(log);
+            }
+        }
         console.error((gl.getProgramInfoLog(p) ?? "").replace(/\0/g, "\n").trim());
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
         gl.deleteProgram(p);
         return null;
     }
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
     return p;
 }

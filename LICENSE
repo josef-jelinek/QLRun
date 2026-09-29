@@ -1,7 +1,9 @@
 This MIT license covers the QLRun emulator sources and documentation
-authored for this project. It does not cover ROM images in roms/. Those
-files are not owned by this project. Qsound_V1.94.rom is distributed under
-CERN-OHL-S-2.0 as described in roms/Qsound_NOTICE.txt.
+authored for this project. It does not cover ROM images in roms/ or the
+music in the examples/ Microdrive images. Those are not owned by this
+project. Qsound_V1.94.rom is distributed under CERN-OHL-S-2.0 as described
+in roms/Qsound_NOTICE.txt. The example music is converted from VGM rips
+published at vgmrips.net, as described in README.md.
 
 MIT License
 

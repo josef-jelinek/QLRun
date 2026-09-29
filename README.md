@@ -2,13 +2,13 @@
 
 Try it live: <https://josef-jelinek.github.io/QLRun/>
 
-QLRun is a browser emulator for the Sinclair QL. It loads a JS or JSU
-system ROM from `roms/` when those files are available, paints the ZX8301
-display, talks to the ZX8302 IPC for keyboard, beeper, and Microdrive, and
-emulates the original AY-3-8910 QSound card and the YM2203-compatible QSound2.
-It also mounts writable QLWA `.win` hard disk images as `WIN1_` and writable
-QL5A/QL5B `.img` floppy images as `FLP1_`, and can connect the host mouse as
-the PS/2 mouse of a QIMSI ROM-port interface.
+QLRun is a browser emulator for the Sinclair QL. It loads a JS or JSU system
+ROM, or the bundled Minerva ROM, from `roms/` when those files are available,
+paints the ZX8301 display, talks to the ZX8302 IPC for keyboard, beeper, and
+Microdrive, and emulates the original AY-3-8910 QSound card and the
+YM2203-compatible QSound2. It also mounts writable QLWA `.win` hard disk images
+as `WIN1_` and writable QL5A/QL5B `.img` floppy images as `FLP1_`, and can
+connect the host mouse as the PS/2 mouse of a QIMSI ROM-port interface.
 
 No build, package manager, or external library is required. The page uses
 plain JavaScript. `tsconfig.json` is only for optional static checking during
@@ -35,12 +35,15 @@ python3 -m http.server 8080
 
 Then visit `http://127.0.0.1:8000/` (or the port you chose).
 
-The machine initializes 128 KiB of RAM by default and starts without a ROM,
-then tries `roms/<name>.rom` (up to 48 KiB). The default `<name>` is `js`, or
-`jsu` when `?ntsc=1` selects US timing; an explicit `?rom=` overrides that
-choice. If a ROM fetch fails, **Load ROM** still accepts a raw `.rom` or `.bin`
-file. Three optional 16 KiB extension-ROM slots are available: the cartridge
-window at `0x0C000`, I/O ROM 1 at `0x10000`, and I/O ROM 2 at `0x14000`.
+The machine initializes 128 KiB of RAM by default and starts without a ROM, then
+tries `roms/<name>.rom` (up to 48 KiB). The default `<name>` is `js`, or `jsu`
+when `?ntsc=1` selects US timing; an explicit `?rom=` overrides that choice, for
+example `?rom=minerva` for the bundled Minerva 1.98. If a ROM fetch fails, the
+system ROM's **Load** on the ROMs tab still accepts a raw `.rom` or `.bin` file.
+Three optional 16 KiB extension-ROM slots are available: the cartridge window at
+`0x0C000`, I/O ROM 1 at `0x10000`, and I/O ROM 2 at `0x14000`. `?cart=<name>`
+loads `roms/<name>.rom` into the cartridge slot, for example `?cart=tk2` for the
+bundled Toolkit II v2.36.
 
 The UI controls can also be initialized through URL parameters. Use `0` to
 disable a switch and `1` to enable it. `qsound` accepts `0` for no card, `1`
@@ -67,12 +70,16 @@ defaults:
 | `stretch` | `0` |
 
 For example, `?crt=0&keyboard=1&ntsc=1&ram=640&rom=jsu` starts with the CRT
-filter off, the onscreen keyboard shown, the US machine, and 640 KiB of RAM.
-Fullscreen is not exposed as a URL parameter. Changing a listed control
-updates its parameter without reloading the page or adding a browser-history
-entry; changing it back to the default in the table removes the parameter.
-Selecting a local ROM removes `rom`, and selecting a local Microdrive image
-removes `url`; other parameters and the URL fragment are preserved.
+filter off, the onscreen keyboard shown, the US machine with `jsu.rom` chosen
+explicitly, and 640 KiB of RAM.
+Fullscreen is not exposed as a URL parameter. Changing a listed control updates
+its parameter without reloading the page or adding a browser-history entry;
+changing it back to the default in the table removes the parameter. Choosing
+Minerva sets `rom=minerva`, and selecting or dropping a local ROM, or returning
+to the automatic one, removes `rom`. Choosing Toolkit II sets `cart=tk2`, and
+loading a local cartridge ROM or ejecting it removes `cart`. Loading, dropping,
+creating, or ejecting a Microdrive in MDV1 removes `url`. Other parameters and
+the URL fragment are preserved.
 
 ## Emulator page
 
@@ -89,103 +96,141 @@ Cross-origin URLs must allow the browser to read them through CORS. For a ZIP,
 the alphabetically first `.mdv` member is loaded unless a `#member` fragment
 selects another.
 
-### Command bar
+### Page layout
 
-The top row holds the Media, ROMs, Hardware, and Display tab switches, Paused,
-Reset, and the status text: messages on the left, and the frame rate with the
-last second's audio cut and gap on the right. The section under it shows the
-selected tab and keeps the height of the tallest one, so switching tabs never
-resizes the screen. Media is selected when the page opens; the tab is not a
-URL parameter.
+The page is a QL Pointer Environment desktop in the four mode-4 colours: a top
+bar, the `#1 SCREEN` window with the optional `KEYBOARD` window under it, the
+`SETTINGS` window with Media, ROMs, Hardware, and Display tabs, and the `#0`
+status bar. Media is selected when the page opens; the tab is not a URL
+parameter. Below 900 px the settings stack under the screen.
 
-- Paused - stop the emulated machine; clearing the switch continues from the
-  same point. Sound falls silent, and the status reads 0 fps with no audio gap.
-  Reset and media changes still apply while paused. It has no URL parameter
-  and is off when the page opens.
-- Reset - restart the 68008 from the ROM reset vector. A Microdrive cartridge
-  is kept.
+- Summary - the top bar names the video standard with its current field rate,
+  memory, sound card, system ROM, and mouse; selecting one opens its tab.
+- Pause - stop the emulated machine; Resume, here or over the dimmed screen
+  (also in fullscreen), continues from the same point. Sound falls silent,
+  and the status reads 0 fps with no audio gap. Reset and media changes still
+  apply while paused. It has no URL parameter and is off when the page opens.
+- Reset - restart the 68008 from the ROM reset vector. Inserted media stay.
+- Mute, Keyboard, and Fullscreen buttons beside them mirror the Mute,
+  Onscreen keyboard, and Fullscreen settings.
+- The screen window's title bar has `(=)` CRT filter, `<->` Stretch, and `[ ]`
+  Fullscreen controls that mirror those settings; CRT filter and Stretch light
+  green when on.
+- The status bar shows messages on the left, then each drive's activity light,
+  the frame rate, and the last second's audio cut and gap in ms.
+
+Files dropped anywhere on the page go where their names say: `.mdv` into MDV1,
+or MDV2 while MDV1 holds a cartridge; the first `.mdv` in a `.zip` likewise;
+`.win` into WIN1; `.img` into FLP1; and `.rom` or `.bin` in place of the
+system ROM, which resets the machine. Other files are reported in the status
+bar.
 
 #### Media
 
-- MDV1 / MDV2 - each physical Microdrive has independent New, Load, Save,
-  and Eject controls. Load inserts a raw QLAY `.mdv` without resetting the
-  machine. New inserts an unformatted 255-sector cartridge named `mdv1.mdv` or
-  `mdv2.mdv`; format it inside the QL with a command such as
-  `FORMAT mdv2_work`. Guest erase and track writes update the in-memory image.
-  Save downloads its current contents, while Eject discards them. A changed
-  image is labelled `(modified)` until it is downloaded.
-- The drive indicator is outlined while its motor runs, green during reads,
-  white during writes or erasure, and dark while idle. It pulses during reads
-  and writes.
+Each drive has a card with its medium name, a `modified` badge while the image
+holds unsaved changes, an activity light, and a meter of free and usable
+sectors as `DIR` reports them. The light is dotted while the drive is empty,
+white while a Microdrive motor runs, green during reads, and red during writes.
+An empty card shows a dotted outline.
+
+- MDV1 / MDV2 - Load inserts a raw QLAY `.mdv` without resetting the machine.
+  New inserts an unformatted 255-sector cartridge named `mdv1.mdv` or
+  `mdv2.mdv`; format it inside the QL with a command such as `FORMAT mdv2_work`.
+  Until then it reads as erased tape, so a boot with it in MDV1 soon stops
+  looking for `mdv1_boot`; a format stopped by Reset can be run again. FORMAT
+  lays the records out like a real loop of tape, with a splice in the last slot
+  that spoils the record before it, so a formatted cartridge has 250 to 252
+  good sectors. Its meter appears once QDOS has formatted it, since the counts
+  come from the cartridge's sector map. Guest erase and track writes update the
+  in-memory image. Save downloads its current contents and clears the badge,
+  while Eject discards them.
 - Turbo - run the machine at up to eight times normal speed while either
   Microdrive is transferring a read in the current field. It is enabled by
   default. Intermediate video fields are assembled but not presented or
   uploaded, and their audio samples are not collected. A motor left spinning
   after the last read, writes, and other execution stay at normal speed.
+- WIN1 - Load mounts a QLWA `.win` hard disk image without resetting the
+  machine. New offers 4 MB and 16 MB, which insert an empty, formatted QLWA
+  image named `win1.win`, laid out as SMSQ/E formats it: 4 MiB, or 32764
+  sectors (just under 16 MiB), the largest disk whose free and total sectors
+  QDOS can report exactly. SuperBASIC `DIR` prints those counts as signed
+  16-bit numbers, so the drive reports at most 32767 of each; larger images
+  still work, but show the capped counts. Guest file creation, deletion,
+  truncation, and writes update its in-memory image. Save downloads the
+  current image and clears the badge; Eject discards the mounted copy. The
+  bundled system ROMs expose it as `WIN1_`; an unsupported ROM is reported on
+  the card.
 - FLP1 - Load mounts a QL5A or QL5B floppy `.img` without resetting the
-  machine. New DD and New HD instead insert an empty, formatted 720 KiB
+  machine. New offers DD and HD, which insert an empty, formatted 720 KiB
   QL5A or 1440 KiB QL5B image named `flp1.img`, laid out as SMSQ/E formats
   them. Guest file creation, deletion, truncation, and writes update its
-  in-memory image. Save downloads the current image and clears the
-  `(modified)` label; Eject discards the mounted copy. The bundled JS and JSU
-  ROMs expose it as `FLP1_`; an unsupported ROM is reported in the media row.
-- WIN1 - Load mounts a QLWA `.win` hard disk image without resetting the
-  machine. New 4MB and New 16MB instead insert an empty, formatted QLWA image
-  named `win1.win`, laid out as SMSQ/E formats it: 4 MiB, or 32764 sectors
-  (just under 16 MiB), the largest disk whose free and total sectors QDOS can
-  report exactly. SuperBASIC `DIR` prints those counts as signed 16-bit
-  numbers, so the drive reports at most 32767 of each; larger images still
-  work, but show the capped counts. Guest file creation, deletion,
-  truncation, and writes update its in-memory image. Save downloads the current image and clears the
-  `(modified)` label; Eject discards the mounted copy. The bundled JS and JSU
-  ROMs expose it as `WIN1_`; an unsupported ROM is reported in the media row.
+  in-memory image. Save downloads the current image and clears the badge;
+  Eject discards the mounted copy. The bundled system ROMs expose it as
+  `FLP1_`; an unsupported ROM is reported on the card.
 
+Both drives keep SMSQ/E's level-2 directories, which Toolkit II commands use:
+`MAKE_DIR` turns a new file into a directory and moves the files named after it
+and `_` into it, `RENAME` can move a file to another directory, a directory
+open with a trailing `_` or a longer name reaches the nearest existing
+directory, and an empty directory can be deleted.
 
 #### ROMs
 
-- Load ROM - replace the 48 KiB system ROM and reset.
-- Load cart ROM / Load IO1 ROM / Load IO2 ROM - load a raw `.rom` or `.bin`
-  image of 1 to 16 KiB into the cartridge window at `0x0C000`, I/O ROM 1 at
-  `0x10000`, or I/O ROM 2 at `0x14000`; the Eject beside each removes that
-  slot's image. Short images are padded with zeroes. Each slot shows its own
-  filename. Loading or ejecting resets the machine, so QDOS detects the
-  change. Images survive resets and system-ROM replacement. While the QIMSI
-  mouse is on, its registers replace cartridge bytes `0x0FED0`–`0x0FEDF`.
-  These slots provide ROM storage only, not any additional peripheral
-  hardware a particular expansion ROM may require.
+The address map at the top marks the extension slots that hold an image.
+
+- System ROM - Load replaces the 48 KiB system ROM and resets. The `auto` badge
+  shows the automatic `js.rom` or `jsu.rom` that follows the video standard;
+  after a local or `?rom=` ROM, Auto returns to it. Minerva switches to the
+  bundled Minerva 1.98 ROM, `minerva.rom`, which stays selected when the video
+  standard changes. Its dual-screen start (F3 or F4) moves the system
+  variables above the second screen; `WIN1_`, `FLP1_`, and the PE pointer
+  follow them.
+- Cartridge ROM / I/O ROM 1 / I/O ROM 2 - Load a raw `.rom` or `.bin` image of
+  1 to 16 KiB into the cartridge window at `0x0C000`, I/O ROM 1 at `0x10000`,
+  or I/O ROM 2 at `0x14000`; Eject removes that slot's image. Short images are
+  padded with zeroes. Each slot shows its own filename. Loading or ejecting
+  resets the machine, so QDOS detects the change. Images survive resets and
+  system-ROM replacement. While the QIMSI mouse is on, its registers replace
+  cartridge bytes `0x0FED0`–`0x0FEDF`. These slots provide ROM storage only,
+  not any additional peripheral hardware a particular expansion ROM may
+  require.
+- Toolkit II - the cartridge card's button loads the bundled Toolkit II v2.36,
+  `tk2.rom`, and sets `cart=tk2`; a local image or Eject replaces it. With the
+  QIMSI mouse on, the replaced bytes fall in small Toolkit II helper routines;
+  the file commands tried here still work.
 
 #### Hardware
 
-- NTSC - US QL clocks (7.552445 MHz CPU from a 15.10489 MHz crystal). The
-  312-line monitor field stays near 50.4 Hz; JSU TV mode (F2) sets ZX8301
-  bit 6 for the 262-line field at about 60.05 Hz. CRT output then displays its
-  192 active scan lines; non-CRT output also exposes rows 192–255 as an
-  end-of-field diagnostic memory view, not scanned TV output. Field geometry
-  is latched at field start. Starting with `?ntsc=1` loads `roms/jsu.rom` unless
-  `?rom=` is set. While using the automatic ROM, changing the switch reloads
-  `js.rom` or `jsu.rom`; an explicit or locally loaded ROM stays selected.
-- +256K / +512K - independently add either RAM expansion to the stock 128 KiB.
-  Selecting both provides 896 KiB. Changing either switch initializes the
-  selected memory and resets the machine. Because either sound card occupies
-  `0xC0000`, it conflicts with the top 256 KiB of this configuration. Selecting
-  the second RAM expansion turns the card off; selecting either card with both
-  expansions active turns +256K off, leaving 640 KiB. The selected card wins
-  the same conflict during startup when its ROM is available.
-- QSound - connect the original MC6821/AY-3-8910 card and its bundled extension
-  ROM. Changing the switch resets the machine. It is enabled by default.
-- QSound2 - connect the mutually exclusive YM2203-compatible card, using the
-  same extension ROM. Its PSG and three-channel FM synthesizer run from a fixed
-  2 MHz master clock. Changing the switch resets the machine.
+Choices marked `*` reset the machine when changed.
+
+- Video standard - PAL, or NTSC for US QL clocks (7.552445 MHz CPU from a
+  15.10489 MHz crystal). The 312-line monitor field stays near 50.4 Hz; JSU TV
+  mode (F2) sets ZX8301 bit 6 for the 262-line field at about 60.05 Hz. CRT
+  output then displays its 192 active scan lines; non-CRT output also exposes
+  rows 192–255 as an end-of-field diagnostic memory view, not scanned TV
+  output. Field geometry is latched at field start. Starting with `?ntsc=1`
+  loads `roms/jsu.rom` unless `?rom=` is set. While using the automatic ROM,
+  changing the standard reloads `js.rom` or `jsu.rom`; an explicit or locally
+  loaded ROM stays selected. Minerva does not set bit 6, so it keeps the
+  312-line field on NTSC clocks.
+- Memory - 128K, or 384K, 640K, and 896K with the 256 KiB, 512 KiB, or both
+  expansions. Changing it initializes the selected memory. Because either sound
+  card occupies `0xC0000`, it conflicts with the top 256 KiB of 896K: choosing
+  896K removes the card, and choosing a card at 896K reduces memory to 640K. A
+  note says which happened. The selected card wins the same conflict during
+  startup when its ROM is available.
+- Sound card - None, the original MC6821/AY-3-8910 QSound card, or the
+  YM2203-compatible QSound2 card. Both use the bundled extension ROM, and
+  QSound2's PSG and three-channel FM synthesizer run from a fixed 2 MHz master
+  clock. QSound is fitted by default.
 - Stereo - spread either card's PSG channels A, B, and C across the stereo
   image. Off reproduces the card's summed mono output; QSound2 FM and the IPC
-  beeper stay centred.
-- Muted - silence the beeper and either sound card. The machine keeps running
+  beeper stay centred. It needs a sound card.
+- Mute - silence the beeper and either sound card. The machine keeps running
   at the same speed, and the switch takes effect without a reset.
-- QIMSI Mouse / PE Mouse - connect the host mouse as one of two mutually
-  exclusive models, like the sound cards; turning one on turns the other off.
-  The `mouse` parameter follows the selection, and changing either switch
-  resets the machine.
-  - QIMSI Mouse connects the host mouse as the PS/2 mouse of a QIMSI interface,
+- Pointer device - None, QIMSI, or PE connects the host mouse as one of two
+  models. The `mouse` parameter follows the selection.
+  - QIMSI connects the host mouse as the PS/2 mouse of a QIMSI interface,
     whose registers occupy `0x0FED0`–`0x0FEDF` in the ROM port. While it is
     on, click the screen to capture the mouse; Esc releases it, so press Esc
     again to send it to the QL. Moving across the displayed screen width
@@ -195,34 +240,43 @@ URL parameter.
     movement. The mouse reports itself as an IntelliMouse with left, right,
     and middle buttons and a wheel. Only the mouse is emulated, not the QIMSI
     ROM, microSD card, keyboard, serial link, or sound.
-  - PE Mouse places the Pointer Environment pointer under the host cursor
-    over the screen, as QPC and uQLX do, with no capture. The left and right
-    buttons are HIT and DO. It needs the Pointer Environment (`ptr_gen` with
-    the `PTR2` linkage) loaded in the QL and does nothing until then;
-    `mspeed` does not apply.
-- Cursor - show the host cursor over the screen while PE Mouse is on. It is
-  off by default, so only the QL pointer is visible over the screen; the
-  host cursor still shows elsewhere on the page. QIMSI Mouse hides the host
-  cursor through its pointer capture instead.
+  - PE places the Pointer Environment pointer under the host cursor over the
+    screen, as QPC and uQLX do, with no capture. The left and right buttons
+    are HIT and DO. It needs the Pointer Environment (`ptr_gen` with the
+    `PTR2` linkage) loaded in the QL and does nothing until then; `mspeed`
+    does not apply.
+- Host cursor - show the host cursor over the screen while PE is selected. It
+  is off by default, so only the QL pointer is visible over the screen; the
+  host cursor still shows elsewhere on the page. QIMSI hides the host cursor
+  through its pointer capture instead.
 
 #### Display
 
-- CRT - fit the display continuously and add rounded pixels and scanlines.
-  When off, the display is square and pixel dimensions are integer-scaled in
-  physical display pixels. Both video modes use the same 512-device-pixel size
-  steps, and the canvas may therefore use fractional CSS dimensions.
+- CRT filter - fit the display continuously and add rounded pixels and
+  scanlines. When off, the display is square and pixel dimensions are
+  integer-scaled in physical display pixels. Both video modes use the same
+  512-device-pixel size steps, and the canvas may therefore use fractional CSS
+  dimensions.
 - Stretch - fill the entire available display area, disregarding aspect ratio
-  and integer scaling. It applies with CRT enabled or disabled and in both
+  and integer scaling. It applies with the CRT filter on or off and in both
   fullscreen and windowed modes.
-- Keyboard - show or hide the QL keyboard under the screen.
-- Fullscreen - show only the fullscreen emulator canvas (also F11).
+- Onscreen keyboard - show or hide the QL keyboard under the screen. Drag the
+  keyboard window's title bar to resize it.
+- Fullscreen - show only the emulator screen (also F11). If the browser refuses
+  fullscreen, the page shows only the screen until F11 is pressed again.
 
-F1 and F2 reach the emulated machine (monitor/TV select on the JS ROM). F11
-is the page fullscreen shortcut.
+F1 to F5 reach the emulated machine; F1 and F2 select monitor or TV mode on the
+JS and Minerva start screens, and Minerva's F3 and F4 their dual-screen
+versions. F11 is the page fullscreen shortcut. While a settings tab has focus,
+the arrow keys, Space, Enter, and Tab keep their browser behavior instead of
+reaching the QL.
 
-The host keyboard is mapped onto the QL IPC matrix. Letters and digits match
-the keycaps. Shift, Ctrl, and Alt are the QL modifiers. Backspace is
-Ctrl+Left; Delete is Ctrl+Right.
+The host keyboard is mapped onto the QL IPC matrix. Letters, digits, and
+punctuation match the keycaps, and Backquote is the £ key. Shift, Ctrl, and
+Alt are the QL modifiers. Backspace is Ctrl+Left and Delete is Ctrl+Right;
+Home and End are Left and Right, and Page Up and Page Down are Up and Down.
+The keypad types its digits, `.`, `/`, `-`, `+`, and `*`, and its Enter is
+ENTER.
 
 ## Sound
 
@@ -255,10 +309,12 @@ CPU prefetch/internal sequencing, chip-internal write timing, propagation and
 setup/hold effects, full PIA handshakes/interrupts, and analogue response remain
 approximate. The model has not been calibrated against physical bus traces.
 
-Two to three video frames of samples are kept queued: the audio thread asks for
-one more whenever the queue falls below two, and the machine runs a frame only
-once a frame has been played. Chip clocks continue while browser audio is
-suspended, so envelopes and finite sounds do not pause with the host device.
+About two to three video frames of samples stay queued, and audio beyond four
+frames is cut as an overrun. Fields run at the ZX8301 field rate from the
+display clock; whenever the queue falls below two frames, the audio thread asks
+for more, and up to four fields run ahead of the display, borrowing that time
+from later refreshes. Chip clocks continue while browser audio is suspended, so
+envelopes and finite sounds do not pause with the host device.
 
 ## Display
 
@@ -290,7 +346,7 @@ on the QL.
 - `favicon.ico` - browser tab icon.
 - `main.js` - emulator page, session, display, sound, controls, and file loading.
 - `boot.js` - shader and default ROM fetch.
-- `load.js` - MDV or ZIP fetch for `index.html?url=`.
+- `load.js` - MDV or ZIP fetch for `index.html?url=`, and ZIP member extraction for drops.
 - `io.js` - HTTP GET and local file reads.
 - `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, QSound/QSound2, QIMSI window, and frame run.
 - `cpu.js` - MC68008 state and execution core.
@@ -301,7 +357,7 @@ on the QL.
 - `pe.js` - host pointer written into the QL Pointer Environment.
 - `keyboard.js` - host keyboard mapping and the overlay.
 - `zip.js` - ZIP listing and entry extraction.
-- `media.js` - Microdrive, floppy, hard disk, ZIP, and junk file-name rules.
+- `media.js` - Microdrive, floppy, hard disk, ROM, ZIP, and junk file-name rules.
 - `sound.js` - Web Audio host and worklet loader.
 - `sound.worklet.js` - mixes beeper and sound-card planes on the audio thread.
 - `audioworklet.d.ts` - check-only declarations for the AudioWorklet globals.
@@ -310,16 +366,40 @@ on the QL.
 - `server.go` - optional local static file server (`go run server.go`).
 - `tsconfig.json` - check-only TypeScript config (`noEmit`).
 - `roms/` - default machine ROM files.
+- `roms/minerva.rom` - bundled Minerva 1.98a1 system ROM.
+- `roms/Minerva_NOTICE.txt` / `roms/Minerva_GPL-2.0.txt` - Minerva ROM
+  provenance, notice, and license.
+- `roms/tk2.rom` - bundled Toolkit II v2.36 cartridge ROM.
+- `roms/TK2_NOTICE.txt` / `roms/TK2_SMSQE_LICENCE.txt` - Toolkit II ROM
+  provenance, notice, and license.
 - `roms/Qsound_V1.94.rom` - bundled original-QSound extension ROM.
 - `roms/Qsound_NOTICE.txt` / `roms/Qsound_CERN-OHL-S-2.0.txt` - QSound ROM
   provenance, notice, and license.
+- `examples/castle.mdv` / `examples/xenon.mdv` - example Microdrive images that
+  play music converted from VGM rips.
 
 ROM images in `roms/` are not owned by this project. `Qsound_V1.94.rom` is the
 8 KiB image identified in `Qsound_NOTICE.txt` (SHA-256
 `d6caabb6c96e32a4c5c6dfd443b7c2b30835755b9519b04b61ee52e5f17b8082`) and
 is distributed with its upstream CERN-OHL-S-2.0 notice and license.
+`minerva.rom` is the 48 KiB Minerva 1.98a1 image identified in
+`Minerva_NOTICE.txt` (SHA-256
+`bc954b7b5fb12b1ed98cc54d8cf13f425d97b79997e9bc967a8715f1ccbf5555`) and is
+distributed under its upstream GPL-2.0 license; its source is at
+<https://github.com/MarcelKilgus/Minerva>. `tk2.rom` is the 16 KiB Toolkit II
+v2.36 image identified in `TK2_NOTICE.txt` (SHA-256
+`d3d088df26527505fd8cd06e98a861f212a60c7a252b998e1b0a21f89a9c8b1d`), built
+from the SMSQ/E sources and distributed with the SMSQ/E BSD 2-clause licence.
+
+The example Microdrive images play music converted from VGM rips published at
+vgmrips.net: `castle.mdv` from the
+[Sorcerian (NEC PC-8801)](https://vgmrips.net/packs/pack/sorcerian-nec-pc-8801)
+pack, and `xenon.mdv` from the
+[Xenon: Mugen no Shitai (NEC PC-9801)](https://vgmrips.net/packs/pack/xenon-mugen-no-shitai-nec-pc-9801)
+pack. The music belongs to its original rights holders.
 
 ## License
 
 Project-owned emulator sources and documentation are under the MIT license in
-`LICENSE`. ROM images in `roms/` are excluded from that grant.
+`LICENSE`. ROM images in `roms/` and the music in the `examples/` Microdrive
+images are excluded from that grant.

@@ -15,9 +15,12 @@ const channelDirectoryOffset = 76;
 const channelOpenOffset = 78;
 const channelFileIdOffset = 82;
 const qdosChannelMask = 0x00FFFFFE;
-const qdosPollMaskAddr = 0x28030;
-const qdosPdbTableAddr = 0x28100;
-const qdosMdvDriverLinkAddr = 0x28140;
+const qdosPollMaskOffset = 0x30;
+const qdosPdbTableOffset = 0x100;
+const qdosPdbTableEntries = 16;
+const qdosPdbFileCountOffset = 0x22;
+const qdosChannelDriveIdOffset = 0x1D;
+const qdosMdvDriverLinkOffset = 0x140;
 const qdosDriverCloseEntryAddr = 0xC2;
 const qdosMdvCloseEntryAddr = 0xD4;
 const qdosHeapAllocCall = 0x18;
@@ -96,6 +99,7 @@ const qerrEx = -8;
 const qerrIu = -9;
 const qerrEof = -10;
 const qerrDf = -11;
+const qerrBn = -12;
 const qerrBp = -15;
 const qerrBm = -16;
 const qerrOv = -18;
@@ -157,12 +161,13 @@ let opcodeHooksReady = false;
  *   modified: boolean,
  *   generation: number,
  *   driverReady: boolean,
+ *   readCount: number,
+ *   writeCount: number,
  *   channels: Map<number, Channel>,
  *   totalSectors: number,
  *   sectorsPerCluster: number,
  *   rootFile: number,
  *   clusterCount: number,
- *   mapSectors: number,
  *   doubleDensity: boolean,
  *   sectorsPerTrack: number,
  *   sectorsPerBlock: number,
@@ -174,7 +179,8 @@ let opcodeHooksReady = false;
  */
 
 /**
- * The QDOS ROM initialization hook shared by the WIN1_ and FLP1_ host drivers.
+ * The WIN1_ and FLP1_ drive states, and the address of the QDOS ROM
+ * initialization hook their host drivers share.
  *
  * @typedef {{romInitAddr: number, win: State, flp: State}} Disks
  */
@@ -287,7 +293,6 @@ export function prepareReset(disks, mem) {
  * @param {State} state
  * @param {boolean} highDensity
  * @param {string} name
- * @returns {string | null}
  */
 export function insertBlankFloppy(state, highDensity, name) {
     let sectorsPerTrack = 9;
@@ -321,10 +326,7 @@ export function insertBlankFloppy(state, highDensity, name) {
     cpu.writePointerWord(image, flpInterleaveOffset, skew);
     image.set(trackMap, flpTrackMapOffset);
     image.fill(0xFF, flpSpareOffset, flpFileMapOffset);
-    const error = insert(state, image, name);
-    if (error !== null) {
-        return error;
-    }
+    mount(state, image, name);
     // The map sectors are scattered by the track map, so write them logically.
     const mapEnd = mapGroups * flpBlankSectorsPerGroup * sectorSize;
     for (let offset = flpFileMapOffset; offset < mapEnd; offset += 1) {
@@ -340,8 +342,6 @@ export function insertBlankFloppy(state, highDensity, name) {
         writeMapSlot(state, slot, value);
     }
     readGeometry(state);
-    state.modified = false;
-    return null;
 }
 
 /**
@@ -354,7 +354,6 @@ export function insertBlankFloppy(state, highDensity, name) {
  * @param {State} state
  * @param {number} totalSectors
  * @param {string} name
- * @returns {string | null}
  */
 export function insertBlankHardDisk(state, totalSectors, name) {
     const sectorsPerCluster = Math.max(Math.floor(totalSectors / winSectorsPerClusterStep) + 1, winMinSectorsPerCluster);
@@ -382,7 +381,7 @@ export function insertBlankHardDisk(state, totalSectors, name) {
     for (let cluster = firstFree; cluster + 1 < clusters; cluster += 1) {
         cpu.writePointerWord(image, winFatOffset + cluster * 2, cluster + 1);
     }
-    return insert(state, image, name);
+    mount(state, image, name);
 }
 
 /**
@@ -398,21 +397,33 @@ export function insert(state, bytes, name) {
     if (!(source instanceof Uint8Array)) {
         source = new Uint8Array(source);
     }
-    let error = validateWinImage(source);
+    let validate = validateWinImage;
     if (state.floppy) {
-        error = validateFlpImage(source);
+        validate = validateFlpImage;
     }
+    const error = validate(source);
     if (error !== null) {
         return error;
     }
-    state.image = new Uint8Array(source);
+    mount(state, source.slice(), name);
+    return null;
+}
+
+/**
+ * Mount a valid image that the drive now owns, closing its old channels.
+ *
+ * @param {State} state
+ * @param {Uint8Array} image
+ * @param {string} name
+ */
+function mount(state, image, name) {
+    state.image = image;
     state.name = name;
     state.inserted = true;
     state.modified = false;
     state.generation += 1;
     state.channels.clear();
     readGeometry(state);
-    return null;
 }
 
 /**
@@ -445,7 +456,6 @@ export function eject(state) {
     state.sectorsPerCluster = 0;
     state.rootFile = 0;
     state.clusterCount = 0;
-    state.mapSectors = 0;
     state.doubleDensity = false;
     state.sectorsPerTrack = 0;
     state.sectorsPerBlock = 0;
@@ -453,21 +463,6 @@ export function eject(state) {
     state.fatSectors = 0;
     state.rootLength = 0;
     state.fileMap.clear();
-}
-
-/**
- * User-visible mount name, dirty flag, and whether QDOS accepted the driver.
- *
- * @param {State} state
- * @returns {{inserted: boolean, name: string, modified: boolean, driverReady: boolean}}
- */
-export function info(state) {
-    return {
-        inserted: state.inserted,
-        name: state.name,
-        modified: state.modified,
-        driverReady: state.driverReady,
-    };
 }
 
 /**
@@ -490,12 +485,13 @@ function createDrive(floppy, driver, trampolineAddr, opcodeBase) {
         modified: false,
         generation: 1,
         driverReady: false,
+        readCount: 0,
+        writeCount: 0,
         channels: new Map(),
         totalSectors: 0,
         sectorsPerCluster: 0,
         rootFile: 0,
         clusterCount: 0,
-        mapSectors: 0,
         doubleDensity: false,
         sectorsPerTrack: 0,
         sectorsPerBlock: 0,
@@ -507,6 +503,10 @@ function createDrive(floppy, driver, trampolineAddr, opcodeBase) {
     return state;
 }
 
+/**
+ * Route the ROM-init and both drivers' host opcodes in the shared CPU opcode
+ * table to `executeHostOpcode`, once for all drives.
+ */
 function ensureOpcodeHooks() {
     if (opcodeHooksReady) {
         return;
@@ -520,7 +520,10 @@ function ensureOpcodeHooks() {
     opcodeHooksReady = true;
 }
 
-/** @param {Cpu} c @param {CpuBus} bus */
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
 function executeHostOpcode(c, bus) {
     bus.executeHostOpcode(c, c.code);
 }
@@ -538,13 +541,14 @@ function romInit(disks, c, bus) {
     }
     cpu.writePointerWord(bus.mem, disks.romInitAddr, originalRomInitOpcode);
     const saved = new Int32Array(c.reg);
-    const savedPollMask = cpu.readPointerWord(bus.mem, qdosPollMaskAddr);
-    bus.beforeMemoryWrite(qdosPollMaskAddr, 2);
-    cpu.writePointerWord(bus.mem, qdosPollMaskAddr, 0);
+    const pollMask = cpu.qdosSysvarBase(c, bus.mem) + qdosPollMaskOffset;
+    const savedPollMask = cpu.readPointerWord(bus.mem, pollMask);
+    bus.beforeMemoryWrite(pollMask, 2);
+    cpu.writePointerWord(bus.mem, pollMask, 0);
     linkDriver(disks.win, c, bus);
     linkDriver(disks.flp, c, bus);
-    bus.beforeMemoryWrite(qdosPollMaskAddr, 2);
-    cpu.writePointerWord(bus.mem, qdosPollMaskAddr, savedPollMask);
+    bus.beforeMemoryWrite(pollMask, 2);
+    cpu.writePointerWord(bus.mem, pollMask, savedPollMask);
     c.reg.set(saved);
     cpu.executeOpcode(c, bus, originalRomInitOpcode);
 }
@@ -608,15 +612,31 @@ function openChannel(state, c, bus) {
     if (pdb < cpu.qdosUserRamBase || pdb + 0x15 > bus.mem.length || bus.mem[pdb + 0x14] !== 1) {
         return qerrNf;
     }
-    const name = readQdosName(bus.mem, data + channelNameOffset);
-    let key = signed8(bus.mem[channelBase + 28]);
+    const name = readQdosName(bus.mem, data + channelNameOffset, maxNameLength);
+    let key = cpu.asI8(bus.mem[channelBase + 28]);
     if (name === "" && (key === openOld || key === openShare)) {
         key = openDirectory;
     }
     if (name === null || (key !== openDelete && (key < openOld || key > openDirectory))) {
         return qerrBp;
     }
-    let file = findFile(state, name, key === openDirectory);
+    if (name === "" && (key === openNew || key === openOverwrite)) {
+        return qerrBn;
+    }
+    let file = null;
+    if (key === openDirectory) {
+        // As in SMSQ/E, the channel then names the directory actually opened.
+        file = openedDirectory(state, name);
+        let nameLength = 0;
+        const header = fileHeader(state, file);
+        if (header >= 0) {
+            nameLength = readHeaderName(state.image, header).length;
+        }
+        bus.beforeMemoryWrite(data + channelNameOffset, 2);
+        cpu.writePointerWord(bus.mem, data + channelNameOffset, nameLength);
+    } else {
+        file = findFile(state, name, false);
+    }
     if (key === openDelete) {
         return deleteFile(state, file);
     }
@@ -657,7 +677,15 @@ function openChannel(state, c, bus) {
     return 0;
 }
 
-/** @param {State} state @param {Cpu} c @param {CpuBus} bus */
+/**
+ * Close a channel: forget it, mark its channel block closed, lower the drive's
+ * open-file count in its physical definition block, and finish through the
+ * ROM's own close routines.
+ *
+ * @param {State} state
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
 function driverClose(state, c, bus) {
     const channelBase = c.reg[8] & qdosChannelMask;
     state.channels.delete(channelBase);
@@ -665,14 +693,22 @@ function driverClose(state, c, bus) {
     bus.beforeMemoryWrite(data, channelDataSize);
     cpu.writePointerWord(bus.mem, data + channelOpenOffset, 0);
     cpu.writePointerLong(bus.mem, data + channelFileIdOffset, 0);
-    const pdb = cpu.readPointerLong(bus.mem, qdosPdbTableAddr + 4);
-    if (pdb >= cpu.qdosUserRamBase && pdb + 0x23 <= bus.mem.length && bus.mem[pdb + 0x22] > 0) {
-        bus.beforeMemoryWrite(pdb + 0x22, 1);
-        bus.mem[pdb + 0x22] -= 1;
+    // The ROM keeps the drive's slot in the physical definition table in the
+    // channel block, and its open-file count in the definition block.
+    const sysvars = cpu.qdosSysvarBase(c, bus.mem);
+    const driveId = bus.mem[channelBase + qdosChannelDriveIdOffset];
+    let pdb = 0;
+    if (driveId < qdosPdbTableEntries) {
+        pdb = cpu.readPointerLong(bus.mem, sysvars + qdosPdbTableOffset + driveId * 4);
+    }
+    const count = pdb + qdosPdbFileCountOffset;
+    if (pdb >= cpu.qdosUserRamBase && count < bus.mem.length && bus.mem[count] > 0) {
+        bus.beforeMemoryWrite(count, 1);
+        bus.mem[count] -= 1;
     }
     const savedA0 = c.reg[8];
     c.reg[8] = channelBase + 0x18;
-    c.reg[9] = qdosMdvDriverLinkAddr;
+    c.reg[9] = sysvars + qdosMdvDriverLinkOffset;
     const mdvCloseEntry = cpu.readPointerWord(bus.mem, qdosMdvCloseEntryAddr);
     if (mdvCloseEntry !== 0) {
         cpu.callSubroutine(c, bus, mdvCloseEntry, guestCallShortLimit);
@@ -685,7 +721,15 @@ function driverClose(state, c, bus) {
     returnFromDriver(c, bus);
 }
 
-/** @param {State} state @param {Cpu} c @param {CpuBus} bus */
+/**
+ * Run one QDOS TRAP #3 operation, keyed by D0, on the channel at A0, write the
+ * channel's position and end of file back to its block, and return to the
+ * guest. A stale channel, or one on an ejected medium, is not open.
+ *
+ * @param {State} state
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
 function driverIo(state, c, bus) {
     const channelBase = c.reg[8] & qdosChannelMask;
     const channel = state.channels.get(channelBase);
@@ -694,7 +738,7 @@ function driverIo(state, c, bus) {
         returnFromDriver(c, bus);
         return;
     }
-    const op = signed8(c.reg[0] & 0xFF);
+    const op = cpu.asI8(c.reg[0] & 0xFF);
     c.reg[0] = 0;
     switch (op) {
     case 0:
@@ -702,7 +746,8 @@ function driverIo(state, c, bus) {
             c.reg[0] = qerrEof;
         }
         break;
-    case 1: {
+    case 1:
+        state.readCount += 1;
         const value = readFileByte(state, channel.file, channel.position);
         if (value < 0 || channel.position >= channel.eof) {
             c.reg[0] = qerrEof;
@@ -711,11 +756,12 @@ function driverIo(state, c, bus) {
             channel.position += 1;
         }
         break;
-    }
     case 2:
+        state.readCount += 1;
         transferRead(state, channel, c, bus, true, c.reg[2] & 0xFFFF);
         break;
     case 3:
+        state.readCount += 1;
         transferRead(state, channel, c, bus, false, c.reg[2] & 0xFFFF);
         break;
     case 5:
@@ -732,7 +778,7 @@ function driverIo(state, c, bus) {
     case 0x41:
         break;
     case 0x42:
-    case 0x43: {
+    case 0x43:
         let position = c.reg[1];
         if (op === 0x43) {
             position += channel.position - fileHeaderSize;
@@ -741,7 +787,6 @@ function driverIo(state, c, bus) {
         channel.position = position + fileHeaderSize;
         c.reg[1] = position;
         break;
-    }
     case 0x45:
         mediumInfo(state, c, bus);
         break;
@@ -749,13 +794,18 @@ function driverIo(state, c, bus) {
         setFileHeader(state, channel, c, bus);
         break;
     case 0x47:
+        state.readCount += 1;
         readFileHeader(state, channel, c, bus);
         break;
     case 0x48:
+        state.readCount += 1;
         transferRead(state, channel, c, bus, false, Math.max(c.reg[2], 0));
         break;
     case 0x49:
         transferWrite(state, channel, c, bus, Math.max(c.reg[2], 0), false);
+        break;
+    case 0x4A:
+        c.reg[0] = renameFile(state, channel, c, bus);
         break;
     case 0x4B:
         if (!channelWritable(channel)) {
@@ -767,6 +817,9 @@ function driverIo(state, c, bus) {
         break;
     case 0x4C:
         fileDate(state, channel, c, bus);
+        break;
+    case 0x4D:
+        c.reg[0] = makeDirectory(state, channel);
         break;
     case 0x4E:
         fileVersionOp(state, channel, c);
@@ -782,15 +835,228 @@ function driverIo(state, c, bus) {
     bus.beforeMemoryWrite(data, channelDataSize);
     cpu.writePointerLong(bus.mem, data + channelPositionOffset, channel.position);
     cpu.writePointerLong(bus.mem, data + channelEofOffset, channel.eof);
+    // FS.MKDIR and FS.RENAME can change what the channel holds.
+    cpu.writePointerWord(bus.mem, data + channelDirectoryOffset, Number(channel.isDirectory));
+    cpu.writePointerLong(bus.mem, data + channelFileIdOffset, channel.file.file);
     returnFromDriver(c, bus);
 }
 
-/** @param {Cpu} c @param {CpuBus} bus */
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
 function returnFromDriver(c, bus) {
     cpu.executeOpcode(c, bus, 0x4E75);
 }
 
-/** @param {Uint8Array} image @returns {string | null} */
+/**
+ * FS.RENAME: give the channel's file the name at A1, which starts with this
+ * drive's name as SMSQ/E requires, moving its entry to the directory the new
+ * name belongs to. Directories keep their names, since their files' names
+ * carry them. Returns 0 or a QDOS error code.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @returns {number}
+ */
+function renameFile(state, channel, c, bus) {
+    if (!channelWritable(channel)) {
+        return qerrRo;
+    }
+    const header = fileHeader(state, channel.file);
+    if (header < 0 || state.image[header + qdosFileType] === directoryType) {
+        return qerrIu;
+    }
+    const address = c.reg[9] & 0xFFFFFF;
+    if (address < cpu.qdosUserRamBase) {
+        return qerrBp;
+    }
+    const drive = state.driver + "1_";
+    const given = readQdosName(bus.mem, address, drive.length + maxNameLength);
+    if (given === null || given.length <= drive.length || given.slice(0, drive.length).toUpperCase() !== drive) {
+        return qerrBn;
+    }
+    const name = given.slice(drive.length);
+    if (findFile(state, name, false) !== null) {
+        return qerrEx;
+    }
+    const target = findParentDirectory(state, name);
+    const old = channel.file;
+    if (target.file !== old.parent) {
+        const moved = moveEntry(state, old, target);
+        if (moved === null) {
+            return qerrDf;
+        }
+        for (const other of state.channels.values()) {
+            if (other.file.parent === old.parent && other.file.entry === old.entry) {
+                other.file = moved;
+            }
+        }
+    }
+    writeHeaderName(state.image, fileHeader(state, channel.file), name);
+    markModified(state);
+    return 0;
+}
+
+/**
+ * FS.MKDIR: turn the channel's empty file into a directory, and move the
+ * files beside it whose names start with its name and `_` into it, as SMSQ/E
+ * does. Nothing changes when one of those files is open.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @returns {number}
+ */
+function makeDirectory(state, channel) {
+    if (!channelWritable(channel)) {
+        return qerrRo;
+    }
+    const header = fileHeader(state, channel.file);
+    if (
+        header < 0 ||
+        state.image[header + qdosFileType] !== 0 ||
+        storedFileLength(state, channel.file) !== fileHeaderSize
+    ) {
+        return qerrIu;
+    }
+    const name = readHeaderName(state.image, header);
+    const parent = findParentDirectory(state, name);
+    if (parent.file !== channel.file.parent) {
+        return qerrBm;
+    }
+    const prefix = name.toUpperCase() + "_";
+    const moving = [];
+    const entries = Math.floor(storedFileLength(state, parent) / fileHeaderSize);
+    for (let entry = 1; entry < entries; entry += 1) {
+        const entryHeader = directoryHeader(state, parent, entry);
+        if (
+            entryHeader < 0 ||
+            cpu.readPointerLong(state.image, entryHeader + qdosFileLength) === 0 ||
+            !readHeaderName(state.image, entryHeader).toUpperCase().startsWith(prefix)
+        ) {
+            continue;
+        }
+        const file = {parent: parent.file, file: directoryEntryId(state, parent, entry, entryHeader), entry};
+        if (fileIsOpen(state, file)) {
+            return qerrIu;
+        }
+        moving.push(file);
+    }
+    state.image[header + qdosFileType] = directoryType;
+    channel.isDirectory = true;
+    markModified(state);
+    for (const file of moving) {
+        if (moveEntry(state, file, channel.file) === null) {
+            return qerrDf;
+        }
+    }
+    channel.eof = storedFileLength(state, channel.file);
+    return 0;
+}
+
+/**
+ * Move directory entry `file` into directory `target`, keeping its header and
+ * data, and return its new id, or null when `target` cannot take it; the entry
+ * then stays where it was. A QL5A/QL5B file's id depends on its directory, so
+ * its map slots move to the new id.
+ *
+ * @param {State} state
+ * @param {FileId} file
+ * @param {FileId} target
+ * @returns {FileId | null}
+ */
+function moveEntry(state, file, target) {
+    const oldHeader = fileHeader(state, file);
+    if (oldHeader < 0) {
+        return null;
+    }
+    const oldLength = storedFileLength(state, target);
+    const entry = freeDirectoryEntry(state, target, Math.floor(oldLength / fileHeaderSize));
+    let fileId = file.file;
+    if (state.floppy) {
+        if (target.entry < 0) {
+            if (entry >= flpSubdirectoryIdBit) {
+                return null;
+            }
+            fileId = entry;
+        } else if (file.parent === state.rootFile) {
+            const firstSector = state.fileMap.get(file.file << flpFileMapBlockBits);
+            if (firstSector === undefined) {
+                return null;
+            }
+            fileId = flpSubdirectoryIdBit | Math.floor(firstSector / state.sectorsPerBlock);
+        }
+        if (!floppyFileIdValid(fileId)) {
+            return null;
+        }
+    }
+    const newLength = Math.max(oldLength, (entry + 1) * fileHeaderSize);
+    if (newLength > oldLength) {
+        let grown = false;
+        if (state.floppy) {
+            grown = ensureFloppyCapacity(state, target, newLength);
+        } else {
+            grown = ensureFileCapacity(state, target, newLength);
+        }
+        if (!grown) {
+            return null;
+        }
+        setStoredLength(state, target, newLength);
+    }
+    const newHeader = directoryHeader(state, target, entry);
+    if (newHeader < 0 || (fileId !== file.file && !retagFloppyFile(state, file.file, fileId))) {
+        return null;
+    }
+    state.image.copyWithin(newHeader, oldHeader, oldHeader + fileHeaderSize);
+    state.image.fill(0, oldHeader, oldHeader + fileHeaderSize);
+    if (state.floppy) {
+        let storedId = 0;
+        if (target.entry >= 0) {
+            storedId = fileId + 1;
+        }
+        cpu.writePointerWord(state.image, newHeader + fileIdOffset, storedId);
+    }
+    markModified(state);
+    return {parent: target.file, file: fileId, entry};
+}
+
+/**
+ * Give every QL5A/QL5B map slot of `oldId` to `newId`, first freeing slots a
+ * cleared entry may have left for `newId`, so they cannot shadow its blocks.
+ *
+ * @param {State} state
+ * @param {number} oldId
+ * @param {number} newId
+ * @returns {boolean}
+ */
+function retagFloppyFile(state, oldId, newId) {
+    if (!releaseFloppyBlocks(state, newId, 0)) {
+        return false;
+    }
+    const slotCount = mapSlotCount(state);
+    for (let slotIndex = 0; slotIndex < slotCount; slotIndex += 1) {
+        const slot = readMapSlot(state, slotIndex);
+        if (slot < 0 || (slot >>> 16) === flpFileMapFree || (slot >>> flpFileMapBlockBits) !== oldId) {
+            continue;
+        }
+        const value = (newId << flpFileMapBlockBits) | (slot & flpFileMapBlockMask);
+        writeMapSlot(state, slotIndex, value);
+        const sector = state.fileMap.get(slot);
+        state.fileMap.delete(slot);
+        if (sector !== undefined) {
+            state.fileMap.set(value, sector);
+        }
+    }
+    markModified(state);
+    return true;
+}
+
+/**
+ * @param {Uint8Array} image
+ * @returns {string | null}
+ */
 function validateWinImage(image) {
     if (image.length < sectorSize || image.length % sectorSize !== 0) {
         return "Not a QLWA .win image (size must be a non-zero multiple of 512 bytes).";
@@ -813,7 +1079,10 @@ function validateWinImage(image) {
     return null;
 }
 
-/** @param {Uint8Array} image @returns {string | null} */
+/**
+ * @param {Uint8Array} image
+ * @returns {string | null}
+ */
 function validateFlpImage(image) {
     if (image.length < sectorSize || image.length % sectorSize !== 0) {
         return "Not a QL floppy .img (size must be a non-zero multiple of 512 bytes).";
@@ -826,7 +1095,7 @@ function validateFlpImage(image) {
     const sectorsPerTrack = cpu.readPointerWord(image, flpSectorsPerTrackOffset);
     const sectorsPerCluster = cpu.readPointerWord(image, flpSectorsPerClusterOffset);
     const sectorsPerBlock = cpu.readPointerWord(image, flpSectorsPerBlockOffset);
-    const interleave = signed16(cpu.readPointerWord(image, flpInterleaveOffset));
+    const interleave = cpu.asI16(cpu.readPointerWord(image, flpInterleaveOffset));
     if (
         totalSectors <= 0 ||
         sectorsPerTrack <= 0 ||
@@ -841,14 +1110,19 @@ function validateFlpImage(image) {
     return null;
 }
 
-/** @param {State} state */
+/**
+ * Take the drive layout from the image header: QLWA cluster geometry, or the
+ * QL5A/QL5B sector geometry, map size and file index. A bad floppy track map
+ * is replaced by the default.
+ *
+ * @param {State} state
+ */
 function readGeometry(state) {
     const image = state.image;
     state.fileMap.clear();
     if (!state.floppy) {
         state.sectorsPerCluster = cpu.readPointerWord(image, winSectorsPerClusterOffset);
         state.clusterCount = cpu.readPointerWord(image, winClusterCountOffset);
-        state.mapSectors = cpu.readPointerWord(image, winMapSectorCountOffset);
         state.rootFile = cpu.readPointerWord(image, winRootClusterOffset);
         state.totalSectors = state.clusterCount * state.sectorsPerCluster;
         return;
@@ -858,7 +1132,7 @@ function readGeometry(state) {
     state.sectorsPerTrack = cpu.readPointerWord(image, flpSectorsPerTrackOffset);
     state.sectorsPerCluster = cpu.readPointerWord(image, flpSectorsPerClusterOffset);
     state.sectorsPerBlock = cpu.readPointerWord(image, flpSectorsPerBlockOffset);
-    state.interleave = signed16(cpu.readPointerWord(image, flpInterleaveOffset));
+    state.interleave = cpu.asI16(cpu.readPointerWord(image, flpInterleaveOffset));
     state.rootFile = 0;
     const fatBytes = flpFileMapSlotSize * Math.floor(state.totalSectors / state.sectorsPerBlock) + flpFileMapOffset;
     let fatSectors = Math.floor((fatBytes + sectorSize - 1) / sectorSize);
@@ -892,21 +1166,21 @@ function readGeometry(state) {
  * @returns {boolean} Whether the mounted image changed.
  */
 function fixLogical(trackMap, doubleDensity) {
-    let sides = 18;
+    let sectorsPerTrack = 18;
     let logicalMap = defaultHdTrackMap;
     if (doubleDensity) {
-        sides = 9;
+        sectorsPerTrack = 9;
         logicalMap = defaultDdTrackMap;
     }
-    const count = sides * 2;
+    const count = sectorsPerTrack * 2;
     const used = new Uint8Array(flpTrackMapSize);
     for (let i = 0; i < count; i += 1) {
         let x = trackMap[i] & 127;
-        if (x < sides) {
+        if (x < sectorsPerTrack) {
             if ((trackMap[i] & 0x80) !== 0) {
-                x += sides;
+                x += sectorsPerTrack;
             }
-            if (x < used.length && used[x] === 0) {
+            if (used[x] === 0) {
                 used[x] = 1;
                 continue;
             }
@@ -918,174 +1192,32 @@ function fixLogical(trackMap, doubleDensity) {
 }
 
 /**
- * Image offset of a floppy logical sector after track-map and interleave mapping.
+ * The directory a directory open of `name` reaches in SMSQ/E: the one named,
+ * also with a trailing `_`, or else the deepest one whose name and `_` start
+ * `name`, or the root.
  *
  * @param {State} state
- * @param {number} sector
- * @returns {number}
+ * @param {string} name
+ * @returns {FileId}
  */
-function logicalSectorOffset(state, sector) {
-    if (sector < 0 || sector >= state.totalSectors) {
-        return -1;
+function openedDirectory(state, name) {
+    let wanted = name;
+    if (wanted.endsWith("_")) {
+        wanted = wanted.slice(0, -1);
     }
-    const entry = state.image[flpTrackMapOffset + sector % state.sectorsPerCluster];
-    const track = Math.floor(sector / state.sectorsPerCluster);
-    const trackSector = entry & 0x7F;
-    const side = entry >> 7;
-    if (trackSector >= state.sectorsPerTrack) {
-        return -1;
+    const named = findFile(state, wanted, true);
+    if (named !== null) {
+        return named;
     }
-    const physicalSector = (track * state.interleave + trackSector) % state.sectorsPerTrack;
-    const index = track * state.sectorsPerCluster + physicalSector + side * state.sectorsPerTrack;
-    if (index < 0 || index >= state.totalSectors) {
-        return -1;
-    }
-    const offset = index * sectorSize;
-    if (offset + sectorSize > state.image.length) {
-        return -1;
-    }
-    return offset;
-}
-
-/** @param {State} state @returns {number} */
-function mapSlotCount(state) {
-    if (state.sectorsPerBlock <= 0) {
-        return 0;
-    }
-    const byteCount = state.fatSectors * sectorSize - flpFileMapOffset;
-    if (byteCount <= 0) {
-        return 0;
-    }
-    const slotCount = Math.min(
-        Math.floor(state.totalSectors / state.sectorsPerBlock),
-        Math.floor(byteCount / flpFileMapSlotSize),
-    );
-    return slotCount - slotCount % 2;
-}
-
-/** @param {State} state @param {number} cluster @param {number} sector @returns {number} */
-function clusterSectorOffset(state, cluster, sector) {
-    if (cluster < 0 || cluster >= state.clusterCount || sector < 0 || sector >= state.sectorsPerCluster) {
-        return -1;
-    }
-    const offset = (cluster * state.sectorsPerCluster + sector) * sectorSize;
-    if (offset < 0 || offset + sectorSize > state.image.length) {
-        return -1;
-    }
-    return offset;
-}
-
-/** @param {State} state @param {number} cluster @returns {number} */
-function nextCluster(state, cluster) {
-    if (cluster < 0 || cluster >= state.clusterCount) {
-        return -1;
-    }
-    const next = cpu.readPointerWord(state.image, winFatOffset + cluster * 2);
-    if (next >= state.clusterCount) {
-        return -1;
-    }
-    return next;
-}
-
-/** @param {State} state @param {number} first @param {number} links @returns {number} */
-function walkChain(state, first, links) {
-    let cluster = first;
-    if (cluster <= 0 || cluster >= state.clusterCount || links < 0 || links >= state.clusterCount) {
-        return -1;
-    }
-    for (let i = 0; i < links; i += 1) {
-        cluster = nextCluster(state, cluster);
-        if (cluster <= 0) {
-            return -1;
-        }
-    }
-    return cluster;
+    return findParentDirectory(state, wanted);
 }
 
 /**
- * Image offset of the `sector`th 512-byte sector of a file, or -1.
- *
  * @param {State} state
- * @param {FileId} file
- * @param {number} sector
- * @param {{cluster: number, index: number} | null} cursor
- * @returns {number}
+ * @param {string} name
+ * @param {boolean} directory
+ * @returns {FileId | null}
  */
-function fileSectorOffset(state, file, sector, cursor) {
-    if (sector < 0) {
-        return -1;
-    }
-    if (!state.floppy) {
-        const index = Math.floor(sector / state.sectorsPerCluster);
-        if (index >= state.clusterCount) {
-            return -1;
-        }
-        let first = file.file;
-        let links = index;
-        if (cursor !== null && cursor.index <= index) {
-            first = cursor.cluster;
-            links -= cursor.index;
-        }
-        const cluster = walkChain(state, first, links);
-        if (cluster < 0) {
-            return -1;
-        }
-        if (cursor !== null) {
-            cursor.cluster = cluster;
-            cursor.index = index;
-        }
-        return clusterSectorOffset(state, cluster, sector % state.sectorsPerCluster);
-    }
-    const block = Math.floor(sector / state.sectorsPerBlock);
-    if (file.file < 0 || file.file > flpFileMapBlockMask || block > flpFileMapBlockMask) {
-        return -1;
-    }
-    const want = (file.file << flpFileMapBlockBits) | block;
-    const firstSector = state.fileMap.get(want);
-    if (firstSector === undefined) {
-        return -1;
-    }
-    return logicalSectorOffset(state, firstSector + sector % state.sectorsPerBlock);
-}
-
-/** @param {State} state @param {FileId} directory @param {number} entry @returns {number} */
-function directoryHeader(state, directory, entry) {
-    const base = fileSectorOffset(state, directory, Math.floor(entry / headersPerSector), null);
-    if (base < 0) {
-        return -1;
-    }
-    return base + entry % headersPerSector * fileHeaderSize;
-}
-
-/** @param {State} state @param {FileId} file @returns {number} */
-function fileHeader(state, file) {
-    if (file.entry < 0) {
-        return -1;
-    }
-    return directoryHeader(state, {parent: 0, file: file.parent, entry: -1}, file.entry);
-}
-
-/** @param {State} state @param {FileId} file @returns {number} */
-function storedFileLength(state, file) {
-    if (file.entry < 0) {
-        if (state.floppy) {
-            return state.rootLength;
-        }
-        return cpu.readPointerLong(state.image, winRootLengthOffset);
-    }
-    const header = fileHeader(state, file);
-    if (header < 0) {
-        return 0;
-    }
-    return cpu.readPointerLong(state.image, header + qdosFileLength);
-}
-
-/** @param {State} state @param {FileId} file @returns {number} */
-function fileLength(state, file) {
-    return Math.max(storedFileLength(state, file) - fileHeaderSize, 0);
-}
-
-/** @param {State} state @param {string} name @param {boolean} directory @returns {FileId | null} */
 function findFile(state, name, directory) {
     const root = {parent: 0, file: state.rootFile, entry: -1};
     if (name === "") {
@@ -1098,6 +1230,9 @@ function findFile(state, name, directory) {
 }
 
 /**
+ * Find `name` in `directory`, descending into subdirectories whose name plus
+ * `_` starts it; `seen` stops loops through a damaged directory tree.
+ *
  * @param {State} state
  * @param {FileId} directory
  * @param {string} name
@@ -1113,7 +1248,7 @@ function findInDirectory(state, directory, name, directoriesOnly, seen) {
     const entries = Math.floor(storedFileLength(state, directory) / fileHeaderSize);
     for (let entry = 1; entry < entries; entry += 1) {
         const header = directoryHeader(state, directory, entry);
-        if (header < 0 || cpu.readPointerLong(state.image, header) === 0) {
+        if (header < 0 || cpu.readPointerLong(state.image, header + qdosFileLength) === 0) {
             continue;
         }
         const entryName = readHeaderName(state.image, header).toUpperCase();
@@ -1132,7 +1267,12 @@ function findInDirectory(state, directory, name, directoriesOnly, seen) {
     return null;
 }
 
-/** @param {State} state @param {string} name @param {number} now @returns {FileId | null} */
+/**
+ * @param {State} state
+ * @param {string} name
+ * @param {number} now
+ * @returns {FileId | null}
+ */
 function createFile(state, name, now) {
     if (state.floppy) {
         return createFloppyFile(state, name, now);
@@ -1143,13 +1283,7 @@ function createFile(state, name, now) {
         return null;
     }
     const entries = Math.floor(storedFileLength(state, parent) / fileHeaderSize);
-    let entry = 1;
-    for (; entry < entries; entry += 1) {
-        const header = directoryHeader(state, parent, entry);
-        if (header >= 0 && cpu.readPointerLong(state.image, header) === 0) {
-            break;
-        }
-    }
+    const entry = freeDirectoryEntry(state, parent, entries);
     if (entry >= entries) {
         const newLength = (entry + 1) * fileHeaderSize;
         if (!ensureFileCapacity(state, parent, newLength)) {
@@ -1164,15 +1298,200 @@ function createFile(state, name, now) {
         releaseChain(state, allocated);
         return null;
     }
-    state.image.fill(0, header, header + fileHeaderSize);
-    state.image.fill(0, data, data + fileHeaderSize);
-    cpu.writePointerLong(state.image, header, fileHeaderSize);
-    writeHeaderName(state.image, header, name);
-    cpu.writePointerLong(state.image, header + qdosFileUpdate, now);
+    writeNewFileHeader(state, header, data, name, now);
     cpu.writePointerWord(state.image, header + fileIdOffset, allocated);
-    cpu.writePointerLong(state.image, header + fileBackupDate, now);
     markModified(state);
     return {parent: parent.file, file: allocated, entry};
+}
+
+/**
+ * @param {State} state
+ * @param {FileId | null} file
+ * @returns {number}
+ */
+function deleteFile(state, file) {
+    if (file === null || file.entry < 0) {
+        return qerrNf;
+    }
+    const header = fileHeader(state, file);
+    if (
+        header < 0 ||
+        (state.image[header + qdosFileType] === directoryType && !directoryIsEmpty(state, file)) ||
+        fileIsOpen(state, file)
+    ) {
+        return qerrIu;
+    }
+    if (state.floppy) {
+        if (!releaseFloppyBlocks(state, file.file, 0)) {
+            return qerrBm;
+        }
+    } else {
+        releaseChain(state, file.file);
+    }
+    state.image.fill(0, header, header + fileHeaderSize);
+    markModified(state);
+    return 0;
+}
+
+/**
+ * @param {State} state
+ * @param {FileId} file
+ * @returns {boolean}
+ */
+function fileIsOpen(state, file) {
+    for (const channel of state.channels.values()) {
+        if (channel.generation === state.generation && channel.file.parent === file.parent && channel.file.entry === file.entry) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @param {State} state
+ * @param {FileId} directory
+ * @returns {boolean}
+ */
+function directoryIsEmpty(state, directory) {
+    const entries = Math.floor(storedFileLength(state, directory) / fileHeaderSize);
+    for (let entry = 1; entry < entries; entry += 1) {
+        const header = directoryHeader(state, directory, entry);
+        if (header >= 0 && cpu.readPointerLong(state.image, header + qdosFileLength) !== 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Cut a file at `position`, counted from the start of the header and never
+ * inside it, and release the blocks past it; returns 0 or a QDOS error code.
+ *
+ * @param {State} state
+ * @param {FileId} file
+ * @param {number} position
+ * @returns {number}
+ */
+function truncateFile(state, file, position) {
+    const length = Math.max(position, fileHeaderSize);
+    if (state.floppy) {
+        const tailBlock = Math.ceil(length / (state.sectorsPerBlock * sectorSize));
+        if (!releaseFloppyBlocks(state, file.file, tailBlock)) {
+            return qerrBm;
+        }
+        setStoredLength(state, file, length);
+        return 0;
+    }
+    const keepClusters = Math.max(Math.ceil(position / (state.sectorsPerCluster * sectorSize)), 1);
+    let cluster = file.file;
+    for (let i = 1; i < keepClusters; i += 1) {
+        cluster = nextCluster(state, cluster);
+        if (cluster <= 0) {
+            break;
+        }
+    }
+    if (cluster > 0) {
+        const tail = nextCluster(state, cluster);
+        cpu.writePointerWord(state.image, winFatOffset + cluster * 2, 0);
+        if (tail > 0) {
+            releaseChain(state, tail);
+        }
+    }
+    setStoredLength(state, file, length);
+    return 0;
+}
+
+/**
+ * @param {State} state
+ * @param {number} first
+ */
+function releaseChain(state, first) {
+    const chain = [];
+    let cluster = first;
+    const seen = new Set();
+    while (cluster > 0 && cluster < state.clusterCount && !seen.has(cluster)) {
+        seen.add(cluster);
+        chain.push(cluster);
+        cluster = nextCluster(state, cluster);
+    }
+    if (chain.length === 0) {
+        return;
+    }
+    const freeCount = cpu.readPointerWord(state.image, winFreeClusterCountOffset);
+    cpu.writePointerWord(state.image, winFatOffset + chain[chain.length - 1] * 2, cpu.readPointerWord(state.image, winFirstFreeClusterOffset));
+    cpu.writePointerWord(state.image, winFirstFreeClusterOffset, chain[0]);
+    cpu.writePointerWord(state.image, winFreeClusterCountOffset, Math.min(freeCount + chain.length, 0xFFFF));
+    markModified(state);
+}
+
+/**
+ * Create a QL5A/QL5B file. A root entry's position is its implicit id, as in
+ * SMSQ/E; elsewhere the id is `0x800` plus the group holding block 0, stored
+ * plus one at `hdr_flid`, so it cannot clash with ids in other directories.
+ * Block 0 and any directory growth are claimed before the new length and
+ * header are published, and released again when either cannot be.
+ *
+ * @param {State} state
+ * @param {string} name
+ * @param {number} now
+ * @returns {FileId | null}
+ */
+function createFloppyFile(state, name, now) {
+    const blockBytes = state.sectorsPerBlock * sectorSize;
+    if (blockBytes <= 0) {
+        return null;
+    }
+    const parent = findParentDirectory(state, name);
+    const oldLength = storedFileLength(state, parent);
+    const entry = freeDirectoryEntry(state, parent, Math.floor(oldLength / fileHeaderSize));
+    let fileId = entry;
+    let slot = -1;
+    if (parent.entry >= 0) {
+        slot = findFreeFloppySlot(state, firstFloppyDataBlock(state));
+        if (slot < 0) {
+            return null;
+        }
+        fileId = flpSubdirectoryIdBit | slot;
+    } else if (entry >= flpSubdirectoryIdBit) {
+        return null;
+    }
+    // Slots left for an id whose entry was cleared elsewhere would shadow its blocks.
+    if (!floppyFileIdValid(fileId) || !releaseFloppyBlocks(state, fileId, 0)) {
+        return null;
+    }
+    let claimed = false;
+    if (slot >= 0) {
+        claimed = claimFloppySlot(state, slot, fileId, 0);
+    } else {
+        claimed = allocateFloppyBlock(state, fileId, 0);
+    }
+    if (!claimed) {
+        return null;
+    }
+    const created = {parent: parent.file, file: fileId, entry};
+    const newLength = Math.max(oldLength, (entry + 1) * fileHeaderSize);
+    let header = -1;
+    let data = -1;
+    if (ensureFloppyCapacity(state, parent, newLength)) {
+        header = directoryHeader(state, parent, entry);
+        data = fileSectorOffset(state, created, 0, null);
+    }
+    if (header < 0 || data < 0) {
+        if (newLength > oldLength) {
+            releaseFloppyBlocks(state, parent.file, Math.ceil(oldLength / blockBytes));
+        }
+        releaseFloppyBlocks(state, fileId, 0);
+        return null;
+    }
+    if (newLength > oldLength) {
+        setStoredLength(state, parent, newLength);
+    }
+    writeNewFileHeader(state, header, data, name, now);
+    if (parent.entry >= 0) {
+        cpu.writePointerWord(state.image, header + fileIdOffset, fileId + 1);
+    }
+    markModified(state);
+    return created;
 }
 
 /**
@@ -1199,7 +1518,7 @@ function findParentDirectory(state, name) {
             const header = directoryHeader(state, directory, entry);
             if (
                 header < 0 ||
-                cpu.readPointerLong(state.image, header) === 0 ||
+                cpu.readPointerLong(state.image, header + qdosFileLength) === 0 ||
                 state.image[header + qdosFileType] !== directoryType
             ) {
                 continue;
@@ -1242,73 +1561,226 @@ function directoryEntryId(state, directory, entry, header) {
     return stored - 1;
 }
 
-/** @param {State} state @returns {number} */
-function allocateCluster(state) {
-    const freeCount = cpu.readPointerWord(state.image, winFreeClusterCountOffset);
-    const cluster = cpu.readPointerWord(state.image, winFirstFreeClusterOffset);
-    if (freeCount === 0 || cluster <= 0 || cluster >= state.clusterCount) {
-        return -1;
-    }
-    const next = nextCluster(state, cluster);
-    if (next < 0) {
-        return -1;
-    }
-    cpu.writePointerWord(state.image, winFirstFreeClusterOffset, next);
-    cpu.writePointerWord(state.image, winFreeClusterCountOffset, freeCount - 1);
-    cpu.writePointerWord(state.image, winFatOffset + cluster * 2, 0);
-    markModified(state);
-    return cluster;
-}
-
-/** @param {State} state @param {number} first */
-function releaseChain(state, first) {
-    const chain = [];
-    let cluster = first;
-    const seen = new Set();
-    while (cluster > 0 && cluster < state.clusterCount && !seen.has(cluster)) {
-        seen.add(cluster);
-        chain.push(cluster);
-        cluster = nextCluster(state, cluster);
-    }
-    if (chain.length === 0) {
-        return;
-    }
-    const freeCount = cpu.readPointerWord(state.image, winFreeClusterCountOffset);
-    cpu.writePointerWord(state.image, winFatOffset + chain[chain.length - 1] * 2, cpu.readPointerWord(state.image, winFirstFreeClusterOffset));
-    cpu.writePointerWord(state.image, winFirstFreeClusterOffset, chain[0]);
-    cpu.writePointerWord(state.image, winFreeClusterCountOffset, Math.min(freeCount + chain.length, 0xFFFF));
-    markModified(state);
-}
-
-/** @param {State} state @param {FileId | null} file @returns {number} */
-function deleteFile(state, file) {
-    if (file === null || file.entry < 0) {
-        return qerrNf;
-    }
-    const header = fileHeader(state, file);
-    if (header < 0 || state.image[header + qdosFileType] === directoryType) {
-        return qerrIu;
-    }
-    for (const channel of state.channels.values()) {
-        if (channel.generation === state.generation && channel.file.parent === file.parent && channel.file.entry === file.entry) {
-            return qerrIu;
+/**
+ * Free every map slot of `fileId` from `firstBlock` on, as `0xFDFFFF`.
+ *
+ * @param {State} state
+ * @param {number} fileId
+ * @param {number} firstBlock
+ * @returns {boolean}
+ */
+function releaseFloppyBlocks(state, fileId, firstBlock) {
+    const released = [];
+    const slotCount = mapSlotCount(state);
+    for (let slotIndex = 0; slotIndex < slotCount; slotIndex += 1) {
+        const slot = readMapSlot(state, slotIndex);
+        if (slot < 0 || (slot >>> 16) === flpFileMapFree) {
+            continue;
+        }
+        if ((slot >>> flpFileMapBlockBits) === fileId && (slot & flpFileMapBlockMask) >= firstBlock) {
+            released.push({slotIndex, slot});
         }
     }
-    if (state.floppy) {
-        if (!releaseFloppyBlocks(state, file.file, 0)) {
-            return qerrBm;
-        }
-        state.image.fill(0, header, header + fileHeaderSize);
-        markModified(state);
-        return 0;
+    if (released.length === 0) {
+        return true;
     }
-    releaseChain(state, file.file);
-    state.image.fill(0, header, header + fileHeaderSize);
+    const free = cpu.readPointerWord(state.image, flpFreeSectorsOffset) + released.length * state.sectorsPerBlock;
+    if (free > 0xFFFF) {
+        return false;
+    }
+    for (const item of released) {
+        writeMapSlot(state, item.slotIndex, flpFileMapFreeSlot);
+        state.fileMap.delete(item.slot);
+    }
+    cpu.writePointerWord(state.image, flpFreeSectorsOffset, free);
+    markModified(state);
+    return true;
+}
+
+/**
+ * The file byte at `position`, counted from the start of the header, or -1
+ * when its sector is not mapped.
+ *
+ * @param {State} state
+ * @param {FileId} file
+ * @param {number} position
+ * @returns {number}
+ */
+function readFileByte(state, file, position) {
+    const base = fileSectorOffset(state, file, Math.floor(position / sectorSize), null);
+    if (base < 0) {
+        return -1;
+    }
+    return state.image[base + position % sectorSize];
+}
+
+/**
+ * Store one byte at the channel position and advance it.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @param {number} value
+ * @returns {number}
+ */
+function writeFileByte(state, channel, value) {
+    if (channel.position > 0x7FFFFFFF - 1 || !ensureFileCapacity(state, channel.file, channel.position + 1)) {
+        return qerrDf;
+    }
+    const base = fileSectorOffset(state, channel.file, Math.floor(channel.position / sectorSize), null);
+    if (base < 0) {
+        return qerrBm;
+    }
+    state.image[base + channel.position % sectorSize] = value & 0xFF;
+    channel.position += 1;
+    if (channel.position > channel.eof) {
+        channel.eof = channel.position;
+        setStoredLength(state, channel.file, channel.eof);
+    }
     markModified(state);
     return 0;
 }
 
-/** @param {State} state @param {FileId} file @param {number} byteLength @returns {boolean} */
+/**
+ * Copy file bytes to guest memory at A1 for IO.FLINE (`line`, which stops
+ * after a line feed), IO.FSTRG, and FS.LOAD. D0 gets the status, D1 the count
+ * and A1 the address after the last byte.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {boolean} line
+ * @param {number} requested
+ */
+function transferRead(state, channel, c, bus, line, requested) {
+    let address = c.reg[9] & 0xFFFFFF;
+    let count = 0;
+    let status = 0;
+    let lineEnded = false;
+    const cursor = {cluster: channel.file.file, index: 0};
+    while (count < requested) {
+        if (channel.position >= channel.eof) {
+            status = qerrEof;
+            break;
+        }
+        if (address < cpu.qdosUserRamBase || address >= bus.mem.length) {
+            status = qerrBp;
+            break;
+        }
+        const base = fileSectorOffset(state, channel.file, Math.floor(channel.position / sectorSize), cursor);
+        if (base < 0) {
+            status = qerrBm;
+            break;
+        }
+        const offset = channel.position % sectorSize;
+        const start = base + offset;
+        let take = Math.min(
+            requested - count,
+            channel.eof - channel.position,
+            bus.mem.length - address,
+            sectorSize - offset,
+        );
+        if (line) {
+            for (let i = 0; i < take; i += 1) {
+                if (state.image[start + i] === 10) {
+                    take = i + 1;
+                    break;
+                }
+            }
+        }
+        bus.beforeMemoryWrite(address, take);
+        bus.mem.set(state.image.subarray(start, start + take), address);
+        address += take;
+        channel.position += take;
+        count += take;
+        if (line && state.image[start + take - 1] === 10) {
+            lineEnded = true;
+            break;
+        }
+    }
+    if (!line && count > 0) {
+        status = 0;
+    } else if (line && status === 0 && !lineEnded) {
+        // The buffer filled before the line feed.
+        status = qerrBf;
+    }
+    c.reg[0] = status;
+    c.reg[1] = count;
+    c.reg[9] = address;
+}
+
+/**
+ * Copy guest bytes at A1 into the file for IO.SSTRG (`wordCount`, which also
+ * reports the count in D1) and FS.SAVE; A1 ends past them.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} requested
+ * @param {boolean} wordCount
+ */
+function transferWrite(state, channel, c, bus, requested, wordCount) {
+    if (!channelWritable(channel)) {
+        c.reg[0] = qerrRo;
+        return;
+    }
+    const address = c.reg[9] & 0xFFFFFF;
+    if (address < cpu.qdosUserRamBase || requested > Math.max(bus.mem.length - address, 0)) {
+        c.reg[0] = qerrBp;
+        return;
+    }
+    c.reg[0] = writeFileBytes(state, channel, bus.mem, address, requested);
+    if (wordCount) {
+        c.reg[1] = requested;
+    }
+    c.reg[9] = address + requested;
+}
+
+/**
+ * Write bytes at the channel position, growing the file and moving its end as
+ * needed; returns 0 or a QDOS error code.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @param {Uint8Array} source
+ * @param {number} sourceOffset
+ * @param {number} count
+ * @returns {number}
+ */
+function writeFileBytes(state, channel, source, sourceOffset, count) {
+    if (channel.position > 0x7FFFFFFF - count || !ensureFileCapacity(state, channel.file, channel.position + count)) {
+        return qerrDf;
+    }
+    const cursor = {cluster: channel.file.file, index: 0};
+    for (let i = 0; i < count;) {
+        const base = fileSectorOffset(state, channel.file, Math.floor(channel.position / sectorSize), cursor);
+        if (base < 0) {
+            return qerrBm;
+        }
+        const offset = channel.position % sectorSize;
+        const take = Math.min(count - i, sectorSize - offset);
+        state.image.set(source.subarray(sourceOffset + i, sourceOffset + i + take), base + offset);
+        channel.position += take;
+        i += take;
+    }
+    if (channel.position > channel.eof) {
+        channel.eof = channel.position;
+        setStoredLength(state, channel.file, channel.eof);
+    }
+    markModified(state);
+    return 0;
+}
+
+/**
+ * Grow a file's cluster chain or floppy blocks to hold `byteLength` bytes;
+ * false when the medium is full or the chain is damaged.
+ *
+ * @param {State} state
+ * @param {FileId} file
+ * @param {number} byteLength
+ * @returns {boolean}
+ */
 function ensureFileCapacity(state, file, byteLength) {
     if (state.floppy) {
         return ensureFloppyCapacity(state, file, byteLength);
@@ -1340,7 +1812,35 @@ function ensureFileCapacity(state, file, byteLength) {
     return true;
 }
 
-/** @param {State} state @param {FileId} file @param {number} length */
+/**
+ * @param {State} state
+ * @returns {number}
+ */
+function allocateCluster(state) {
+    const freeCount = cpu.readPointerWord(state.image, winFreeClusterCountOffset);
+    const cluster = cpu.readPointerWord(state.image, winFirstFreeClusterOffset);
+    if (freeCount === 0 || cluster <= 0 || cluster >= state.clusterCount) {
+        return -1;
+    }
+    const next = nextCluster(state, cluster);
+    if (next < 0) {
+        return -1;
+    }
+    cpu.writePointerWord(state.image, winFirstFreeClusterOffset, next);
+    cpu.writePointerWord(state.image, winFreeClusterCountOffset, freeCount - 1);
+    cpu.writePointerWord(state.image, winFatOffset + cluster * 2, 0);
+    markModified(state);
+    return cluster;
+}
+
+/**
+ * Record a file's length, 64-byte header included, in its directory entry,
+ * or for the root directory in the medium header.
+ *
+ * @param {State} state
+ * @param {FileId} file
+ * @param {number} length
+ */
 function setStoredLength(state, file, length) {
     if (file.entry < 0) {
         if (state.floppy) {
@@ -1353,127 +1853,10 @@ function setStoredLength(state, file, length) {
     } else {
         const header = fileHeader(state, file);
         if (header >= 0) {
-            cpu.writePointerLong(state.image, header, length);
+            cpu.writePointerLong(state.image, header + qdosFileLength, length);
         }
     }
     markModified(state);
-}
-
-/** @param {State} state @param {FileId} file @param {number} position @returns {number} */
-function truncateFile(state, file, position) {
-    const length = Math.max(position, fileHeaderSize);
-    if (state.floppy) {
-        const blockBytes = state.sectorsPerBlock * sectorSize;
-        let tailBlock = Math.floor(length / blockBytes);
-        if (length % blockBytes !== 0) {
-            tailBlock += 1;
-        }
-        if (!releaseFloppyBlocks(state, file.file, tailBlock)) {
-            return qerrBm;
-        }
-        setStoredLength(state, file, length);
-        return 0;
-    }
-    const keepClusters = Math.max(Math.ceil(position / (state.sectorsPerCluster * sectorSize)), 1);
-    let cluster = file.file;
-    for (let i = 1; i < keepClusters; i += 1) {
-        cluster = nextCluster(state, cluster);
-        if (cluster <= 0) {
-            break;
-        }
-    }
-    if (cluster > 0) {
-        const tail = nextCluster(state, cluster);
-        cpu.writePointerWord(state.image, winFatOffset + cluster * 2, 0);
-        if (tail > 0) {
-            releaseChain(state, tail);
-        }
-    }
-    setStoredLength(state, file, length);
-    return 0;
-}
-
-/**
- * Create a QL5A/QL5B file. A root entry's position is its implicit id, as in
- * SMSQ/E; elsewhere the id is `0x800` plus the group holding block 0, stored
- * plus one at `hdr_flid`, so it cannot clash with ids in other directories.
- * Block 0 and any directory growth are claimed before the new length and
- * header are published, and released again when either cannot be.
- *
- * @param {State} state
- * @param {string} name
- * @param {number} now
- * @returns {FileId | null}
- */
-function createFloppyFile(state, name, now) {
-    const blockBytes = state.sectorsPerBlock * sectorSize;
-    if (blockBytes <= 0) {
-        return null;
-    }
-    const parent = findParentDirectory(state, name);
-    const oldLength = storedFileLength(state, parent);
-    const entries = Math.floor(oldLength / fileHeaderSize);
-    let entry = 1;
-    for (; entry < entries; entry += 1) {
-        const existing = directoryHeader(state, parent, entry);
-        if (existing >= 0 && cpu.readPointerLong(state.image, existing) === 0) {
-            break;
-        }
-    }
-    let fileId = entry;
-    let slot = -1;
-    if (parent.entry >= 0) {
-        // `sectorsPerCluster` holds sectors per cylinder; cylinder 0 keeps the map.
-        slot = findFreeFloppySlot(state, Math.floor(state.sectorsPerCluster / state.sectorsPerBlock));
-        if (slot < 0) {
-            return null;
-        }
-        fileId = flpSubdirectoryIdBit | slot;
-    } else if (entry >= flpSubdirectoryIdBit) {
-        return null;
-    }
-    // Slots left for an id whose entry was cleared elsewhere would shadow its blocks.
-    if (!floppyFileIdValid(fileId) || !releaseFloppyBlocks(state, fileId, 0)) {
-        return null;
-    }
-    let claimed = false;
-    if (slot >= 0) {
-        claimed = claimFloppySlot(state, slot, fileId, 0);
-    } else {
-        claimed = allocateFloppyBlock(state, fileId, 0);
-    }
-    if (!claimed) {
-        return null;
-    }
-    const created = {parent: parent.file, file: fileId, entry};
-    const newLength = Math.max(oldLength, (entry + 1) * fileHeaderSize);
-    let header = -1;
-    let data = -1;
-    if (ensureFloppyCapacity(state, parent, newLength)) {
-        header = directoryHeader(state, parent, entry);
-        data = fileSectorOffset(state, created, 0, null);
-    }
-    if (header < 0 || data < 0) {
-        if (newLength > oldLength) {
-            releaseFloppyBlocks(state, parent.file, Math.ceil(oldLength / blockBytes));
-        }
-        releaseFloppyBlocks(state, fileId, 0);
-        return null;
-    }
-    if (newLength > oldLength) {
-        setStoredLength(state, parent, newLength);
-    }
-    state.image.fill(0, header, header + fileHeaderSize);
-    state.image.fill(0, data, data + fileHeaderSize);
-    cpu.writePointerLong(state.image, header, fileHeaderSize);
-    writeHeaderName(state.image, header, name);
-    cpu.writePointerLong(state.image, header + qdosFileUpdate, now);
-    if (parent.entry >= 0) {
-        cpu.writePointerWord(state.image, header + fileIdOffset, fileId + 1);
-    }
-    cpu.writePointerLong(state.image, header + fileBackupDate, now);
-    markModified(state);
-    return created;
 }
 
 /**
@@ -1512,8 +1895,7 @@ function ensureFloppyCapacity(state, file, byteLength) {
  * @returns {boolean}
  */
 function allocateFloppyBlock(state, fileId, block) {
-    // `sectorsPerCluster` holds sectors per cylinder; cylinder 0 keeps the map.
-    let start = Math.floor(state.sectorsPerCluster / state.sectorsPerBlock);
+    let start = firstFloppyDataBlock(state);
     if (block > 0) {
         const previous = state.fileMap.get(((fileId << flpFileMapBlockBits) | block) - 1);
         if (previous !== undefined) {
@@ -1525,42 +1907,6 @@ function allocateFloppyBlock(state, fileId, block) {
         return false;
     }
     return claimFloppySlot(state, slot, fileId, block);
-}
-
-/**
- * Free every map slot of `fileId` from `firstBlock` on, as `$FDFFFF`.
- *
- * @param {State} state
- * @param {number} fileId
- * @param {number} firstBlock
- * @returns {boolean}
- */
-function releaseFloppyBlocks(state, fileId, firstBlock) {
-    const released = [];
-    const slotCount = mapSlotCount(state);
-    for (let slotIndex = 0; slotIndex < slotCount; slotIndex += 1) {
-        const slot = readMapSlot(state, slotIndex);
-        if (slot < 0 || (slot >>> 16) === flpFileMapFree) {
-            continue;
-        }
-        if ((slot >>> flpFileMapBlockBits) === fileId && (slot & flpFileMapBlockMask) >= firstBlock) {
-            released.push({slotIndex, slot});
-        }
-    }
-    if (released.length === 0) {
-        return true;
-    }
-    const free = cpu.readPointerWord(state.image, flpFreeSectorsOffset) + released.length * state.sectorsPerBlock;
-    if (free > 0xFFFF) {
-        return false;
-    }
-    for (const item of released) {
-        writeMapSlot(state, item.slotIndex, flpFileMapFreeSlot);
-        state.fileMap.delete(item.slot);
-    }
-    cpu.writePointerWord(state.image, flpFreeSectorsOffset, free);
-    markModified(state);
-    return true;
 }
 
 /**
@@ -1580,6 +1926,28 @@ function findFreeFloppySlot(state, start) {
         }
     }
     return -1;
+}
+
+/**
+ * Usable QL5A/QL5B map slots: one per block, limited by the map sectors and
+ * rounded down to an even count.
+ *
+ * @param {State} state
+ * @returns {number}
+ */
+function mapSlotCount(state) {
+    if (state.sectorsPerBlock <= 0) {
+        return 0;
+    }
+    const byteCount = state.fatSectors * sectorSize - flpFileMapOffset;
+    if (byteCount <= 0) {
+        return 0;
+    }
+    const slotCount = Math.min(
+        Math.floor(state.totalSectors / state.sectorsPerBlock),
+        Math.floor(byteCount / flpFileMapSlotSize),
+    );
+    return slotCount - slotCount % 2;
 }
 
 /**
@@ -1672,7 +2040,7 @@ function mapByteOffset(state, offset) {
 
 /**
  * Report whether `fileId` can own map slots. From `0xF80` a slot's first byte
- * would read as the map (`$F8`), free (`$FD`), bad (`$FE`) or `$FF` marker.
+ * would read as the map (`0xF8`), free (`0xFD`), bad (`0xFE`) or `0xFF` marker.
  *
  * @param {number} fileId
  * @returns {boolean}
@@ -1681,154 +2049,15 @@ function floppyFileIdValid(fileId) {
     return fileId >= 0 && fileId < flpFileMapFirstSpecialId;
 }
 
-/** @param {State} state @param {FileId} file @param {number} position @returns {number} */
-function readFileByte(state, file, position) {
-    const base = fileSectorOffset(state, file, Math.floor(position / sectorSize), null);
-    if (base < 0) {
-        return -1;
-    }
-    return state.image[base + position % sectorSize];
-}
-
 /**
- * Store one byte at the channel position and advance it.
+ * FS.MDINF: copy the medium name from the image to A1, and return the free
+ * sectors in the high word of D1 and the total in the low word, both capped at
+ * 32767.
  *
  * @param {State} state
- * @param {Channel} channel
- * @param {number} value
- * @returns {number}
+ * @param {Cpu} c
+ * @param {CpuBus} bus
  */
-function writeFileByte(state, channel, value) {
-    if (channel.position > 0x7FFFFFFF - 1 || !ensureFileCapacity(state, channel.file, channel.position + 1)) {
-        return qerrDf;
-    }
-    const base = fileSectorOffset(state, channel.file, Math.floor(channel.position / sectorSize), null);
-    if (base < 0) {
-        return qerrBm;
-    }
-    state.image[base + channel.position % sectorSize] = value & 0xFF;
-    channel.position += 1;
-    if (channel.position > channel.eof) {
-        channel.eof = channel.position;
-        setStoredLength(state, channel.file, channel.eof);
-    }
-    markModified(state);
-    return 0;
-}
-
-/** @param {State} state @param {Channel} channel @param {Uint8Array} source @param {number} sourceOffset @param {number} count @returns {number} */
-function writeFileBytes(state, channel, source, sourceOffset, count) {
-    if (channel.position > 0x7FFFFFFF - count || !ensureFileCapacity(state, channel.file, channel.position + count)) {
-        return qerrDf;
-    }
-    const cursor = {cluster: channel.file.file, index: 0};
-    for (let i = 0; i < count;) {
-        const base = fileSectorOffset(state, channel.file, Math.floor(channel.position / sectorSize), cursor);
-        if (base < 0) {
-            return qerrBm;
-        }
-        const offset = channel.position % sectorSize;
-        const take = Math.min(count - i, sectorSize - offset);
-        state.image.set(source.subarray(sourceOffset + i, sourceOffset + i + take), base + offset);
-        channel.position += take;
-        i += take;
-    }
-    if (channel.position > channel.eof) {
-        channel.eof = channel.position;
-        setStoredLength(state, channel.file, channel.eof);
-    }
-    markModified(state);
-    return 0;
-}
-
-/** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus @param {boolean} line @param {number} requested */
-function transferRead(state, channel, c, bus, line, requested) {
-    let address = c.reg[9] & 0xFFFFFF;
-    let count = 0;
-    let status = 0;
-    const cursor = {cluster: channel.file.file, index: 0};
-    while (count < requested) {
-        if (channel.position >= channel.eof) {
-            status = qerrEof;
-            break;
-        }
-        if (address < cpu.qdosUserRamBase || address >= bus.mem.length) {
-            status = qerrBp;
-            break;
-        }
-        const base = fileSectorOffset(state, channel.file, Math.floor(channel.position / sectorSize), cursor);
-        if (base < 0) {
-            status = qerrBm;
-            break;
-        }
-        const offset = channel.position % sectorSize;
-        const start = base + offset;
-        let take = Math.min(
-            requested - count,
-            channel.eof - channel.position,
-            bus.mem.length - address,
-            sectorSize - offset,
-        );
-        if (line) {
-            for (let i = 0; i < take; i += 1) {
-                if (state.image[start + i] === 10) {
-                    take = i + 1;
-                    break;
-                }
-            }
-        }
-        bus.beforeMemoryWrite(address, take);
-        bus.mem.set(state.image.subarray(start, start + take), address);
-        address += take;
-        channel.position += take;
-        count += take;
-        if (line && state.image[start + take - 1] === 10) {
-            break;
-        }
-    }
-    if (!line && count > 0) {
-        status = 0;
-    } else if (line && status === 0 && count === requested) {
-        status = qerrBf;
-    }
-    c.reg[0] = status;
-    c.reg[1] = count;
-    c.reg[9] = address;
-}
-
-/** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus @param {number} requested @param {boolean} wordCount */
-function transferWrite(state, channel, c, bus, requested, wordCount) {
-    if (!channelWritable(channel)) {
-        c.reg[0] = qerrRo;
-        return;
-    }
-    const address = c.reg[9] & 0xFFFFFF;
-    const available = Math.max(Math.min(requested, bus.mem.length - address), 0);
-    if (address < cpu.qdosUserRamBase || available !== requested) {
-        c.reg[0] = qerrBp;
-        return;
-    }
-    c.reg[0] = writeFileBytes(state, channel, bus.mem, address, available);
-    if (wordCount) {
-        c.reg[1] = available;
-    }
-    c.reg[9] = address + available;
-}
-
-/** @param {Channel} channel @returns {boolean} */
-function channelWritable(channel) {
-    return !channel.isDirectory && channel.key !== openShare;
-}
-
-/** @param {State} state @returns {number} */
-function freeSectors(state) {
-    if (state.floppy) {
-        return cpu.readPointerWord(state.image, flpFreeSectorsOffset);
-    }
-    return cpu.readPointerWord(state.image, winFreeClusterCountOffset) * state.sectorsPerCluster;
-}
-
-/** @param {State} state @param {Cpu} c @param {CpuBus} bus */
 function mediumInfo(state, c, bus) {
     const address = c.reg[9] & 0xFFFFFF;
     if (address < cpu.qdosUserRamBase || address + mediumNameSize > bus.mem.length) {
@@ -1839,15 +2068,64 @@ function mediumInfo(state, c, bus) {
     if (state.floppy) {
         nameOffset = flpMediumNameOffset;
     }
-    const free = Math.min(freeSectors(state), qdosMaxSectorCount);
-    const total = Math.min(state.totalSectors, qdosMaxSectorCount);
-    c.reg[1] = (free << 16) | total;
+    const drive = info(state);
+    c.reg[1] = (drive.freeSectors << 16) | drive.totalSectors;
     bus.beforeMemoryWrite(address, mediumNameSize);
     bus.mem.set(state.image.subarray(nameOffset, nameOffset + mediumNameSize), address);
     c.reg[9] = address + mediumNameSize;
 }
 
-/** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus */
+/**
+ * User-visible drive status. Sector counts are the ones QDOS reports for the
+ * medium, both capped at 32767. The counters grow with each guest read or
+ * write, so a change since the last look means the drive was busy.
+ *
+ * @typedef {{
+ *   inserted: boolean,
+ *   name: string,
+ *   modified: boolean,
+ *   driverReady: boolean,
+ *   generation: number,
+ *   freeSectors: number,
+ *   totalSectors: number,
+ *   readCount: number,
+ *   writeCount: number,
+ * }} DriveInfo
+ */
+
+/**
+ * @param {State} state
+ * @returns {DriveInfo}
+ */
+export function info(state) {
+    let free = 0;
+    let total = 0;
+    if (state.inserted) {
+        free = Math.min(freeSectors(state), qdosMaxSectorCount);
+        total = Math.min(state.totalSectors, qdosMaxSectorCount);
+    }
+    return {
+        inserted: state.inserted,
+        name: state.name,
+        modified: state.modified,
+        driverReady: state.driverReady,
+        generation: state.generation,
+        freeSectors: free,
+        totalSectors: total,
+        readCount: state.readCount,
+        writeCount: state.writeCount,
+    };
+}
+
+/**
+ * FS.HEADR: copy the first D2 bytes of the file header to A1, at least 4 and
+ * an even count, with the length field giving the file's current length.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
 function readFileHeader(state, channel, c, bus) {
     const count = Math.min(Math.max(c.reg[2] & 0xFFFE, 4), fileHeaderSize);
     const address = c.reg[9] & 0xFFFFFF;
@@ -1869,7 +2147,48 @@ function readFileHeader(state, channel, c, bus) {
     c.reg[9] = address + count;
 }
 
-/** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus */
+/**
+ * A file's data length, without the 64-byte header.
+ *
+ * @param {State} state
+ * @param {FileId} file
+ * @returns {number}
+ */
+function fileLength(state, file) {
+    return Math.max(storedFileLength(state, file) - fileHeaderSize, 0);
+}
+
+/**
+ * The length a directory entry records for a file, or the medium records for
+ * the root directory; it counts the 64-byte file header.
+ *
+ * @param {State} state
+ * @param {FileId} file
+ * @returns {number}
+ */
+function storedFileLength(state, file) {
+    if (file.entry < 0) {
+        if (state.floppy) {
+            return state.rootLength;
+        }
+        return cpu.readPointerLong(state.image, winRootLengthOffset);
+    }
+    const header = fileHeader(state, file);
+    if (header < 0) {
+        return 0;
+    }
+    return cpu.readPointerLong(state.image, header + qdosFileLength);
+}
+
+/**
+ * FS.HEADS: take header bytes 4-13 (access, type, dataspace, and extra
+ * information) from guest memory; the length and name stay the file system's.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
 function setFileHeader(state, channel, c, bus) {
     if (!channelWritable(channel)) {
         c.reg[0] = qerrRo;
@@ -1886,7 +2205,16 @@ function setFileHeader(state, channel, c, bus) {
     markModified(state);
 }
 
-/** @param {State} state @param {Channel} channel @param {Cpu} c @param {CpuBus} bus */
+/**
+ * FS.DATE: a zero low byte in D2 picks the update date, otherwise the backup
+ * date. D1 negative reads it, 0 sets it to now, and any other value sets it;
+ * D1 returns the date in effect.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
 function fileDate(state, channel, c, bus) {
     const header = fileHeader(state, channel.file);
     if (header < 0) {
@@ -1914,14 +2242,21 @@ function fileDate(state, channel, c, bus) {
     markModified(state);
 }
 
-/** @param {State} state @param {Channel} channel @param {Cpu} c */
+/**
+ * FS.VERS: D1 of 0 reads the version, negative increments it, and positive sets
+ * it; D1 returns the version in effect.
+ *
+ * @param {State} state
+ * @param {Channel} channel
+ * @param {Cpu} c
+ */
 function fileVersionOp(state, channel, c) {
     const header = fileHeader(state, channel.file);
     if (header < 0) {
         c.reg[0] = qerrBp;
         return;
     }
-    let version = signed16(cpu.readPointerWord(state.image, header + fileVersion));
+    let version = cpu.asI16(cpu.readPointerWord(state.image, header + fileVersion));
     if (c.reg[1] === 0) {
         c.reg[1] = version;
         return;
@@ -1936,11 +2271,39 @@ function fileVersionOp(state, channel, c) {
         version = c.reg[1];
     }
     cpu.writePointerWord(state.image, header + fileVersion, version);
-    c.reg[1] = signed16(version & 0xFFFF);
+    c.reg[1] = cpu.asI16(version & 0xFFFF);
     markModified(state);
 }
 
-/** @param {State} state @param {Cpu} c @param {CpuBus} bus */
+/**
+ * @param {State} state
+ * @param {FileId} file
+ * @returns {number}
+ */
+function fileHeader(state, file) {
+    if (file.entry < 0) {
+        return -1;
+    }
+    return directoryHeader(state, {parent: 0, file: file.parent, entry: -1}, file.entry);
+}
+
+/**
+ * @param {Channel} channel
+ * @returns {boolean}
+ */
+function channelWritable(channel) {
+    return !channel.isDirectory && channel.key !== openShare;
+}
+
+/**
+ * FS.XINF: fill the 64-byte block at A1 with the image's file name as the
+ * medium name, the driver name, drive number, allocation unit, total and free
+ * KiB, and header size; unused fields stay 0xFF.
+ *
+ * @param {State} state
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
 function extendedInfo(state, c, bus) {
     const address = c.reg[9] & 0xFFFFFF;
     if (address < cpu.qdosUserRamBase || address + 64 > bus.mem.length) {
@@ -1970,9 +2333,21 @@ function extendedInfo(state, c, bus) {
     cpu.writePointerLong(bus.mem, address + 40, fileHeaderSize);
 }
 
+/**
+ * @param {State} state
+ * @returns {number}
+ */
+function freeSectors(state) {
+    if (state.floppy) {
+        return cpu.readPointerWord(state.image, flpFreeSectorsOffset);
+    }
+    return cpu.readPointerWord(state.image, winFreeClusterCountOffset) * state.sectorsPerCluster;
+}
+
 /** @param {State} state */
 function markModified(state) {
     state.modified = true;
+    state.writeCount += 1;
     let offset = winUpdateCheckOffset;
     if (state.floppy) {
         offset = flpUpdateCountOffset;
@@ -1980,13 +2355,21 @@ function markModified(state) {
     cpu.writePointerLong(state.image, offset, (cpu.readPointerLong(state.image, offset) + 1) >>> 0);
 }
 
-/** @param {Uint8Array} bytes @param {number} offset @returns {string | null} */
-function readQdosName(bytes, offset) {
+/**
+ * The QDOS string at `offset`, or null when it is longer than `maxLength` or
+ * runs past the end of `bytes`.
+ *
+ * @param {Uint8Array} bytes
+ * @param {number} offset
+ * @param {number} maxLength
+ * @returns {string | null}
+ */
+function readQdosName(bytes, offset, maxLength) {
     if (offset < 0 || offset + 2 > bytes.length) {
         return null;
     }
     const length = cpu.readPointerWord(bytes, offset);
-    if (length > maxNameLength || offset + 2 + length > bytes.length) {
+    if (length > maxLength || offset + 2 + length > bytes.length) {
         return null;
     }
     let name = "";
@@ -1996,7 +2379,11 @@ function readQdosName(bytes, offset) {
     return name;
 }
 
-/** @param {Uint8Array} bytes @param {number} header @returns {string} */
+/**
+ * @param {Uint8Array} bytes
+ * @param {number} header
+ * @returns {string}
+ */
 function readHeaderName(bytes, header) {
     const length = Math.min(cpu.readPointerWord(bytes, header + qdosFileName), maxNameLength);
     let name = "";
@@ -2006,21 +2393,215 @@ function readHeaderName(bytes, header) {
     return name;
 }
 
-/** @param {Uint8Array} bytes @param {number} header @param {string} name */
+/**
+ * First empty entry after the directory's own header slot or, when every
+ * entry is in use, the next one past the end, which is at least 1.
+ *
+ * @param {State} state
+ * @param {FileId} parent
+ * @param {number} entries
+ * @returns {number}
+ */
+function freeDirectoryEntry(state, parent, entries) {
+    for (let entry = 1; entry < entries; entry += 1) {
+        const header = directoryHeader(state, parent, entry);
+        if (header >= 0 && cpu.readPointerLong(state.image, header + qdosFileLength) === 0) {
+            return entry;
+        }
+    }
+    return Math.max(entries, 1);
+}
+
+/**
+ * @param {State} state
+ * @param {FileId} directory
+ * @param {number} entry
+ * @returns {number}
+ */
+function directoryHeader(state, directory, entry) {
+    const base = fileSectorOffset(state, directory, Math.floor(entry / headersPerSector), null);
+    if (base < 0) {
+        return -1;
+    }
+    return base + entry % headersPerSector * fileHeaderSize;
+}
+
+/**
+ * Image offset of the `sector`th 512-byte sector of a file, or -1. On a hard
+ * disk, a `cursor` keeps the last cluster found, so a sequential transfer
+ * follows the cluster chain on from there rather than from the file start.
+ *
+ * @param {State} state
+ * @param {FileId} file
+ * @param {number} sector
+ * @param {{cluster: number, index: number} | null} cursor
+ * @returns {number}
+ */
+function fileSectorOffset(state, file, sector, cursor) {
+    if (sector < 0) {
+        return -1;
+    }
+    if (!state.floppy) {
+        const index = Math.floor(sector / state.sectorsPerCluster);
+        if (index >= state.clusterCount) {
+            return -1;
+        }
+        let first = file.file;
+        let links = index;
+        if (cursor !== null && cursor.index <= index) {
+            first = cursor.cluster;
+            links -= cursor.index;
+        }
+        const cluster = walkChain(state, first, links);
+        if (cluster < 0) {
+            return -1;
+        }
+        if (cursor !== null) {
+            cursor.cluster = cluster;
+            cursor.index = index;
+        }
+        return clusterSectorOffset(state, cluster, sector % state.sectorsPerCluster);
+    }
+    const block = Math.floor(sector / state.sectorsPerBlock);
+    if (file.file < 0 || file.file > flpFileMapBlockMask || block > flpFileMapBlockMask) {
+        return -1;
+    }
+    const want = (file.file << flpFileMapBlockBits) | block;
+    const firstSector = state.fileMap.get(want);
+    if (firstSector === undefined) {
+        return -1;
+    }
+    return logicalSectorOffset(state, firstSector + sector % state.sectorsPerBlock);
+}
+
+/**
+ * Image offset of a floppy logical sector after track-map and interleave mapping.
+ *
+ * @param {State} state
+ * @param {number} sector
+ * @returns {number}
+ */
+function logicalSectorOffset(state, sector) {
+    if (sector < 0 || sector >= state.totalSectors) {
+        return -1;
+    }
+    const entry = state.image[flpTrackMapOffset + sector % state.sectorsPerCluster];
+    const track = Math.floor(sector / state.sectorsPerCluster);
+    const trackSector = entry & 0x7F;
+    const side = entry >> 7;
+    if (trackSector >= state.sectorsPerTrack) {
+        return -1;
+    }
+    const physicalSector = (track * state.interleave + trackSector) % state.sectorsPerTrack;
+    const index = track * state.sectorsPerCluster + physicalSector + side * state.sectorsPerTrack;
+    if (index < 0 || index >= state.totalSectors) {
+        return -1;
+    }
+    const offset = index * sectorSize;
+    if (offset + sectorSize > state.image.length) {
+        return -1;
+    }
+    return offset;
+}
+
+/**
+ * @param {State} state
+ * @param {number} cluster
+ * @param {number} sector
+ * @returns {number}
+ */
+function clusterSectorOffset(state, cluster, sector) {
+    if (cluster < 0 || cluster >= state.clusterCount || sector < 0 || sector >= state.sectorsPerCluster) {
+        return -1;
+    }
+    const offset = (cluster * state.sectorsPerCluster + sector) * sectorSize;
+    if (offset + sectorSize > state.image.length) {
+        return -1;
+    }
+    return offset;
+}
+
+/**
+ * @param {State} state
+ * @param {number} first
+ * @param {number} links
+ * @returns {number}
+ */
+function walkChain(state, first, links) {
+    let cluster = first;
+    if (cluster <= 0 || cluster >= state.clusterCount || links < 0 || links >= state.clusterCount) {
+        return -1;
+    }
+    for (let i = 0; i < links; i += 1) {
+        cluster = nextCluster(state, cluster);
+        if (cluster <= 0) {
+            return -1;
+        }
+    }
+    return cluster;
+}
+
+/**
+ * The next cluster of a QLWA chain: 0 ends the chain, and -1 marks a link
+ * outside the medium.
+ *
+ * @param {State} state
+ * @param {number} cluster
+ * @returns {number}
+ */
+function nextCluster(state, cluster) {
+    if (cluster < 0 || cluster >= state.clusterCount) {
+        return -1;
+    }
+    const next = cpu.readPointerWord(state.image, winFatOffset + cluster * 2);
+    if (next >= state.clusterCount) {
+        return -1;
+    }
+    return next;
+}
+
+/**
+ * Clear a new file's directory entry and data header, then name and date it.
+ * The caller writes the file id where the format needs one.
+ *
+ * @param {State} state
+ * @param {number} header
+ * @param {number} data
+ * @param {string} name
+ * @param {number} now
+ */
+function writeNewFileHeader(state, header, data, name, now) {
+    state.image.fill(0, header, header + fileHeaderSize);
+    state.image.fill(0, data, data + fileHeaderSize);
+    cpu.writePointerLong(state.image, header + qdosFileLength, fileHeaderSize);
+    writeHeaderName(state.image, header, name);
+    cpu.writePointerLong(state.image, header + qdosFileUpdate, now);
+    cpu.writePointerLong(state.image, header + fileBackupDate, now);
+}
+
+/**
+ * Replace the name field of the header at `header`, cut to its 36 characters.
+ *
+ * @param {Uint8Array} bytes
+ * @param {number} header
+ * @param {string} name
+ */
 function writeHeaderName(bytes, header, name) {
     const length = Math.min(name.length, maxNameLength);
+    bytes.fill(0, header + qdosFileName, header + qdosFileName + 2 + maxNameLength);
     cpu.writePointerWord(bytes, header + qdosFileName, length);
     for (let i = 0; i < length; i += 1) {
         bytes[header + qdosFileName + 2 + i] = name.charCodeAt(i);
     }
 }
 
-/** @param {number} value @returns {number} */
-function signed8(value) {
-    return (value << 24) >> 24;
-}
-
-/** @param {number} value @returns {number} */
-function signed16(value) {
-    return (value << 16) >> 16;
+/**
+ * First allocation block past cylinder 0, which keeps the map;
+ * `sectorsPerCluster` holds sectors per cylinder on a floppy.
+ *
+ * @param {State} state
+ * @returns {number}
+ */
+function firstFloppyDataBlock(state) {
+    return Math.floor(state.sectorsPerCluster / state.sectorsPerBlock);
 }

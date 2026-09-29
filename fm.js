@@ -58,8 +58,6 @@ const envelopeIncrement = Uint8Array.of(
     4, 8, 4, 8, 4, 8, 4, 8,
     4, 8, 8, 8, 4, 8, 8, 8,
     8, 8, 8, 8, 8, 8, 8, 8,
-    16, 16, 16, 16, 16, 16, 16, 16,
-    0, 0, 0, 0, 0, 0, 0, 0,
 );
 const operatorSlot = Uint8Array.of(0, 2, 1, 3);
 const specialSlot = Uint8Array.of(1, 2, 0);
@@ -100,7 +98,7 @@ for (let i = 0; i < sineSteps; i += 1) {
 
 /**
  * Native-rate YM2203 FM operator. Envelope volume is attenuation from 0 to
- * 1023; phase is a 16.16 index into the 1024-step sine table.
+ * 1023; phase is a 10.16 fixed-point index into the 1024-step sine table.
  *
  * @typedef {{
  *   phase: number,
@@ -170,7 +168,6 @@ export function create() {
         status: 0,
         csmKeyOff: false,
     };
-    reset(state);
     return state;
 }
 
@@ -235,7 +232,12 @@ export function writeAddress(state, value) {
     state.previousSample = state.currentSample;
 }
 
-/** @param {State} state @returns {number} */
+/**
+ * SSG tick rate in Hz after the current prescaler.
+ *
+ * @param {State} state
+ * @returns {number}
+ */
 export function getSsgTickRate(state) {
     return ssgTickRate[state.prescalerSelect & 3];
 }
@@ -252,7 +254,10 @@ export function getBusyCycles(state, clockHz) {
     return Math.ceil(32 * prescale * clockHz / masterClockHz);
 }
 
-/** @param {State} state @returns {number} */
+/**
+ * @param {State} state
+ * @returns {number}
+ */
 export function readStatus(state) {
     return state.status;
 }
@@ -340,7 +345,14 @@ function createOperator() {
     };
 }
 
-/** @param {State} state @param {number} previous @param {number} value */
+/**
+ * Register 0x27: clear timer flags, start or stop timers A and B, and end a
+ * CSM key-on when CSM mode is left.
+ *
+ * @param {State} state
+ * @param {number} previous
+ * @param {number} value
+ */
 function writeTimerMode(state, previous, value) {
     if ((value & 0x10) !== 0) {
         state.status &= ~1;
@@ -364,7 +376,13 @@ function writeTimerMode(state, previous, value) {
     }
 }
 
-/** @param {State} state @param {number} value */
+/**
+ * Register 0x28: key the chosen channel's operators on or off. A key-on
+ * restarts the envelope; a key-off leaves operators that CSM keyed on to CSM.
+ *
+ * @param {State} state
+ * @param {number} value
+ */
 function keyOperators(state, value) {
     const channel = value & 3;
     if (channel >= channelCount) {
@@ -386,49 +404,10 @@ function keyOperators(state, value) {
     }
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex */
-function startOperator(state, channel, opIndex) {
-    const op = operator(state, channel, opIndex);
-    op.phase = 0;
-    op.ssgInvert = false;
-    const attack = operatorRate(state, channel, opIndex, attackRateBase);
-    if (attack >= 94) {
-        op.volume = 0;
-        enterDecay(state, channel, opIndex);
-        return;
-    }
-    const sustain = sustainAttenuation(operatorReg(state, channel, opIndex, sustainReleaseBase));
-    if (op.volume <= 0) {
-        op.stage = envelopeDecay;
-        if (sustain === 0) {
-            op.stage = envelopeSustain;
-        }
-    } else {
-        op.stage = envelopeAttack;
-    }
-}
-
-/** @param {State} state @param {number} channel @param {number} opIndex */
-function releaseOperator(state, channel, opIndex) {
-    const op = operator(state, channel, opIndex);
-    if (op.stage === envelopeOff || op.stage === envelopeRelease) {
-        return;
-    }
-    op.stage = envelopeRelease;
-    const ssg = operatorReg(state, channel, opIndex, ssgEnvelopeBase) & 0x0F;
-    if ((ssg & 8) === 0) {
-        return;
-    }
-    if (op.ssgInvert !== ((ssg & 4) !== 0)) {
-        op.volume = (envelopeSsgEnd - op.volume) & envelopeMax;
-    }
-    if (op.volume >= envelopeSsgEnd) {
-        op.volume = envelopeMax;
-        op.stage = envelopeOff;
-    }
-}
-
-/** @param {State} state @returns {number} */
+/**
+ * @param {State} state
+ * @returns {number}
+ */
 function nativeSample(state) {
     updateSsgEnvelopes(state);
     let sample = 0;
@@ -449,7 +428,15 @@ function nativeSample(state) {
     return sample / channelCount;
 }
 
-/** @param {State} state @param {number} channel @returns {number} */
+/**
+ * One YM2203 channel sample from its four operators, wired by the channel's
+ * algorithm. `channelMemory` carries one modulation path over to the next
+ * sample, like the chip's delay slot.
+ *
+ * @param {State} state
+ * @param {number} channel
+ * @returns {number}
+ */
 function channelSample(state, channel) {
     const algorithm = state.registers[algorithmBase + channel] & 7;
     const op0 = operatorOutput(state, channel, 0, feedbackSample(state, channel));
@@ -518,7 +505,16 @@ function channelSample(state, channel) {
     return result;
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex @param {number} modulation */
+/**
+ * One operator's output from its phase plus `modulation`, its envelope, and
+ * its total level, keeping the last two outputs for feedback.
+ *
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ * @param {number} modulation
+ * @returns {number}
+ */
 function operatorOutput(state, channel, opIndex, modulation) {
     const op = operator(state, channel, opIndex);
     let output = 0;
@@ -538,16 +534,16 @@ function operatorOutput(state, channel, opIndex, modulation) {
     return output;
 }
 
-/** @param {State} state @param {number} channel */
+/**
+ * @param {State} state
+ * @param {number} channel
+ */
 function advancePhases(state, channel) {
     for (let opIndex = 0; opIndex < operatorCount; opIndex += 1) {
         const op = operator(state, channel, opIndex);
         op.phase += operatorPhaseStep(state, channel, opIndex);
-        if (op.phase >= phaseCycle || op.phase < 0) {
+        if (op.phase >= phaseCycle) {
             op.phase %= phaseCycle;
-            if (op.phase < 0) {
-                op.phase += phaseCycle;
-            }
         }
     }
 }
@@ -561,24 +557,37 @@ function advanceEnvelopes(state) {
     }
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex */
+/**
+ * Step one operator's envelope at the global envelope counter: attack to zero
+ * attenuation, decay to the sustain level, then sustain and release. Past the
+ * attack, SSG-EG operators move four times as fast and stop at their end
+ * level.
+ *
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ */
 function advanceEnvelope(state, channel, opIndex) {
     const op = operator(state, channel, opIndex);
-    if (op.stage === envelopeOff) {
-        return;
-    }
     let rate = 0;
-    if (op.stage === envelopeAttack) {
+    switch (op.stage) {
+    case envelopeOff:
+        return;
+    case envelopeAttack:
         rate = operatorRate(state, channel, opIndex, attackRateBase);
-    } else if (op.stage === envelopeDecay) {
+        break;
+    case envelopeDecay:
         rate = operatorRate(state, channel, opIndex, decayRateBase);
-    } else if (op.stage === envelopeSustain) {
+        break;
+    case envelopeSustain:
         rate = operatorRate(state, channel, opIndex, sustainRateBase);
-    } else {
+        break;
+    default:
         const value = operatorReg(state, channel, opIndex, sustainReleaseBase);
         rate = 34 + (value & 0x0F) * 4 + keyScaleRate(state, channel, opIndex);
+        break;
     }
-    const increment = rateIncrement(Math.min(rate, 127), state.envelopeCounter);
+    const increment = rateIncrement(rate, state.envelopeCounter);
     if (increment === 0) {
         return;
     }
@@ -591,8 +600,7 @@ function advanceEnvelope(state, channel, opIndex) {
         return;
     }
     const ssg = operatorReg(state, channel, opIndex, ssgEnvelopeBase) & 0x0F;
-    if ((ssg & 8) !== 0 && op.stage !== envelopeAttack
-        && op.stage !== envelopeRelease && op.volume >= envelopeSsgEnd) {
+    if ((ssg & 8) !== 0 && op.stage !== envelopeRelease && op.volume >= envelopeSsgEnd) {
         return;
     }
     let step = increment;
@@ -600,14 +608,13 @@ function advanceEnvelope(state, channel, opIndex) {
         step *= 4;
     }
     op.volume += step;
-    if (op.stage === envelopeDecay) {
-        const sustain = sustainAttenuation(operatorReg(state, channel, opIndex, sustainReleaseBase));
-        if (op.volume >= sustain) {
+    switch (op.stage) {
+    case envelopeDecay:
+        if (op.volume >= sustainAttenuation(operatorReg(state, channel, opIndex, sustainReleaseBase))) {
             op.stage = envelopeSustain;
         }
-        return;
-    }
-    if (op.stage === envelopeRelease) {
+        break;
+    case envelopeRelease:
         let end = envelopeMax;
         if ((ssg & 8) !== 0) {
             end = envelopeSsgEnd;
@@ -616,29 +623,32 @@ function advanceEnvelope(state, channel, opIndex) {
             op.volume = envelopeMax;
             op.stage = envelopeOff;
         }
-    } else if ((ssg & 8) === 0 && op.volume >= envelopeMax) {
-        op.volume = envelopeMax;
+        break;
+    default:
+        if ((ssg & 8) === 0) {
+            op.volume = Math.min(op.volume, envelopeMax);
+        }
+        break;
     }
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex */
-function enterDecay(state, channel, opIndex) {
-    const op = operator(state, channel, opIndex);
-    const sustain = sustainAttenuation(operatorReg(state, channel, opIndex, sustainReleaseBase));
-    op.stage = envelopeDecay;
-    if (sustain === 0) {
-        op.stage = envelopeSustain;
-    }
-}
-
-/** @param {State} state */
+/**
+ * Apply the SSG-EG repeat, alternate, and hold modes to operators whose
+ * envelope has reached its end level.
+ *
+ * @param {State} state
+ */
 function updateSsgEnvelopes(state) {
     for (let channel = 0; channel < channelCount; channel += 1) {
         for (let opIndex = 0; opIndex < operatorCount; opIndex += 1) {
             const op = operator(state, channel, opIndex);
             const ssg = operatorReg(state, channel, opIndex, ssgEnvelopeBase) & 0x0F;
-            if ((ssg & 8) === 0 || op.volume < envelopeSsgEnd
-                || op.stage === envelopeOff || op.stage === envelopeRelease) {
+            if (
+                (ssg & 8) === 0 ||
+                op.volume < envelopeSsgEnd ||
+                op.stage === envelopeOff ||
+                op.stage === envelopeRelease
+            ) {
                 continue;
             }
             if ((ssg & 1) !== 0) {
@@ -655,54 +665,59 @@ function updateSsgEnvelopes(state) {
                     op.phase = 0;
                 }
                 if (op.stage !== envelopeAttack) {
-                    const attack = operatorRate(state, channel, opIndex, attackRateBase);
-                    if (attack >= 94) {
-                        op.volume = 0;
-                        enterDecay(state, channel, opIndex);
-                    } else if (op.volume <= 0) {
-                        enterDecay(state, channel, opIndex);
-                    } else {
-                        op.stage = envelopeAttack;
-                    }
+                    startEnvelope(state, channel, opIndex);
                 }
             }
         }
     }
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex @returns {number} */
+/**
+ * Envelope attenuation as heard, inverted while an SSG-EG operator runs in its
+ * inverted half.
+ *
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ * @returns {number}
+ */
 function outputAttenuation(state, channel, opIndex) {
     const op = operator(state, channel, opIndex);
     const ssg = operatorReg(state, channel, opIndex, ssgEnvelopeBase) & 0x0F;
-    if ((ssg & 8) !== 0 && op.stage !== envelopeOff && op.stage !== envelopeRelease
-        && op.ssgInvert !== ((ssg & 4) !== 0)) {
+    if (
+        (ssg & 8) !== 0 &&
+        op.stage !== envelopeOff &&
+        op.stage !== envelopeRelease &&
+        op.ssgInvert !== ((ssg & 4) !== 0)
+    ) {
         return (envelopeSsgEnd - op.volume) & envelopeMax;
     }
     return op.volume;
 }
 
-/** @param {number} rate @param {number} counter @returns {number} */
+/**
+ * Envelope step for an effective rate at the global envelope counter: 0 on
+ * the counter ticks that rate skips, and always below rate 34.
+ *
+ * @param {number} rate
+ * @param {number} counter
+ * @returns {number}
+ */
 function rateIncrement(rate, counter) {
-    let shift = 11;
-    let group = 18;
-    if (rate >= 32) {
-        const effective = rate - 32;
-        shift = Math.max(11 - (effective >> 2), 0);
-        if (effective < 2) {
-            group = 18;
-        } else if (effective < 4) {
-            group = effective;
-        } else if (effective >= 4 && effective < 48) {
-            group = effective & 3;
-        } else if (effective < 52) {
-            group = 4 + (effective & 3);
-        } else if (effective < 56) {
-            group = 8 + (effective & 3);
-        } else if (effective < 60) {
-            group = 12 + (effective & 3);
-        } else {
-            group = 16;
-        }
+    if (rate < 34) {
+        return 0;
+    }
+    const effective = rate - 32;
+    const shift = Math.max(11 - (effective >> 2), 0);
+    let group = effective & 3;
+    if (effective >= 60) {
+        group = 16;
+    } else if (effective >= 56) {
+        group = 12 + (effective & 3);
+    } else if (effective >= 52) {
+        group = 8 + (effective & 3);
+    } else if (effective >= 48) {
+        group = 4 + (effective & 3);
     }
     if ((counter & ((1 << shift) - 1)) !== 0) {
         return 0;
@@ -710,32 +725,11 @@ function rateIncrement(rate, counter) {
     return envelopeIncrement[group * 8 + ((counter >> shift) & 7)];
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex @param {number} base @returns {number} */
-function operatorRate(state, channel, opIndex, base) {
-    const value = operatorReg(state, channel, opIndex, base) & 0x1F;
-    if (value === 0) {
-        return 0;
-    }
-    return 32 + value * 2 + keyScaleRate(state, channel, opIndex);
-}
-
-/** @param {State} state @param {number} channel @param {number} opIndex @returns {number} */
-function keyScaleRate(state, channel, opIndex) {
-    const value = operatorReg(state, channel, opIndex, attackRateBase);
-    const shift = 3 - (value >> 6);
-    return envelopeKeycode(state, channel, opIndex) >> shift;
-}
-
-/** @param {number} value @returns {number} */
-function sustainAttenuation(value) {
-    const sustain = value >> 4;
-    if (sustain >= 15) {
-        return 31 * 32;
-    }
-    return sustain * 32;
-}
-
-/** @param {State} state @param {number} channel @returns {number} */
+/**
+ * @param {State} state
+ * @param {number} channel
+ * @returns {number}
+ */
 function feedbackSample(state, channel) {
     const feedback = (state.registers[algorithmBase + channel] >> 3) & 7;
     if (feedback === 0) {
@@ -745,7 +739,16 @@ function feedbackSample(state, channel) {
     return (op.lastOutput + op.previousOutput) * feedbackScale[feedback];
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex @returns {number} */
+/**
+ * Phase step per native sample, in the 10.16 units of `phase`, from the
+ * F-number, block, detune, and multiple; a negative detuned increment wraps
+ * at 17 bits as in the chip.
+ *
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ * @returns {number}
+ */
 function operatorPhaseStep(state, channel, opIndex) {
     const fnum = channelFnum(state, channel, opIndex);
     const block = channelBlock(state, channel, opIndex);
@@ -768,7 +771,12 @@ function operatorPhaseStep(state, channel, opIndex) {
     return Math.floor(increment * multiplier * 64);
 }
 
-/** @param {State} state */
+/**
+ * Count timers A and B down one timer tick, setting their flags when enabled;
+ * in CSM mode, a timer A overflow keys channel 3 on.
+ *
+ * @param {State} state
+ */
 function advanceTimers(state) {
     const mode = state.registers[timerModeRegister];
     if (state.timerACounter > 0) {
@@ -806,6 +814,96 @@ function triggerCsmOperators(state) {
     }
 }
 
+/**
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ */
+function startOperator(state, channel, opIndex) {
+    const op = operator(state, channel, opIndex);
+    op.phase = 0;
+    op.ssgInvert = false;
+    startEnvelope(state, channel, opIndex);
+}
+
+/**
+ * Enter the attack, or go straight to decay when the attack rate is instant
+ * or the operator is already at full volume.
+ *
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ */
+function startEnvelope(state, channel, opIndex) {
+    const op = operator(state, channel, opIndex);
+    if (operatorRate(state, channel, opIndex, attackRateBase) >= 94) {
+        op.volume = 0;
+    }
+    if (op.volume <= 0) {
+        enterDecay(state, channel, opIndex);
+    } else {
+        op.stage = envelopeAttack;
+    }
+}
+
+/**
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ */
+function enterDecay(state, channel, opIndex) {
+    const op = operator(state, channel, opIndex);
+    const sustain = sustainAttenuation(operatorReg(state, channel, opIndex, sustainReleaseBase));
+    op.stage = envelopeDecay;
+    if (sustain === 0) {
+        op.stage = envelopeSustain;
+    }
+}
+
+/**
+ * Effective envelope rate: 0 when the rate register is 0, otherwise 32 plus
+ * twice the register plus the key scale, so 34 to 125.
+ *
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ * @param {number} base
+ * @returns {number}
+ */
+function operatorRate(state, channel, opIndex, base) {
+    const value = operatorReg(state, channel, opIndex, base) & 0x1F;
+    if (value === 0) {
+        return 0;
+    }
+    return 32 + value * 2 + keyScaleRate(state, channel, opIndex);
+}
+
+/**
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ * @returns {number}
+ */
+function keyScaleRate(state, channel, opIndex) {
+    const value = operatorReg(state, channel, opIndex, attackRateBase);
+    const shift = 3 - (value >> 6);
+    const block = channelBlock(state, channel, opIndex);
+    const fnum = channelFnum(state, channel, opIndex);
+    return ((block << 2) | keycodeNote[(fnum >> 7) & 0x0F]) >> shift;
+}
+
+/**
+ * @param {number} value
+ * @returns {number}
+ */
+function sustainAttenuation(value) {
+    const sustain = value >> 4;
+    if (sustain >= 15) {
+        return 31 * 32;
+    }
+    return sustain * 32;
+}
+
 /** @param {State} state */
 function releaseCsmOperators(state) {
     for (let opIndex = 0; opIndex < operatorCount; opIndex += 1) {
@@ -819,14 +917,42 @@ function releaseCsmOperators(state) {
     }
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex @returns {number} */
-function envelopeKeycode(state, channel, opIndex) {
-    const block = channelBlock(state, channel, opIndex);
-    const fnum = channelFnum(state, channel, opIndex);
-    return (block << 2) | keycodeNote[(fnum >> 7) & 0x0F];
+/**
+ * Key an operator off into release. An SSG-EG operator keeps the level heard
+ * when inverted, and one already at its end level turns off at once.
+ *
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ */
+function releaseOperator(state, channel, opIndex) {
+    const op = operator(state, channel, opIndex);
+    if (op.stage === envelopeOff || op.stage === envelopeRelease) {
+        return;
+    }
+    op.stage = envelopeRelease;
+    const ssg = operatorReg(state, channel, opIndex, ssgEnvelopeBase) & 0x0F;
+    if ((ssg & 8) === 0) {
+        return;
+    }
+    if (op.ssgInvert !== ((ssg & 4) !== 0)) {
+        op.volume = (envelopeSsgEnd - op.volume) & envelopeMax;
+    }
+    if (op.volume >= envelopeSsgEnd) {
+        op.volume = envelopeMax;
+        op.stage = envelopeOff;
+    }
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex @returns {number} */
+/**
+ * F-number for an operator; in channel 3's special and CSM modes operators 0-2
+ * have their own.
+ *
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ * @returns {number}
+ */
 function channelFnum(state, channel, opIndex) {
     if (channel === 2 && (state.registers[timerModeRegister] & 0xC0) !== 0 && opIndex < 3) {
         return state.channel3Fnum[specialSlot[opIndex]];
@@ -834,7 +960,15 @@ function channelFnum(state, channel, opIndex) {
     return state.channelFnum[channel];
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex @returns {number} */
+/**
+ * Block for an operator; in channel 3's special and CSM modes operators 0-2
+ * have their own.
+ *
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ * @returns {number}
+ */
 function channelBlock(state, channel, opIndex) {
     if (channel === 2 && (state.registers[timerModeRegister] & 0xC0) !== 0 && opIndex < 3) {
         return state.channel3Block[specialSlot[opIndex]];
@@ -842,12 +976,23 @@ function channelBlock(state, channel, opIndex) {
     return state.channelBlock[channel];
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex @param {number} base @returns {number} */
+/**
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ * @param {number} base
+ * @returns {number}
+ */
 function operatorReg(state, channel, opIndex, base) {
     return state.registers[base + channel + operatorSlot[opIndex] * operatorCount];
 }
 
-/** @param {State} state @param {number} channel @param {number} opIndex @returns {Operator} */
+/**
+ * @param {State} state
+ * @param {number} channel
+ * @param {number} opIndex
+ * @returns {Operator}
+ */
 function operator(state, channel, opIndex) {
     return state.operators[channel * operatorCount + opIndex];
 }

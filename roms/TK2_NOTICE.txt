@@ -1,0 +1,30 @@
+Toolkit II ROM notice
+
+Bundled file:
+  tk2.rom
+
+Version:
+  Toolkit II v2.36, ROM version (upstream file name TK236.rom), without the
+  network code, which upstream ships separately as TK236_net.bin
+
+Binary source:
+  https://www.kilgus.net/soft/tk236_rom.zip
+  https://www.kilgus.net/2017/03/19/toolkit-ii-the-sequel/
+
+Source code:
+  https://github.com/SinclairQL/SMSQE
+
+Source revision inspected:
+  838918488f27119136683f8370e004c329a9ffb3
+
+The 16384-byte tk2.rom file is byte-identical to TK236.rom in the binary
+archive above. Toolkit II was written by Tony Tebby at QJUMP; this release was
+built by Marcel Kilgus from the SMSQ/E sources, into which the Toolkit II
+sources were merged.
+
+SHA-256:
+  d3d088df26527505fd8cd06e98a861f212a60c7a252b998e1b0a21f89a9c8b1d
+
+The SMSQ/E sources are distributed under the SMSQ/E licence, a BSD 2-clause
+licence. Its text, with the copyright notice, is included next to the ROM as
+TK2_SMSQE_LICENCE.txt, converted from the QL character set to UTF-8.

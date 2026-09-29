@@ -41,6 +41,8 @@ const displayControlMode8 = 0x08;
 const displayControlNtscBit = 0x40;
 const displayControlScreenBit = 0x80;
 const interruptClearMask = 0x1F;
+const interruptEnableMask = 0xE0;
+const interruptGapEnableBit = 0x20;
 const ipcReadMarker = 0xA50000;
 const ipcReadSetMarker = 0xA58000;
 const ipcReadDoneMarker = 0xA5;
@@ -77,6 +79,7 @@ const microdriveGapInterruptBit = 0x01;
 const microdriveMaxImageBytes = 2 * 1024 * 1024;
 const microdriveHeaderGapEndOffset = 6;
 const qlaySectorHeaderOffset = 12;
+const qlaySectorHeaderFlag = 0xFF;
 const qlayBlockPreambleOffset = 28;
 const qlayBlockGapEndOffset = 34;
 const qlayBlockHeaderOffset = 40;
@@ -84,8 +87,21 @@ const qlayDataPreambleOffset = 44;
 const qlayDataOffset = 52;
 const qlayGapOffset = 566;
 const qlayFormatGapOffset = 652;
+/**
+ * Where the splice cuts the record written just before it during a FORMAT:
+ * halfway through the block data, so the header stays but the block is bad.
+ */
+const microdriveSpliceCutOffset = qlayDataOffset + 256;
 const microdriveEmptyGapPairs = (qlaySectorSize - qlayGapOffset) / 2;
+/**
+ * How many byte pairs the tape waits for the CPU to read the second track of
+ * a pair it has started. A read abandoned mid-pair loses the byte, as on tape.
+ */
+const microdriveLatchHoldPairs = 4;
 const qlayBadFileId = 0xFF;
+const qlayFreeFileId = 0xFD;
+const qlayMapFileId = 0xF8;
+const qlayMapEntries = 255;
 const soundIpcTickHz = 22917;
 const soundPitchFractionScale = 10;
 const soundPitchBaseUnits = 106;
@@ -144,13 +160,19 @@ for (let ink = 0; ink < 16; ink += 1) {
  */
 
 /**
+ * A QLAY cartridge in a drive. `unformatted` marks a New cartridge until a
+ * FORMAT of it ends. `formatting` is set while a FORMAT writes or verifies it,
+ * matching `mdv.formattingUnit`, and `formatVerifying` and `formatVerified`
+ * follow that format's verify pass and catalog. The counts grow with each
+ * track byte, so a rise shows activity.
+ *
  * @typedef {{
  *   image: Uint8Array,
- *   imageLen: number,
  *   byteOffset: number,
  *   inserted: boolean,
  *   name: string,
  *   unformatted: boolean,
+ *   formatting: boolean,
  *   formatVerifying: boolean,
  *   formatVerified: boolean,
  *   modified: boolean,
@@ -160,6 +182,14 @@ for (let ink = 0; ink < 16; ink += 1) {
  */
 
 /**
+ * `interruptMask` holds the ZX8302 interrupt enables, bits 7..5 of the last
+ * write to its interrupt register. In `mdv`, `formattingUnit` is the drive a
+ * FORMAT is laying out, or -1, and `formatWriteOffset` where its next record
+ * goes. `burstStart` and `burstBytes` describe the write burst in progress,
+ * and `silentPairs` counts the byte pairs the head has spent on erased tape.
+ * `latchedAt` is when the CPU read the first track of the pair in
+ * `latchedTracks`.
+ *
  * @typedef {{
  *   mem: Uint8Array,
  *   cpu: import("./cpu.js").Cpu,
@@ -185,7 +215,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  *   },
  *   keys: import("./keyboard.js").KeyState,
  *   theInt: number,
- *   guestRamTop: number,
+ *   interruptMask: number,
  *   romLoaded: boolean,
  *   ntscMachine: boolean,
  *   displayNtsc: boolean,
@@ -215,10 +245,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  *     pitch1: number,
  *     pitch: number,
  *     pitch2: number,
- *     grdX: number,
  *     grdY: number,
- *     length: number,
- *     wrap: number,
  *     randomAmount: number,
  *     fuzzAmount: number,
  *     random: number,
@@ -262,11 +289,14 @@ for (let ink = 0; ink < 16; ink += 1) {
  *     control: number,
  *     latchedByteOffset: number,
  *     latchedTracks: number,
+ *     latchedAt: number,
  *     transmitFullUntil: number,
  *     formattingUnit: number,
  *     formatWriteOffset: number,
- *     formatBurstBytes: number,
+ *     burstStart: number,
+ *     burstBytes: number,
  *     gapActive: boolean,
+ *     silentPairs: number,
  *     dataReady: boolean,
  *     cycleAnchor: number,
  *     pairCycles: number,
@@ -281,7 +311,6 @@ for (let ink = 0; ink < 16; ink += 1) {
  * @returns {Machine}
  */
 export function create(keys) {
-    const audioN = audioCap;
     const ramTop = cpu.qdosUserRamBase + defaultRamKb * 1024;
     const mem = new Uint8Array(cpu.addressSpaceBytes);
     /** @type {MicrodriveCartridge[]} */
@@ -300,12 +329,6 @@ export function create(keys) {
             qimsiEnd: 0,
             qsoundBase: 0,
             qsoundEnd: 0,
-            isUnmapped: function (addr) {
-                return !cpu.addressIsMapped(m.cpuBus, addr);
-            },
-            isHw: function (addr) {
-                return cpu.addressIsHardware(m.cpuBus, addr);
-            },
             isEClocked: function (addr) {
                 return qsoundContains(m, addr);
             },
@@ -353,8 +376,13 @@ export function create(keys) {
             },
             resetHardware: function () {
                 resetIpc(m);
-                microdriveResetHardware(m);
+                m.mdv.selectedMask = 0;
+                m.mdv.control = microdriveSelectClockBit | microdriveReadWriteBit;
+                microdriveCancelTransfer(m);
                 stopBeep(m);
+                // A ROM restarting itself, as Minerva does to switch screens,
+                // runs its ROM scan again, so the disk drivers link again too.
+                disk.prepareReset(m.disks, m.mem);
             },
         },
         pixels: new Uint8Array(frameW * frameH),
@@ -378,7 +406,7 @@ export function create(keys) {
         },
         keys,
         theInt: 0,
-        guestRamTop: ramTop,
+        interruptMask: 0,
         ntscMachine: false,
         displayNtsc: false,
         displayBlank: false,
@@ -393,11 +421,11 @@ export function create(keys) {
         sampleEndT: 0,
         audio: {
             n: 0,
-            beep: new Float32Array(audioN),
-            a: new Float32Array(audioN),
-            b: new Float32Array(audioN),
-            c: new Float32Array(audioN),
-            fm: new Float32Array(audioN),
+            beep: new Float32Array(audioCap),
+            a: new Float32Array(audioCap),
+            b: new Float32Array(audioCap),
+            c: new Float32Array(audioCap),
+            fm: new Float32Array(audioCap),
         },
         ipcRead: 0,
         ipcReceived: 1,
@@ -414,10 +442,7 @@ export function create(keys) {
             pitch1: 0,
             pitch: 0,
             pitch2: 0,
-            grdX: 0,
             grdY: 0,
-            length: 0,
-            wrap: 0,
             randomAmount: 0,
             fuzzAmount: 0,
             random: 0,
@@ -461,11 +486,14 @@ export function create(keys) {
             control: microdriveSelectClockBit | microdriveReadWriteBit,
             latchedByteOffset: 0,
             latchedTracks: 0,
+            latchedAt: 0,
             transmitFullUntil: 0,
             formattingUnit: -1,
             formatWriteOffset: 0,
-            formatBurstBytes: 0,
+            burstStart: 0,
+            burstBytes: 0,
             gapActive: false,
+            silentPairs: 0,
             dataReady: false,
             cycleAnchor: 0,
             pairCycles: 0,
@@ -484,8 +512,7 @@ export function create(keys) {
  * @param {Machine} m
  */
 export function reset(m) {
-    resetIpc(m);
-    microdriveResetHardware(m);
+    m.cpuBus.resetHardware();
     m.displayBlank = false;
     m.displayMode8 = false;
     m.displaySecondScreen = false;
@@ -493,8 +520,7 @@ export function reset(m) {
     m.flashFrame = 0;
     m.audio.n = 0;
     m.theInt = 0;
-    stopBeep(m);
-    disk.prepareReset(m.disks, m.mem);
+    m.interruptMask = 0;
     cpu.reset(m.cpu, m.cpuBus);
     qimsi.reset(m.qimsi, cpuClockHz(m));
     pe.reset(m.pe);
@@ -505,19 +531,19 @@ export function reset(m) {
 }
 
 /**
- * Replace the system ROM, clear RAM, and leave execution stopped until reset.
+ * Replace the system ROM, patched for the disk drivers, and fill RAM with
+ * power-on noise. The CPU keeps its state, so callers reset the machine to
+ * boot the new ROM.
  *
  * @param {Machine} m
  * @param {ArrayBuffer | Uint8Array} bytes
  * @returns {string | null}
  */
 export function setSysRom(m, bytes) {
-    let src = bytes;
-    if (!(src instanceof Uint8Array)) {
-        src = new Uint8Array(src);
-    }
-    if (src.byteLength === 0 || src.byteLength > sysRomSize) {
-        return "Expected 1 to " + sysRomSize + ", got " + src.byteLength + " bytes.";
+    const src = toBytes(bytes);
+    const sizeErr = sizeError(src, sysRomSize);
+    if (sizeErr !== null) {
+        return sizeErr;
     }
     fillRam(m);
     m.mem.fill(0, 0, sysRomSize);
@@ -544,8 +570,7 @@ export function setRamKb(m, ramKb) {
     default:
         return false;
     }
-    m.guestRamTop = cpu.qdosUserRamBase + ramKb * 1024;
-    m.cpuBus.guestRamTop = m.guestRamTop;
+    m.cpuBus.guestRamTop = cpu.qdosUserRamBase + ramKb * 1024;
     fillRam(m);
     return true;
 }
@@ -562,12 +587,10 @@ export function insertRomCartridge(m, bytes, slot) {
     if (!Number.isInteger(slot) || slot < 0 || slot >= romSlotCount) {
         return "Invalid ROM slot.";
     }
-    let src = bytes;
-    if (!(src instanceof Uint8Array)) {
-        src = new Uint8Array(src);
-    }
-    if (src.byteLength === 0 || src.byteLength > romCartridgeSize) {
-        return "Expected 1 to " + romCartridgeSize + ", got " + src.byteLength + " bytes.";
+    const src = toBytes(bytes);
+    const sizeErr = sizeError(src, romCartridgeSize);
+    if (sizeErr !== null) {
+        return sizeErr;
     }
     const base = romCartridgeBase + slot * romCartridgeSize;
     m.mem.set(src, base);
@@ -597,12 +620,10 @@ export function ejectRomCartridge(m, slot) {
  * @returns {string | null}
  */
 export function setQsoundRom(m, bytes) {
-    let src = bytes;
-    if (!(src instanceof Uint8Array)) {
-        src = new Uint8Array(src);
-    }
-    if (src.byteLength === 0 || src.byteLength > qsoundRomSize) {
-        return "Expected 1 to " + qsoundRomSize + ", got " + src.byteLength + " bytes.";
+    const src = toBytes(bytes);
+    const sizeErr = sizeError(src, qsoundRomSize);
+    if (sizeErr !== null) {
+        return sizeErr;
     }
     m.qsound.rom.fill(0);
     m.qsound.rom.set(src);
@@ -657,8 +678,8 @@ export function setMouseModel(m, model) {
 
 /**
  * Select PAL or US machine clocks without changing the current display field.
- * Microdrive pair timing follows the CPU clock and the sound card is reset so
- * its PSG divider follows it too.
+ * Microdrive pair timing follows the CPU clock, and the sound card and QIMSI
+ * mouse are reset so their clock dividers follow it too.
  *
  * @param {Machine} m
  * @param {boolean} ntsc
@@ -669,6 +690,18 @@ export function setNtsc(m, ntsc) {
     m.mdv.pairCycles = Math.round(cpuClockHz(m) / microdriveBitRateHz * microdriveBitsPerPair);
     qimsi.reset(m.qimsi, cpuClockHz(m));
     resetQsound(m);
+}
+
+/**
+ * Field rate of the current ZX8301 raster. US chips stay near 50 Hz in
+ * the 312-line monitor field and near 60 Hz when bit 6 of `0x18063` selects
+ * the 262-line TV field.
+ *
+ * @param {Machine} m
+ * @returns {number}
+ */
+export function frameHz(m) {
+    return cpuClockHz(m) / clocksPerFrame(m);
 }
 
 /**
@@ -692,31 +725,6 @@ export function clocksPerFrame(m) {
 }
 
 /**
- * Return the CPU clock selected for this machine instance.
- *
- * @param {Machine} m
- * @returns {number}
- */
-export function cpuClockHz(m) {
-    if (m.ntscMachine) {
-        return cpu.qlNtscClockHz;
-    }
-    return cpu.qlPalClockHz;
-}
-
-/**
- * Field rate of the current ZX8301 raster. US chips stay near 50 Hz in
- * the 312-line monitor field and near 60 Hz when bit 6 of `$18063` selects
- * the 262-line TV field.
- *
- * @param {Machine} m
- * @returns {number}
- */
-export function frameHz(m) {
-    return cpuClockHz(m) / clocksPerFrame(m);
-}
-
-/**
  * Execute one current PAL or NTSC display field and update host outputs.
  *
  * @param {Machine} m
@@ -729,7 +737,7 @@ export function runFrame(m) {
         return;
     }
     if (m.mouseModel === mousePe) {
-        pe.update(m.pe, m.cpuBus);
+        pe.update(m.pe, m.cpuBus, cpu.qdosSysvarBase(m.cpu, m.mem));
     }
     renderVideoTo(m, m.cpu.cycleCount);
     const video = m.video;
@@ -753,13 +761,7 @@ export function runFrame(m) {
     renderVideoTo(m, m.cpu.cycleCount);
     video.fieldHead += 1;
     if (video.fieldHead * 2 >= video.fieldTail) {
-        const remaining = video.fieldTail - video.fieldHead;
-        for (let i = 0; i < remaining; i += 1) {
-            video.fieldEnds[i] = video.fieldEnds[video.fieldHead + i];
-            video.fieldClocks[i] = video.fieldClocks[video.fieldHead + i];
-        }
-        video.fieldHead = 0;
-        video.fieldTail = remaining;
+        compactFieldQueue(video);
     }
     if (m.videoOn && video.ready) {
         const pixels = m.pixels;
@@ -787,42 +789,15 @@ export function enableSound(m, on) {
 }
 
 /**
+ * Change the host sample rate and restart the audio clock at the current
+ * cycle.
+ *
  * @param {Machine} m
  * @param {number} sampleRate
  */
 export function setSoundRate(m, sampleRate) {
     m.sampleRate = sampleRate;
     resetAudioClock(m);
-}
-
-/**
- * Insert a QLAY image. Does not reset the CPU or the MDV select chain.
- *
- * @param {Machine} m
- * @param {number} drive
- * @param {ArrayBuffer | Uint8Array} bytes
- * @param {string} name
- * @returns {string | null}
- */
-export function insertMdv(m, drive, bytes, name) {
-    if (drive < 0 || drive >= microdriveUnitCount) {
-        return "Invalid microdrive.";
-    }
-    let src = bytes;
-    if (!(src instanceof Uint8Array)) {
-        src = new Uint8Array(src);
-    }
-    if (src.byteLength === 0 || src.byteLength > microdriveMaxImageBytes || src.byteLength % qlaySectorSize !== 0) {
-        return "Not a QLAY .mdv image (need a multiple of " + qlaySectorSize + " bytes).";
-    }
-    const cart = emptyCartridge();
-    cart.image = new Uint8Array(src);
-    cart.imageLen = src.byteLength;
-    cart.inserted = true;
-    cart.name = name;
-    m.mdv.cartridges[drive] = cart;
-    microdriveOnMediumChange(m);
-    return null;
 }
 
 /**
@@ -842,6 +817,32 @@ export function insertBlankMdv(m, drive, name) {
 }
 
 /**
+ * Insert a QLAY image. Does not reset the CPU or the MDV select chain.
+ *
+ * @param {Machine} m
+ * @param {number} drive
+ * @param {ArrayBuffer | Uint8Array} bytes
+ * @param {string} name
+ * @returns {string | null}
+ */
+export function insertMdv(m, drive, bytes, name) {
+    if (drive < 0 || drive >= microdriveUnitCount) {
+        return "Invalid microdrive.";
+    }
+    const src = toBytes(bytes);
+    if (src.byteLength === 0 || src.byteLength > microdriveMaxImageBytes || src.byteLength % qlaySectorSize !== 0) {
+        return "Not a QLAY .mdv image (need a multiple of " + qlaySectorSize + " bytes).";
+    }
+    const cart = emptyCartridge();
+    cart.image = new Uint8Array(src);
+    cart.inserted = true;
+    cart.name = name;
+    m.mdv.cartridges[drive] = cart;
+    microdriveCancelTransfer(m);
+    return null;
+}
+
+/**
  * Copy the current cartridge for download and mark that revision as saved.
  *
  * @param {Machine} m
@@ -856,7 +857,7 @@ export function saveMdv(m, drive) {
     if (!cart.inserted) {
         return null;
     }
-    const bytes = cart.image.slice(0, cart.imageLen);
+    const bytes = cart.image.slice();
     cart.modified = false;
     return {name: cart.name, bytes};
 }
@@ -872,7 +873,7 @@ export function ejectMdv(m, drive) {
         return;
     }
     m.mdv.cartridges[drive] = emptyCartridge();
-    microdriveOnMediumChange(m);
+    microdriveCancelTransfer(m);
 }
 
 /**
@@ -899,7 +900,6 @@ export function takeMdvReading(m) {
  *   inserted: boolean,
  *   name: string,
  *   motorOn: boolean,
- *   reading: boolean,
  *   writing: boolean,
  *   modified: boolean,
  *   readCount: number,
@@ -909,13 +909,11 @@ export function takeMdvReading(m) {
 export function mdvInfo(m, drive) {
     const cart = m.mdv.cartridges[drive];
     const motorOn = (m.mdv.selectedMask & (1 << drive)) !== 0;
-    const reading = cart.inserted && motorOn && (m.mdv.readingMask & (1 << drive)) !== 0;
     const writing = cart.inserted && motorOn && (m.mdv.control & microdriveEraseBit) !== 0;
     return {
         inserted: cart.inserted,
         name: cart.name,
         motorOn,
-        reading,
         writing,
         modified: cart.modified,
         readCount: cart.readCount,
@@ -923,15 +921,47 @@ export function mdvInfo(m, drive) {
     };
 }
 
+/**
+ * Free and usable sectors as QDOS `DIR` reports them, read from the
+ * cartridge's sector map: vacant entries are free, and every entry not marked
+ * bad is usable. A blank cartridge not yet formatted by QDOS has no map.
+ *
+ * @param {Machine} m
+ * @param {number} drive
+ * @returns {{free: number, good: number} | null}
+ */
+export function mdvSpace(m, drive) {
+    const cart = m.mdv.cartridges[drive];
+    if (!cart.inserted || (cart.unformatted && !cart.formatVerified)) {
+        return null;
+    }
+    const mapSector = microdriveMapSector(cart);
+    if (mapSector < 0 || cart.image[mapSector + qlayDataOffset] !== qlayMapFileId) {
+        return null;
+    }
+    let free = 0;
+    let good = 0;
+    for (let sector = 0; sector < qlayMapEntries; sector += 1) {
+        const fileId = cart.image[mapSector + qlayDataOffset + sector * 2];
+        if (fileId === qlayFreeFileId) {
+            free += 1;
+        }
+        if (fileId !== qlayBadFileId) {
+            good += 1;
+        }
+    }
+    return {free, good};
+}
+
 /** @returns {MicrodriveCartridge} */
 function emptyCartridge() {
     return {
         image: new Uint8Array(0),
-        imageLen: 0,
         byteOffset: 0,
         inserted: false,
         name: "",
         unformatted: false,
+        formatting: false,
         formatVerifying: false,
         formatVerified: false,
         modified: false,
@@ -947,20 +977,10 @@ function fillRam(m) {
     if (seed === 0) {
         seed = 1;
     }
-    for (let offset = cpu.qdosUserRamBase; offset < m.guestRamTop; offset += 4) {
+    for (let offset = cpu.qdosUserRamBase; offset < m.cpuBus.guestRamTop; offset += 4) {
         seed = xorshift32(seed);
         cpu.writePointerLong(m.mem, offset, seed);
     }
-}
-
-/** @param {number} seed @returns {number} */
-function xorshift32(seed) {
-    let value = seed >>> 0;
-    value ^= value << 13;
-    value >>>= 0;
-    value ^= value >>> 17;
-    value ^= value << 5;
-    return value >>> 0;
 }
 
 /** @param {Machine} m */
@@ -975,115 +995,58 @@ function resetIpc(m) {
     m.ipcKeyboardRowPending = false;
 }
 
-let cachedQdosSecond = -1;
-let cachedQdosClock = 0;
-
 /**
- * Host wall time as a QDOS second, reused until that unix second changes.
- *
- * @returns {number}
- */
-function readQdosClock() {
-    const unix = Math.floor(Date.now() / 1000);
-    if (unix !== cachedQdosSecond) {
-        const zone = -new Date().getTimezoneOffset() * 60;
-        cachedQdosSecond = unix;
-        cachedQdosClock = (unix + qdosUnixEpochDelta + zone) >>> 0;
-    }
-    return cachedQdosClock;
-}
-
-/**
- * @param {Uint8Array} buffer
- * @param {number} maxBytes
- * @param {number} bitPos
- * @param {number} value
- * @param {number} count
- * @returns {number}
- */
-function ipcAppendBits(buffer, maxBytes, bitPos, value, count) {
-    for (let i = 0; i < count; i += 1) {
-        if ((bitPos >> 3) >= maxBytes) {
-            return bitPos;
-        }
-        if (((value >> (count - 1 - i)) & 1) !== 0) {
-            buffer[bitPos >> 3] |= 1 << (7 - (bitPos & 7));
-        }
-        bitPos += 1;
-    }
-    return bitPos;
-}
-
-/**
- * Start sending `bits` from `ipcResponse`, which the caller has already filled.
+ * Write a ZX8302 or ZX8301 register or a QSound card; writes to the real-time
+ * clock and other addresses are ignored.
  *
  * @param {Machine} m
- * @param {number} bits
+ * @param {number} addr
+ * @param {number} d
  */
-function ipcBeginResponse(m, bits) {
-    m.ipcResponseBits = bits;
-    m.ipcResponseSent = 0;
+function writeHwByte(m, addr, d) {
+    if (qsoundContains(m, addr)) {
+        writeQsound(m, addr, d);
+        return;
+    }
+    switch (addr) {
+    case displayControlAddr:
+        renderVideoTo(m, m.cpu.cycleCount);
+        m.displayBlank = (d & displayControlBlankBit) !== 0;
+        m.displayNtsc = m.ntscMachine && (d & displayControlNtscBit) !== 0;
+        m.displayMode8 = (d & displayControlMode8) !== 0;
+        m.displaySecondScreen = (d & displayControlScreenBit) !== 0;
+        break;
+    case ipcReadAddr:
+        microdriveControlWrite(m, d);
+        break;
+    case ipcWriteAddr:
+        ipcWrite(m, d);
+        break;
+    case interruptStatusAddr:
+        if (m.mdv.selectedMask !== 0) {
+            microdriveAdvanceActive(m);
+        }
+        m.theInt = m.theInt & ~(d & interruptClearMask);
+        m.interruptMask = d & interruptEnableMask;
+        break;
+    case microdriveTrack1Addr:
+    case microdriveTrack2Addr:
+        microdriveWriteTrackByte(m, addr, d);
+        break;
+    }
 }
 
 /**
- * @param {Machine} m
- * @returns {number}
- */
-function ipcSerialStatus(m) {
-    let status = 0;
-    if (m.keys.queue.length > 0) {
-        status |= 1;
-    }
-    if (m.beep.active) {
-        status |= 2;
-    }
-    return status;
-}
-
-/**
- * @param {Machine} m
- * @param {Uint8Array} buffer
- * @returns {number}
- */
-function ipcSerialReadKeys(m, buffer) {
-    let count = m.keys.queue.length;
-    if (count > maxIpcQueuedKeys) {
-        count = maxIpcQueuedKeys;
-    }
-    buffer.fill(0);
-    let bitPos = ipcAppendBits(buffer, buffer.length, 0, count, ipcWireReadKeysCountBits);
-    for (let i = 0; i < count; i += 1) {
-        const key = m.keys.queue[i];
-        bitPos = ipcAppendBits(buffer, buffer.length, bitPos, key.modifiers, 4);
-        bitPos = ipcAppendBits(buffer, buffer.length, bitPos, key.code, 8);
-    }
-    m.keys.queue.splice(0, count);
-    return bitPos;
-}
-
-/**
- * @param {Machine} m
- * @param {number} row
- * @returns {number}
- */
-function keyboardRow(m, row) {
-    if (row < 0 || row >= 8) {
-        return 0;
-    }
-    return m.keys.rows[row];
-}
-
-/**
+ * One ZX8302 write to the IPC link. While a response is being sent, each
+ * write clocks out its next bit for the following read. Otherwise the write
+ * shifts in a command bit, and each complete nibble is a command, a keyboard
+ * row argument, or the next sound parameter nibble.
+ *
  * @param {Machine} m
  * @param {number} d
  */
 function ipcWrite(m, d) {
     if (!m.ipcWait) {
-        m.ipcRead = 0;
-        if (m.ipcResponseSent >= m.ipcResponseBits) {
-            m.ipcWait = true;
-            return;
-        }
         const byte = m.ipcResponse[m.ipcResponseSent >> 3];
         const bit = 7 - (m.ipcResponseSent & 7);
         m.ipcRead = ipcReadMarker;
@@ -1110,57 +1073,56 @@ function ipcWrite(m, d) {
     m.ipcReceived = 1;
     if (m.ipcSoundNibblesLeft > 0) {
         if ((m.ipcSoundNibblePos & 1) === 0) {
-            m.ipcSoundDecoded[m.ipcSoundNibblePos >> 1] = (command << 4) & 0xFF;
+            m.ipcSoundDecoded[m.ipcSoundNibblePos >> 1] = command << 4;
         } else {
-            m.ipcSoundDecoded[m.ipcSoundNibblePos >> 1] |= command & ipcWireCommandMask;
+            m.ipcSoundDecoded[m.ipcSoundNibblePos >> 1] |= command;
         }
         m.ipcSoundNibblePos += 1;
         m.ipcSoundNibblesLeft -= 1;
         if (m.ipcSoundNibblesLeft === 0) {
             startBeep(m, m.ipcSoundDecoded);
         }
-        m.ipcWait = true;
         return;
     }
     if (m.ipcKeyboardRowPending) {
         m.ipcKeyboardRowPending = false;
         m.ipcResponse.fill(0);
-        m.ipcResponse[0] = keyboardRow(m, command);
+        // The nibble names the row, and only rows 0-7 exist.
+        if (command < 8) {
+            m.ipcResponse[0] = m.keys.rows[command];
+        }
         ipcBeginResponse(m, ipcWireKeyboardRowResponseBits);
-        m.ipcWait = false;
         return;
     }
-    m.ipcWait = false;
     switch (command) {
     case ipcWireStatusCommand:
+        // Bit 0 reports waiting keys and bit 1 a playing beep.
+        let status = 0;
+        if (m.keys.queue.length > 0) {
+            status |= 1;
+        }
+        if (m.beep.active) {
+            status |= 2;
+        }
         m.ipcResponse.fill(0);
-        m.ipcResponse[0] = ipcSerialStatus(m);
+        m.ipcResponse[0] = status;
         ipcBeginResponse(m, ipcWireStatusResponseBits);
         break;
-    case ipcWireReadKeysCommand: {
-        let bits = ipcSerialReadKeys(m, m.ipcResponse);
-        if (bits === 0) {
-            bits = ipcWireReadKeysCountBits;
-        }
-        ipcBeginResponse(m, bits);
+    case ipcWireReadKeysCommand:
+        ipcBeginResponse(m, ipcSerialReadKeys(m, m.ipcResponse));
         break;
-    }
     case ipcWireKeyboardRowCommand:
         m.ipcKeyboardRowPending = true;
-        m.ipcWait = true;
         break;
     case ipcWireSoundCommand:
         m.ipcSoundNibblesLeft = ipcWireSoundNibbleCount;
         m.ipcSoundNibblePos = 0;
-        m.ipcWait = true;
         break;
     case ipcWireKillSoundCommand:
         renderAudioTo(m, m.cpu.cycleCount);
         stopBeep(m);
-        m.ipcWait = true;
         break;
     case ipcWireNoResponseCommand:
-        m.ipcWait = true;
         break;
     default:
         m.ipcResponse.fill(0);
@@ -1170,47 +1132,63 @@ function ipcWrite(m, d) {
 }
 
 /**
+ * Start sending `bits` from `ipcResponse`, which the caller has already filled.
+ *
  * @param {Machine} m
- * @param {number} addr
- * @param {number} d
+ * @param {number} bits
  */
-function writeHwByte(m, addr, d) {
-    if (qsoundContains(m, addr)) {
-        writeQsound(m, addr, d);
-        return;
-    }
-    switch (addr) {
-    case displayControlAddr:
-        renderVideoTo(m, m.cpu.cycleCount);
-        m.displayBlank = (d & displayControlBlankBit) !== 0;
-        m.displayNtsc = m.ntscMachine && (d & displayControlNtscBit) !== 0;
-        m.displayMode8 = (d & displayControlMode8) !== 0;
-        m.displaySecondScreen = (d & displayControlScreenBit) !== 0;
-        break;
-    case qdosClockBaseAddr:
-    case qdosClockBaseAddr + 1:
-    case qdosClockBaseAddr + 2:
-        break;
-    case ipcReadAddr:
-        microdriveControlWrite(m, d);
-        break;
-    case ipcWriteAddr:
-        ipcWrite(m, d);
-        break;
-    case interruptStatusAddr:
-        if (m.mdv.selectedMask !== 0) {
-            microdriveAdvanceActive(m);
-        }
-        m.theInt = m.theInt & ~(d & interruptClearMask);
-        break;
-    case microdriveTrack1Addr:
-    case microdriveTrack2Addr:
-        microdriveWriteTrackByte(m, addr, d);
-        break;
-    }
+function ipcBeginResponse(m, bits) {
+    m.ipcResponseBits = bits;
+    m.ipcResponseSent = 0;
+    m.ipcWait = false;
 }
 
 /**
+ * Answer the IPC read-keys command: a 4-bit count, then 4 modifier and 8 code
+ * bits for each of up to seven queued keys, which leave the queue. Returns the
+ * response length in bits.
+ *
+ * @param {Machine} m
+ * @param {Uint8Array} buffer
+ * @returns {number}
+ */
+function ipcSerialReadKeys(m, buffer) {
+    const count = Math.min(m.keys.queue.length, maxIpcQueuedKeys);
+    buffer.fill(0);
+    let bitPos = ipcAppendBits(buffer, 0, count, ipcWireReadKeysCountBits);
+    for (let i = 0; i < count; i += 1) {
+        const key = m.keys.queue[i];
+        bitPos = ipcAppendBits(buffer, bitPos, key.modifiers, 4);
+        bitPos = ipcAppendBits(buffer, bitPos, key.code, 8);
+    }
+    m.keys.queue.splice(0, count);
+    return bitPos;
+}
+
+/**
+ * Append the low `count` bits of `value` to `buffer` from `bitPos`, most
+ * significant first, and return the next bit position.
+ *
+ * @param {Uint8Array} buffer
+ * @param {number} bitPos
+ * @param {number} value
+ * @param {number} count
+ * @returns {number}
+ */
+function ipcAppendBits(buffer, bitPos, value, count) {
+    for (let i = 0; i < count; i += 1) {
+        if (((value >> (count - 1 - i)) & 1) !== 0) {
+            buffer[bitPos >> 3] |= 1 << (7 - (bitPos & 7));
+        }
+        bitPos += 1;
+    }
+    return bitPos;
+}
+
+/**
+ * Read a ZX8302 register, a QSound card, or the QIMSI window. The real-time
+ * clock reads host time, and other hardware addresses read 0.
+ *
  * @param {Machine} m
  * @param {number} addr
  * @returns {number}
@@ -1223,28 +1201,23 @@ function readHwByte(m, addr) {
     case qdosClockBaseAddr:
     case qdosClockBaseAddr + 1:
     case qdosClockBaseAddr + 2:
-    case qdosClockBaseAddr + 3: {
+    case qdosClockBaseAddr + 3:
         const t = readQdosClock();
         const shift = (qdosClockBaseAddr + 3 - addr) * 8;
         return (t >>> shift) & 0xFF;
-    }
     case ipcReadAddr:
+        let byte = ipcReadIdleValue;
         if (m.ipcRead !== 0) {
-            let retByte = m.ipcRead & 0xFF;
+            byte = m.ipcRead & 0xFF;
             m.ipcRead >>>= 8;
             if (m.ipcRead === ipcReadDoneMarker) {
                 m.ipcRead = 0;
             }
-            if (microdriveReportsStatus(m)) {
-                retByte |= microdriveStatusBits(m);
-            }
-            return retByte;
         }
-        let idle = ipcReadIdleValue;
         if (microdriveReportsStatus(m)) {
-            idle |= microdriveStatusBits(m);
+            byte |= microdriveStatusBits(m);
         }
-        return idle;
+        return byte;
     case interruptStatusAddr:
         if (m.mdv.selectedMask !== 0) {
             microdriveAdvanceActive(m);
@@ -1259,6 +1232,24 @@ function readHwByte(m, addr) {
         }
         return 0;
     }
+}
+
+let cachedQdosSecond = -1;
+let cachedQdosClock = 0;
+
+/**
+ * Host wall time as a QDOS second, reused until that unix second changes.
+ *
+ * @returns {number}
+ */
+function readQdosClock() {
+    const unix = Math.floor(Date.now() / 1000);
+    if (unix !== cachedQdosSecond) {
+        const zone = -new Date().getTimezoneOffset() * 60;
+        cachedQdosSecond = unix;
+        cachedQdosClock = (unix + qdosUnixEpochDelta + zone) >>> 0;
+    }
+    return cachedQdosClock;
 }
 
 /** @param {Machine} m */
@@ -1277,7 +1268,14 @@ function resetVideo(m) {
     m.frameNtsc = false;
 }
 
-/** @param {Machine} m @param {number} time */
+/**
+ * Decode the display up to CPU cycle `time` as the beam would, so screen
+ * writes during a field land where the hardware shows them. Each finished
+ * field becomes `completed` and queues its end for frame pacing.
+ *
+ * @param {Machine} m
+ * @param {number} time
+ */
 function renderVideoTo(m, time) {
     if (!m.romLoaded) {
         return;
@@ -1315,10 +1313,7 @@ function renderVideoTo(m, time) {
         video.ready = true;
         if (video.fieldTail === video.fieldEnds.length) {
             if (video.fieldHead > 0) {
-                video.fieldEnds.copyWithin(0, video.fieldHead, video.fieldTail);
-                video.fieldClocks.copyWithin(0, video.fieldHead, video.fieldTail);
-                video.fieldTail -= video.fieldHead;
-                video.fieldHead = 0;
+                compactFieldQueue(video);
             } else {
                 const capacity = video.fieldEnds.length * 2;
                 const ends = new Float64Array(capacity);
@@ -1335,10 +1330,20 @@ function renderVideoTo(m, time) {
         video.fieldStart = video.fieldEnd;
         video.fieldEnd = 0;
         video.chunk = 0;
-        video.flashOn = false;
-        video.flashBackground = 0;
         m.flashFrame = (m.flashFrame + 1) & 63;
     }
+}
+
+/**
+ * Move the queued field ends that are still ahead down to the start.
+ *
+ * @param {Machine["video"]} video
+ */
+function compactFieldQueue(video) {
+    video.fieldEnds.copyWithin(0, video.fieldHead, video.fieldTail);
+    video.fieldClocks.copyWithin(0, video.fieldHead, video.fieldTail);
+    video.fieldTail -= video.fieldHead;
+    video.fieldHead = 0;
 }
 
 /** @param {Machine} m */
@@ -1360,7 +1365,16 @@ function decodeScreen(m) {
     m.frameVersion += 1;
 }
 
-/** @param {Machine} m @param {Uint8Array} pixels @param {number} start @param {number} end */
+/**
+ * Decode screen memory for pixels `start` to `end` of the field in the current
+ * mode, bank, blanking, and flash phase. A span that starts a line resets the
+ * mode-8 flash state.
+ *
+ * @param {Machine} m
+ * @param {Uint8Array} pixels
+ * @param {number} start
+ * @param {number} end
+ */
 function decodeScreenSpan(m, pixels, start, end) {
     if (start % frameW === 0) {
         m.video.flashOn = false;
@@ -1402,6 +1416,10 @@ function decodeScreenSpan(m, pixels, start, end) {
 }
 
 /**
+ * Decode mode-8 pixels in the flash phase that hides flashing text: from a
+ * pixel with its flash bit set to the next one, the line shows the first
+ * pixel's colour.
+ *
  * @param {Machine} m
  * @param {number} src
  * @param {Uint8Array} pixels
@@ -1411,8 +1429,7 @@ function decodeScreenSpan(m, pixels, start, end) {
 function decodeMode8Flash(m, src, pixels, start, end) {
     const mem = m.mem;
     const video = m.video;
-    let di = start;
-    while (di < end) {
+    for (let di = start; di < end; di += 8) {
         const first = mem[src];
         const second = mem[src + 1];
         for (let shift = 6; shift >= 0; shift -= 2) {
@@ -1432,15 +1449,19 @@ function decodeMode8Flash(m, src, pixels, start, end) {
             if (m.displayBlank) {
                 color = 0;
             }
-            pixels[di] = color;
-            pixels[di + 1] = color;
-            di += 2;
+            const at = di + 6 - shift;
+            pixels[at] = color;
+            pixels[at + 1] = color;
         }
         src += 2;
     }
 }
 
 /**
+ * Start an IPC BEEP from its 8-byte parameter block: pitch 1 and pitch 2, the
+ * 15-bit time between pitch steps (grad_x) and duration, then nibbles for the
+ * signed pitch step (grad_y) and wrap count, and for random and fuzz.
+ *
  * @param {Machine} m
  * @param {Uint8Array} decoded
  */
@@ -1451,33 +1472,27 @@ function startBeep(m, decoded) {
     if (grdY > soundSignedNibbleMax) {
         grdY -= soundSignedNibbleBias;
     }
-    const randomState = beep.randomState;
+    const grdX = decoded[2] | ((decoded[3] & 0x7F) << 8);
+    const length = decoded[4] | ((decoded[5] & 0x7F) << 8);
     beep.active = true;
     beep.pitch1 = decoded[0];
     beep.pitch = beep.pitch1;
     beep.pitch2 = decoded[1];
-    beep.grdX = decoded[2] | ((decoded[3] & 0x7F) << 8);
     beep.grdY = grdY;
-    beep.length = decoded[4] | ((decoded[5] & 0x7F) << 8);
-    beep.wrap = decoded[6] & soundNibbleMax;
     beep.randomAmount = (decoded[7] >> 4) & soundNibbleMax;
     beep.fuzzAmount = decoded[7] & soundNibbleMax;
     beep.random = 0;
     beep.fuzz = 0;
-    beep.randomState = randomState;
-    beep.left = Math.floor(beep.length * m.sampleRate / soundIpcTickHz);
-    beep.pitchSpan = Math.floor(beep.grdX * m.sampleRate / soundIpcTickHz);
-    beep.pitchLeft = beep.pitchSpan;
-    beep.wrapCount = beep.wrap;
+    beep.left = Math.floor(length * m.sampleRate / soundIpcTickHz);
+    beep.pitchSpan = Math.floor(grdX * m.sampleRate / soundIpcTickHz);
+    beep.wrapCount = decoded[6] & soundNibbleMax;
     beep.direction = 1;
     beep.cyclePoint = 0;
     beep.waveState = 0;
     if (beep.grdY < 0) {
         beep.pitch = beep.pitch2;
     }
-    if (beep.left !== 0 && (beep.pitchLeft === 0 || beep.pitchLeft > beep.left)) {
-        beep.pitchLeft = beep.left;
-    }
+    startPitchStep(beep);
     if (beep.fuzzAmount > soundSignedNibbleMax) {
         beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
     }
@@ -1492,36 +1507,6 @@ function stopBeep(m) {
     m.beep.cyclePoint = 0;
 }
 
-/**
- * @param {Machine} m
- * @param {number} untilCycle
- */
-function renderAudioTo(m, untilCycle) {
-    const chunk = m.audio;
-    while (m.sampleEndT <= untilCycle) {
-        const period = m.sampleEndT - m.sampleT;
-        const collect = m.soundOn && chunk.n < audioCap;
-        if (collect) {
-            ay.runTo(m.qsound.ay, m.sampleEndT);
-            chunk.beep[chunk.n] = renderBeepSample(m);
-            ay.takeSample(m.qsound.ay, period, chunk.a, chunk.b, chunk.c, chunk.n);
-            chunk.fm[chunk.n] = renderFmSample(m);
-            chunk.n += 1;
-        } else {
-            ay.runSilent(m.qsound.ay, m.sampleEndT);
-            renderBeepSample(m);
-            renderFmSample(m);
-        }
-        nextSampleWindow(m);
-    }
-    if (m.soundOn && chunk.n < audioCap) {
-        ay.runTo(m.qsound.ay, untilCycle);
-    } else {
-        ay.runSilent(m.qsound.ay, untilCycle);
-        ay.seek(m.qsound.ay, m.qsound.ay.t);
-    }
-}
-
 /** @param {Machine} m */
 function resetAudioClock(m) {
     const now = m.cpu.cycleCount;
@@ -1530,150 +1515,6 @@ function resetAudioClock(m) {
     m.sampleT = now;
     m.sampleEndT = now;
     nextSampleWindow(m);
-}
-
-/** @param {Machine} m */
-function nextSampleWindow(m) {
-    m.sampleT = m.sampleEndT;
-    m.sampleAcc += cpuClockHz(m);
-    const step = Math.floor(m.sampleAcc / m.sampleRate);
-    m.sampleAcc -= step * m.sampleRate;
-    m.sampleEndT += step;
-}
-
-/** @param {Machine} m @returns {number} */
-function renderFmSample(m) {
-    if (m.qsound.model !== qsound2) {
-        return 0;
-    }
-    return fm.takeSample(m.qsound.fm, m.sampleRate);
-}
-
-/**
- * Advance the complete ZX8302 sound descriptor by one output sample.
- *
- * @param {Machine} m
- * @returns {number}
- */
-function renderBeepSample(m) {
-    const beep = m.beep;
-    if (!beep.active || beep.left < 0) {
-        beep.active = false;
-        beep.waveState = 0;
-        beep.cyclePoint = 0;
-        return 0;
-    }
-    if (beep.pitchLeft < 0) {
-        updateBeepPitch(m, beep);
-        beep.pitchLeft = beep.pitchSpan;
-        if (beep.left !== 0 && (beep.pitchLeft === 0 || beep.pitchLeft > beep.left)) {
-            beep.pitchLeft = beep.left;
-        }
-    }
-    if (beep.pitchLeft > 1) {
-        beep.pitchLeft -= 1;
-        if (beep.left !== 0) {
-            beep.left -= 1;
-        }
-    } else if (beep.pitchLeft > 0) {
-        if (beep.left > 1) {
-            beep.left -= 1;
-        } else if (beep.left !== 0) {
-            beep.left = -1;
-        }
-        beep.pitchLeft = -1;
-    }
-    if (beep.waveState === 0) {
-        beep.waveState = -1;
-        if (beep.fuzzAmount > soundSignedNibbleMax) {
-            beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
-            beep.halfCycle = beepHalfSampleCount(m, beep);
-        }
-        beep.cyclePoint = 0;
-    }
-    const sample = beep.waveState;
-    beep.cyclePoint += 1;
-    if (beep.cyclePoint >= beep.halfCycle) {
-        beep.cyclePoint = Math.min(beep.cyclePoint - beep.halfCycle, 1);
-        beep.waveState *= -1;
-        if (beep.fuzzAmount > soundSignedNibbleMax) {
-            beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
-            beep.halfCycle = beepHalfSampleCount(m, beep);
-        }
-        return sample * (1 - 2 * beep.cyclePoint);
-    }
-    return sample;
-}
-
-/**
- * Step the IPC pitch. Wrap 0 holds the far end of the sweep; wrap 1-14 restarts; wrap 15 loops.
- *
- * @param {Machine} m
- * @param {Machine["beep"]} beep
- */
-function updateBeepPitch(m, beep) {
-    const change = beep.grdY;
-    if (change === -soundPitchWrapDelta) {
-        beep.pitch = (beep.pitch - soundPitchWrapDelta) & 0xFF;
-    } else if (change !== 0 && beep.direction !== 0) {
-        const step = change * beep.direction;
-        const tryPitch = beep.pitch + step;
-        const lo = Math.min(beep.pitch1, beep.pitch2);
-        const hi = Math.max(beep.pitch1, beep.pitch2);
-        if (tryPitch >= lo && tryPitch <= hi) {
-            beep.pitch = tryPitch;
-        } else if (beep.wrapCount > 0) {
-            beep.pitch = beep.pitch1;
-            if (step < 0) {
-                beep.pitch = beep.pitch2;
-            }
-            if (beep.wrapCount !== soundNibbleMax) {
-                beep.wrapCount -= 1;
-            }
-        } else {
-            beep.pitch = lo;
-            if (step > 0) {
-                beep.pitch = hi;
-            }
-            beep.direction = 0;
-        }
-    }
-    if (beep.randomAmount > soundSignedNibbleMax) {
-        beep.random = activeRandomNibble(beep, beep.randomAmount);
-    }
-    beep.halfCycle = beepHalfSampleCount(m, beep);
-    if (beep.cyclePoint + 1 < beep.halfCycle) {
-        beep.cyclePoint += 1;
-    } else {
-        beep.cyclePoint -= 1;
-    }
-}
-
-/** @param {Machine} m @param {Machine["beep"]} beep @returns {number} */
-function beepHalfSampleCount(m, beep) {
-    let pitch = beep.pitch + beep.random + beep.fuzz;
-    if (pitch < 0) {
-        pitch = 0;
-    }
-    const units = pitch * soundPitchFractionScale + soundPitchBaseUnits;
-    return Math.max(m.sampleRate * units / soundPitchDivisor, 1);
-}
-
-/** @param {Machine["beep"]} beep @param {number} value @returns {number} */
-function activeRandomNibble(beep, value) {
-    let state = beep.randomState;
-    if (state === 0) {
-        state = 1;
-    }
-    state = xorshift32(state);
-    beep.randomState = state;
-    const bitCount = (value & soundSignedNibbleMax) + 1;
-    return state & ((1 << bitCount) - 1);
-}
-
-/** @param {Machine} m @param {number} addr @returns {boolean} */
-function qsoundContains(m, addr) {
-    return m.qsound.model !== qsoundOff && addr >= qsoundBase && addr < qsoundBase + qsoundBytes;
 }
 
 /** @param {Machine} m */
@@ -1691,21 +1532,13 @@ function resetQsound(m) {
     qsound.pia.fill(0);
     qsound.dataDirectionA = 0;
     qsound.dataDirectionB = 0;
-    ay.configure(qsound.ay, qsoundTickCycles(m), qsound.model === qsound2, m.cpu.cycleCount);
-    fm.reset(qsound.fm);
-}
-
-/**
- * Original QSound follows a fixed E-clock divider; QSound2's PSG follows 125 kHz.
- *
- * @param {Machine} m
- * @returns {number}
- */
-function qsoundTickCycles(m) {
-    if (m.qsound.model === qsound2) {
-        return cpuClockHz(m) / qsound2SsgTickHz;
+    // Original QSound follows a fixed E-clock divider; QSound2's PSG follows 125 kHz.
+    let tickCycles = qsoundAyTickCycles;
+    if (qsound.model === qsound2) {
+        tickCycles = cpuClockHz(m) / qsound2SsgTickHz;
     }
-    return qsoundAyTickCycles;
+    ay.configure(qsound.ay, tickCycles, qsound.model === qsound2, m.cpu.cycleCount);
+    fm.reset(qsound.fm);
 }
 
 /**
@@ -1735,7 +1568,14 @@ function endQsoundAccess(m) {
     }
 }
 
-/** @param {Machine} m @param {number} addr @returns {number} */
+/**
+ * Read the QSound card: its ROM, the MC6821 PIA registers with port A on the
+ * PSG bus, or QSound2's direct ports.
+ *
+ * @param {Machine} m
+ * @param {number} addr
+ * @returns {number}
+ */
 function readQsound(m, addr) {
     if (addr < qsoundPiaBase) {
         return m.qsound.rom[addr - qsoundBase];
@@ -1762,7 +1602,14 @@ function readQsound(m, addr) {
     }
 }
 
-/** @param {Machine} m @param {number} addr @param {number} value */
+/**
+ * Write the QSound card's MC6821 PIA registers, then drive the PSG bus from the
+ * port pins.
+ *
+ * @param {Machine} m
+ * @param {number} addr
+ * @param {number} value
+ */
 function writeQsound(m, addr, value) {
     if (!qsoundPiaContains(m, addr)) {
         return;
@@ -1823,9 +1670,6 @@ function readQsoundPortA(m) {
  */
 function updateQsoundPins(m) {
     const qsound = m.qsound;
-    if (qsound.model === qsoundOff) {
-        return;
-    }
     let select = qsound.pia[2] & qsound.dataDirectionB & qsoundSelectMask;
     let data = qsound.pia[0] | (~qsound.dataDirectionA & 0xFF);
     if (qsound.model === qsound2) {
@@ -1871,7 +1715,20 @@ function updateQsoundPins(m) {
     ay.writeReg(qsound.ay, reg, data & qsoundRegisterMasks[reg]);
 }
 
-/** @param {Machine} m @param {number} addr @returns {boolean} */
+/**
+ * @param {Machine} m
+ * @param {number} addr
+ * @returns {boolean}
+ */
+function qsoundContains(m, addr) {
+    return m.qsound.model !== qsoundOff && addr >= qsoundBase && addr < qsoundBase + qsoundBytes;
+}
+
+/**
+ * @param {Machine} m
+ * @param {number} addr
+ * @returns {boolean}
+ */
 function qsoundPiaContains(m, addr) {
     if (addr < qsoundPiaBase) {
         return false;
@@ -1882,11 +1739,15 @@ function qsoundPiaContains(m, addr) {
     return addr < qsoundPiaBase + qsound2PiaBytes;
 }
 
-/** @param {Machine} m @param {number} addr @returns {number} */
+/**
+ * Read QSound2's direct YM2203 ports: with address bit 1 clear the status and
+ * BUSY, with it set the selected PSG register.
+ *
+ * @param {Machine} m
+ * @param {number} addr
+ * @returns {number}
+ */
 function readQsound2Direct(m, addr) {
-    if (m.qsound.model !== qsound2 || addr < qsound2DirectBase) {
-        return 0;
-    }
     if (((addr - qsound2DirectBase) & 2) === 0) {
         renderAudioTo(m, m.cpu.cycleCount);
         let status = fm.readStatus(m.qsound.fm);
@@ -1902,26 +1763,32 @@ function readQsound2Direct(m, addr) {
     return 0;
 }
 
-/** @param {Machine} m @param {number} addr @param {number} value */
+/**
+ * Write QSound2's direct YM2203 ports: with address bit 1 clear select a
+ * register, with it set write the selected one and start BUSY.
+ *
+ * @param {Machine} m
+ * @param {number} addr
+ * @param {number} value
+ */
 function writeQsound2Direct(m, addr, value) {
-    if (m.qsound.model !== qsound2 || addr < qsound2DirectBase) {
-        return;
-    }
     if (((addr - qsound2DirectBase) & 2) === 0) {
-        if (value >= 0x2D && value <= 0x2F) {
+        // Writing a prescaler address changes the SSG clock at once.
+        const prescaler = value >= 0x2D && value <= 0x2F;
+        if (prescaler) {
             renderAudioTo(m, m.cpu.cycleCount);
         }
         m.qsound.selectedRegister = value;
         m.qsound.addressValid = true;
         fm.writeAddress(m.qsound.fm, value);
-        if (value >= 0x2D && value <= 0x2F) {
+        if (prescaler) {
             const tickT = cpuClockHz(m) / fm.getSsgTickRate(m.qsound.fm);
             ay.setTickPeriod(m.qsound.ay, tickT, m.cpu.cycleCount);
         }
         return;
     }
     renderAudioTo(m, m.cpu.cycleCount);
-    markQsoundBusy(m);
+    m.qsound.busyUntil = m.cpu.cycleCount + fm.getBusyCycles(m.qsound.fm, cpuClockHz(m));
     const reg = m.qsound.selectedRegister;
     if (reg < 16) {
         ay.writeReg(m.qsound.ay, reg, value & qsoundRegisterMasks[reg]);
@@ -1930,11 +1797,229 @@ function writeQsound2Direct(m, addr, value) {
     fm.writeReg(m.qsound.fm, reg, value);
 }
 
-/** @param {Machine} m */
-function markQsoundBusy(m) {
-    if (m.qsound.model === qsound2) {
-        m.qsound.busyUntil = m.cpu.cycleCount + fm.getBusyCycles(m.qsound.fm, cpuClockHz(m));
+/**
+ * Advance the beeper, PSG, and FM chips to CPU cycle `untilCycle`, collecting
+ * a host sample at each sample boundary while sound is on and the chunk has
+ * room.
+ *
+ * @param {Machine} m
+ * @param {number} untilCycle
+ */
+function renderAudioTo(m, untilCycle) {
+    const chunk = m.audio;
+    while (m.sampleEndT <= untilCycle) {
+        const period = m.sampleEndT - m.sampleT;
+        const collect = m.soundOn && chunk.n < audioCap;
+        if (collect) {
+            ay.runTo(m.qsound.ay, m.sampleEndT);
+            chunk.beep[chunk.n] = renderBeepSample(m);
+            ay.takeSample(m.qsound.ay, period, chunk.a, chunk.b, chunk.c, chunk.n);
+            chunk.fm[chunk.n] = renderFmSample(m);
+            chunk.n += 1;
+        } else {
+            ay.runSilent(m.qsound.ay, m.sampleEndT);
+            renderBeepSample(m);
+            renderFmSample(m);
+        }
+        nextSampleWindow(m);
     }
+    if (m.soundOn && chunk.n < audioCap) {
+        ay.runTo(m.qsound.ay, untilCycle);
+    } else {
+        ay.runSilent(m.qsound.ay, untilCycle);
+        ay.seek(m.qsound.ay, m.qsound.ay.t);
+    }
+}
+
+/** @param {Machine} m */
+function nextSampleWindow(m) {
+    m.sampleT = m.sampleEndT;
+    m.sampleAcc += cpuClockHz(m);
+    const step = Math.floor(m.sampleAcc / m.sampleRate);
+    m.sampleAcc -= step * m.sampleRate;
+    m.sampleEndT += step;
+}
+
+/**
+ * Return the CPU clock selected for this machine instance.
+ *
+ * @param {Machine} m
+ * @returns {number}
+ */
+export function cpuClockHz(m) {
+    if (m.ntscMachine) {
+        return cpu.qlNtscClockHz;
+    }
+    return cpu.qlPalClockHz;
+}
+
+/**
+ * @param {Machine} m
+ * @returns {number}
+ */
+function renderFmSample(m) {
+    if (m.qsound.model !== qsound2) {
+        return 0;
+    }
+    return fm.takeSample(m.qsound.fm, m.sampleRate);
+}
+
+/**
+ * Advance the complete ZX8302 sound descriptor by one output sample.
+ *
+ * @param {Machine} m
+ * @returns {number}
+ */
+function renderBeepSample(m) {
+    const beep = m.beep;
+    if (!beep.active || beep.left < 0) {
+        beep.active = false;
+        beep.waveState = 0;
+        beep.cyclePoint = 0;
+        return 0;
+    }
+    if (beep.pitchLeft < 0) {
+        updateBeepPitch(m, beep);
+        startPitchStep(beep);
+    }
+    if (beep.pitchLeft > 1) {
+        beep.pitchLeft -= 1;
+        if (beep.left !== 0) {
+            beep.left -= 1;
+        }
+    } else if (beep.pitchLeft > 0) {
+        if (beep.left > 1) {
+            beep.left -= 1;
+        } else if (beep.left !== 0) {
+            beep.left = -1;
+        }
+        beep.pitchLeft = -1;
+    }
+    if (beep.waveState === 0) {
+        beep.waveState = -1;
+        applyFuzz(m, beep);
+        beep.cyclePoint = 0;
+    }
+    const sample = beep.waveState;
+    beep.cyclePoint += 1;
+    if (beep.cyclePoint >= beep.halfCycle) {
+        beep.cyclePoint = Math.min(beep.cyclePoint - beep.halfCycle, 1);
+        beep.waveState *= -1;
+        applyFuzz(m, beep);
+        return sample * (1 - 2 * beep.cyclePoint);
+    }
+    return sample;
+}
+
+/**
+ * Count the samples to the next pitch step, ending no later than a timed
+ * beep.
+ *
+ * @param {Machine["beep"]} beep
+ */
+function startPitchStep(beep) {
+    beep.pitchLeft = beep.pitchSpan;
+    if (beep.left !== 0 && (beep.pitchLeft === 0 || beep.pitchLeft > beep.left)) {
+        beep.pitchLeft = beep.left;
+    }
+}
+
+/**
+ * Draw a new fuzz offset and retime the half cycle while fuzz is on.
+ *
+ * @param {Machine} m
+ * @param {Machine["beep"]} beep
+ */
+function applyFuzz(m, beep) {
+    if (beep.fuzzAmount <= soundSignedNibbleMax) {
+        return;
+    }
+    beep.fuzz = activeRandomNibble(beep, beep.fuzzAmount);
+    beep.halfCycle = beepHalfSampleCount(m, beep);
+}
+
+/**
+ * Step the IPC pitch. Wrap 0 holds the far end of the sweep; wrap 1-14 restarts; wrap 15 loops.
+ *
+ * @param {Machine} m
+ * @param {Machine["beep"]} beep
+ */
+function updateBeepPitch(m, beep) {
+    const change = beep.grdY;
+    if (change === -soundPitchWrapDelta) {
+        beep.pitch = (beep.pitch - soundPitchWrapDelta) & 0xFF;
+    } else if (change !== 0 && beep.direction !== 0) {
+        const step = change * beep.direction;
+        const tryPitch = beep.pitch + step;
+        const lo = Math.min(beep.pitch1, beep.pitch2);
+        const hi = Math.max(beep.pitch1, beep.pitch2);
+        if (tryPitch >= lo && tryPitch <= hi) {
+            beep.pitch = tryPitch;
+        } else if (beep.wrapCount > 0) {
+            beep.pitch = beep.pitch1;
+            if (step < 0) {
+                beep.pitch = beep.pitch2;
+            }
+            if (beep.wrapCount !== soundNibbleMax) {
+                beep.wrapCount -= 1;
+            }
+        } else {
+            beep.pitch = lo;
+            if (step > 0) {
+                beep.pitch = hi;
+            }
+            beep.direction = 0;
+        }
+    }
+    if (beep.randomAmount > soundSignedNibbleMax) {
+        beep.random = activeRandomNibble(beep, beep.randomAmount);
+    }
+    beep.halfCycle = beepHalfSampleCount(m, beep);
+    if (beep.cyclePoint + 1 < beep.halfCycle) {
+        beep.cyclePoint += 1;
+    } else {
+        beep.cyclePoint -= 1;
+    }
+}
+
+/**
+ * @param {Machine} m
+ * @param {Machine["beep"]} beep
+ * @returns {number}
+ */
+function beepHalfSampleCount(m, beep) {
+    const pitch = Math.max(beep.pitch + beep.random + beep.fuzz, 0);
+    const units = pitch * soundPitchFractionScale + soundPitchBaseUnits;
+    return Math.max(m.sampleRate * units / soundPitchDivisor, 1);
+}
+
+/**
+ * Next pseudo-random value for the beeper's random or fuzz step, as wide as
+ * the low three bits of `value` plus one.
+ *
+ * @param {Machine["beep"]} beep
+ * @param {number} value
+ * @returns {number}
+ */
+function activeRandomNibble(beep, value) {
+    // Seeded with 1, and xorshift never returns to 0.
+    const state = xorshift32(beep.randomState);
+    beep.randomState = state;
+    const bitCount = (value & soundSignedNibbleMax) + 1;
+    return state & ((1 << bitCount) - 1);
+}
+
+/**
+ * @param {number} seed
+ * @returns {number}
+ */
+function xorshift32(seed) {
+    let value = seed >>> 0;
+    value ^= value << 13;
+    value >>>= 0;
+    value ^= value >>> 17;
+    value ^= value << 5;
+    return value >>> 0;
 }
 
 /**
@@ -1957,194 +2042,31 @@ function microdriveReportsStatus(m) {
 }
 
 /**
- * @param {Machine} m
- * @returns {number}
- */
-function microdriveActiveUnit(m) {
-    for (let i = 0; i < microdriveUnitCount; i += 1) {
-        const mask = 1 << i;
-        if ((m.mdv.selectedMask & mask) !== 0 && m.mdv.cartridges[i].inserted) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-/** @param {Machine} m */
-function microdriveResetHardware(m) {
-    m.mdv.selectedMask = 0;
-    m.mdv.control = microdriveSelectClockBit | microdriveReadWriteBit;
-    microdriveOnMediumChange(m);
-}
-
-/**
- * Keep the select chain; only drop in-flight track bytes for the new medium.
+ * Cancel the transfer in flight, a format included, and restart the tape
+ * timing. The select chain is kept, so a cartridge change leaves its drive
+ * selected. A cartridge whose format stops unfinished reads with the ordinary
+ * layout and can be formatted again.
  *
  * @param {Machine} m
  */
-function microdriveOnMediumChange(m) {
+function microdriveCancelTransfer(m) {
     m.mdv.readingMask = 0;
     m.mdv.latchedByteOffset = 0;
     m.mdv.latchedTracks = 0;
     m.mdv.transmitFullUntil = 0;
+    if (m.mdv.formattingUnit >= 0) {
+        const cartridge = m.mdv.cartridges[m.mdv.formattingUnit];
+        cartridge.formatting = false;
+        cartridge.formatVerifying = false;
+        cartridge.formatVerified = false;
+    }
     m.mdv.formattingUnit = -1;
     m.mdv.formatWriteOffset = 0;
-    m.mdv.formatBurstBytes = 0;
+    m.mdv.burstBytes = 0;
     m.mdv.gapActive = false;
+    m.mdv.silentPairs = 0;
     m.mdv.dataReady = false;
     m.mdv.cycleAnchor = m.cpu.cycleCount;
-}
-
-/**
- * @param {MicrodriveCartridge} cartridge
- * @param {number} byteOffset
- * @returns {boolean}
- */
-function microdriveOffsetIsGap(cartridge, byteOffset) {
-    if (cartridge.imageLen === 0) {
-        return false;
-    }
-    const sectorOffset = byteOffset % qlaySectorSize;
-    if (sectorOffset < microdriveHeaderGapEndOffset) {
-        return true;
-    }
-    if (sectorOffset >= qlayBlockPreambleOffset && sectorOffset < qlayBlockGapEndOffset) {
-        return true;
-    }
-    if (cartridge.unformatted && !cartridge.formatVerified) {
-        return sectorOffset >= qlayFormatGapOffset;
-    }
-    return sectorOffset >= qlayGapOffset;
-}
-
-/**
- * @param {MicrodriveCartridge} cartridge
- * @param {number} byteOffset
- * @returns {boolean}
- */
-function microdriveOffsetIsPreamble(cartridge, byteOffset) {
-    if (cartridge.imageLen === 0) {
-        return false;
-    }
-    const sectorOffset = byteOffset % qlaySectorSize;
-    if (sectorOffset >= microdriveHeaderGapEndOffset && sectorOffset < qlaySectorHeaderOffset) {
-        return true;
-    }
-    if (sectorOffset >= qlayBlockGapEndOffset && sectorOffset < qlayBlockHeaderOffset) {
-        return true;
-    }
-    if (cartridge.unformatted && !cartridge.formatVerified) {
-        return false;
-    }
-    return sectorOffset >= qlayDataPreambleOffset && sectorOffset < qlayDataOffset;
-}
-
-/**
- * Change one cartridge byte and retain that change for a later download.
- *
- * @param {MicrodriveCartridge} cartridge
- * @param {number} offset
- * @param {number} value
- */
-function microdriveWriteImageByte(cartridge, offset, value) {
-    if (offset < 0 || offset >= cartridge.imageLen) {
-        return;
-    }
-    cartridge.image[offset] = value;
-    cartridge.modified = true;
-}
-
-/**
- * Apply the active erase line to both interleaved track bytes at the head.
- *
- * @param {MicrodriveCartridge} cartridge
- */
-function microdriveEraseCurrentPair(cartridge) {
-    if (cartridge.imageLen === 0) {
-        return;
-    }
-    microdriveWriteImageByte(cartridge, cartridge.byteOffset, 0);
-    let second = cartridge.byteOffset + 1;
-    if (second >= cartridge.imageLen) {
-        second = 0;
-    }
-    microdriveWriteImageByte(cartridge, second, 0);
-}
-
-/**
- * @param {Machine} m
- */
-function microdriveRaiseGapInterrupt(m) {
-    m.theInt |= microdriveGapInterruptBit;
-    cpu.requestInterrupt(m.cpu, 2);
-}
-
-/** @param {Machine} m */
-function microdriveAdvanceActive(m) {
-    const unit = microdriveActiveUnit(m);
-    if (unit < 0) {
-        m.mdv.dataReady = false;
-        if (m.mdv.selectedMask === 0) {
-            m.mdv.cycleAnchor = m.cpu.cycleCount;
-            m.mdv.gapActive = false;
-            return;
-        }
-        // Treat sustained silence as a gap without interrupting a slow select chain.
-        if (m.cpu.cycleCount - m.mdv.cycleAnchor < m.mdv.pairCycles * microdriveEmptyGapPairs) {
-            return;
-        }
-        if (!m.mdv.gapActive) {
-            m.mdv.gapActive = true;
-            microdriveRaiseGapInterrupt(m);
-        }
-        return;
-    }
-    const cartridge = m.mdv.cartridges[unit];
-    if (cartridge.imageLen === 0) {
-        m.mdv.cycleAnchor = m.cpu.cycleCount;
-        return;
-    }
-    if (m.cpu.cycleCount < m.mdv.cycleAnchor) {
-        return;
-    }
-    if (
-        m.mdv.formattingUnit === unit &&
-        (m.mdv.control & microdriveEraseBit) !== 0 &&
-        (m.mdv.control & microdriveReadWriteBit) === 0
-    ) {
-        m.mdv.cycleAnchor = m.cpu.cycleCount;
-        return;
-    }
-    const elapsed = m.cpu.cycleCount - m.mdv.cycleAnchor;
-    const pairCycles = m.mdv.pairCycles;
-    let steps = Math.floor(elapsed / pairCycles);
-    if (steps === 0) {
-        return;
-    }
-    if (m.mdv.latchedTracks !== 0) {
-        m.mdv.cycleAnchor = m.cpu.cycleCount;
-        return;
-    }
-    const completed = steps;
-    while (steps > 0) {
-        const oldGap = microdriveOffsetIsGap(cartridge, cartridge.byteOffset);
-        if ((m.mdv.control & microdriveEraseBit) !== 0) {
-            microdriveEraseCurrentPair(cartridge);
-            m.mdv.readingMask &= ~(1 << unit);
-        }
-        cartridge.byteOffset += 2;
-        if (cartridge.byteOffset >= cartridge.imageLen) {
-            cartridge.byteOffset -= cartridge.imageLen;
-        }
-        const newGap = microdriveOffsetIsGap(cartridge, cartridge.byteOffset);
-        if (newGap && !oldGap && !m.mdv.gapActive) {
-            microdriveRaiseGapInterrupt(m);
-        }
-        m.mdv.gapActive = newGap;
-        m.mdv.dataReady = !newGap && !microdriveOffsetIsPreamble(cartridge, cartridge.byteOffset);
-        steps -= 1;
-    }
-    m.mdv.cycleAnchor += completed * pairCycles;
 }
 
 /**
@@ -2172,6 +2094,11 @@ function microdriveStatusBits(m) {
 }
 
 /**
+ * Apply a ZX8302 Microdrive control write. It follows the erase and write
+ * phases QDOS takes an unformatted cartridge through while formatting it, and
+ * each falling select clock shifts the select bit along the drive chain.
+ * Deselecting every drive ends a format and finalizes a verified one.
+ *
  * @param {Machine} m
  * @param {number} data
  */
@@ -2198,15 +2125,22 @@ function microdriveControlWrite(m, data) {
         m.mdv.cartridges[unit].formatVerifying &&
         (oldControl & (microdriveEraseBit | microdriveReadWriteBit)) === 0 &&
         (data & microdriveEraseBit) !== 0;
-    if (unit >= 0 && enteringWrite && m.mdv.cartridges[unit].unformatted) {
-        if (m.mdv.formattingUnit !== unit) {
-            m.mdv.formattingUnit = unit;
-            m.mdv.formatWriteOffset = 0;
+    if (unit >= 0 && enteringWrite) {
+        const cartridge = m.mdv.cartridges[unit];
+        if (m.mdv.formattingUnit === unit && !cartridge.formatVerified) {
+            // A running format writes its records back to back.
+            cartridge.byteOffset = m.mdv.formatWriteOffset;
+        } else {
+            // Any other write replaces the block record after the header just
+            // read. QLAY stores it without the gap the ROM waits out on a tape.
+            let sectorStart = cartridge.byteOffset - cartridge.byteOffset % qlaySectorSize;
+            if (cartridge.byteOffset - sectorStart < qlaySectorHeaderOffset) {
+                sectorStart = (sectorStart + cartridge.image.length - qlaySectorSize) % cartridge.image.length;
+            }
+            cartridge.byteOffset = sectorStart + qlayBlockPreambleOffset;
         }
-        if (!m.mdv.cartridges[unit].formatVerified) {
-            m.mdv.cartridges[unit].byteOffset = m.mdv.formatWriteOffset;
-        }
-        m.mdv.formatBurstBytes = 0;
+        m.mdv.burstStart = cartridge.byteOffset;
+        m.mdv.burstBytes = 0;
         m.mdv.transmitFullUntil = 0;
         m.mdv.cycleAnchor = m.cpu.cycleCount;
     }
@@ -2216,10 +2150,12 @@ function microdriveControlWrite(m, data) {
         m.mdv.formattingUnit === unit &&
         !m.mdv.cartridges[unit].formatVerified
     ) {
-        if (m.mdv.formatBurstBytes !== 28) {
-            m.mdv.formatWriteOffset += 34;
-            if (m.mdv.formatWriteOffset >= m.mdv.cartridges[unit].imageLen) {
-                m.mdv.formatWriteOffset -= m.mdv.cartridges[unit].imageLen;
+        // A header record is followed at once by its block; a block by the gap,
+        // and at the splice in the last slot the tape comes round to the start.
+        if (m.mdv.burstBytes !== qlayBlockPreambleOffset) {
+            m.mdv.formatWriteOffset += qlaySectorSize - qlayFormatGapOffset;
+            if (m.mdv.formatWriteOffset >= m.mdv.cartridges[unit].image.length - qlaySectorSize) {
+                m.mdv.formatWriteOffset = 0;
             }
         }
         m.mdv.cartridges[unit].byteOffset = m.mdv.formatWriteOffset;
@@ -2234,7 +2170,7 @@ function microdriveControlWrite(m, data) {
         m.mdv.cartridges[unit].formatVerified = true;
         m.mdv.cycleAnchor = m.cpu.cycleCount;
     }
-    const oldClock = (m.mdv.control & microdriveSelectClockBit) !== 0;
+    const oldClock = (oldControl & microdriveSelectClockBit) !== 0;
     const newClock = (data & microdriveSelectClockBit) !== 0;
     if (oldClock && !newClock) {
         let previousSelected = (data & microdriveSelectDataBit) !== 0;
@@ -2254,11 +2190,12 @@ function microdriveControlWrite(m, data) {
                     microdriveFinalizeFormat(formatted);
                 }
                 formatted.unformatted = false;
+                formatted.formatting = false;
                 formatted.formatVerifying = false;
                 formatted.formatVerified = false;
                 m.mdv.formattingUnit = -1;
                 m.mdv.formatWriteOffset = 0;
-                m.mdv.formatBurstBytes = 0;
+                m.mdv.burstBytes = 0;
             }
             m.mdv.selectedMask = nextMask;
             m.mdv.readingMask &= nextMask;
@@ -2266,10 +2203,11 @@ function microdriveControlWrite(m, data) {
             m.mdv.transmitFullUntil = 0;
             m.mdv.dataReady = false;
             m.mdv.gapActive = false;
+            m.mdv.silentPairs = 0;
             m.mdv.cycleAnchor = m.cpu.cycleCount;
         }
     }
-    if (((m.mdv.control ^ data) & microdriveReadWriteBit) !== 0) {
+    if (((oldControl ^ data) & microdriveReadWriteBit) !== 0) {
         m.mdv.latchedTracks = 0;
         m.mdv.transmitFullUntil = 0;
     }
@@ -2282,15 +2220,8 @@ function microdriveControlWrite(m, data) {
  * @param {MicrodriveCartridge} cartridge
  */
 function microdriveFinalizeFormat(cartridge) {
-    const sectorCount = Math.floor(cartridge.imageLen / qlaySectorSize);
-    let mapOffset = -1;
-    for (let physical = 0; physical < sectorCount; physical += 1) {
-        const base = physical * qlaySectorSize;
-        if (cartridge.image[base + qlaySectorHeaderOffset + 1] === 0) {
-            mapOffset = base;
-            break;
-        }
-    }
+    const sectorCount = Math.floor(cartridge.image.length / qlaySectorSize);
+    const mapOffset = microdriveMapSector(cartridge);
     if (mapOffset < 0) {
         return;
     }
@@ -2304,6 +2235,10 @@ function microdriveFinalizeFormat(cartridge) {
 }
 
 /**
+ * A CPU write to the Microdrive track register in write mode: the byte goes
+ * onto the selected cartridge's tape, and the transmit buffer stays full for
+ * half a byte pair.
+ *
  * @param {Machine} m
  * @param {number} addr
  * @param {number} value
@@ -2320,19 +2255,29 @@ function microdriveWriteTrackByte(m, addr, value) {
         return;
     }
     const cartridge = m.mdv.cartridges[unit];
-    if (cartridge.imageLen === 0) {
-        return;
+    const formatting = m.mdv.formattingUnit === unit && !cartridge.formatVerified;
+    const sectorOffset = cartridge.byteOffset % qlaySectorSize;
+    let stored = value;
+    if (
+        formatting &&
+        cartridge.byteOffset - sectorOffset === cartridge.image.length - 2 * qlaySectorSize &&
+        sectorOffset >= microdriveSpliceCutOffset
+    ) {
+        // The splice cuts the record laid out just before it.
+        stored = 0;
     }
-    microdriveWriteImageByte(cartridge, cartridge.byteOffset, value);
+    microdriveWriteImageByte(cartridge, cartridge.byteOffset, stored);
     cartridge.byteOffset += 1;
-    if (cartridge.byteOffset >= cartridge.imageLen) {
+    if (cartridge.byteOffset >= cartridge.image.length) {
         cartridge.byteOffset = 0;
     }
     m.mdv.readingMask &= ~(1 << unit);
     cartridge.writeCount += 1;
-    if (m.mdv.formattingUnit === unit && !cartridge.formatVerified) {
+    m.mdv.burstBytes += 1;
+    if (formatting) {
         m.mdv.formatWriteOffset = cartridge.byteOffset;
-        m.mdv.formatBurstBytes += 1;
+    } else if (m.mdv.burstBytes === qlaySectorHeaderOffset + 1 && value === qlaySectorHeaderFlag) {
+        microdriveStartFormat(m, unit);
     }
     m.mdv.dataReady = false;
     m.mdv.transmitFullUntil = m.cpu.cycleCount + m.mdv.pairCycles / 2;
@@ -2340,6 +2285,42 @@ function microdriveWriteTrackByte(m, addr, value) {
 }
 
 /**
+ * Start laying out a FORMAT, recognized by its first sector header record:
+ * records go back to back from the start of the image, as QLAY stores them.
+ * The part of the header already written moves there. The last slot stands
+ * for the tape's splice: it is erased and skipped, so on a standard image
+ * the last records overwrite the first, as on a real loop of tape, and the
+ * record before it is cut.
+ *
+ * @param {Machine} m
+ * @param {number} unit
+ */
+function microdriveStartFormat(m, unit) {
+    if (m.mdv.formattingUnit >= 0 && m.mdv.formattingUnit !== unit) {
+        const other = m.mdv.cartridges[m.mdv.formattingUnit];
+        other.formatting = false;
+        other.formatVerifying = false;
+        other.formatVerified = false;
+    }
+    const cartridge = m.mdv.cartridges[unit];
+    m.mdv.formattingUnit = unit;
+    cartridge.formatting = true;
+    cartridge.formatVerifying = false;
+    cartridge.formatVerified = false;
+    cartridge.image.copyWithin(0, m.mdv.burstStart, m.mdv.burstStart + m.mdv.burstBytes);
+    const spliceStart = cartridge.image.length - qlaySectorSize;
+    if (spliceStart > 0) {
+        cartridge.image.fill(0, spliceStart);
+    }
+    cartridge.byteOffset = m.mdv.burstBytes;
+    m.mdv.formatWriteOffset = m.mdv.burstBytes;
+}
+
+/**
+ * A CPU read of a Microdrive track register: the byte under the head on that
+ * track. Reading both tracks completes the pair, and the next waits for the
+ * tape; after one track the tape holds briefly for the other.
+ *
  * @param {Machine} m
  * @param {number} addr
  * @returns {number}
@@ -2352,17 +2333,18 @@ function microdriveReadTrackByte(m, addr) {
         return 0;
     }
     const cartridge = m.mdv.cartridges[unit];
-    if (cartridge.imageLen === 0 || !m.mdv.dataReady || microdriveOffsetIsGap(cartridge, cartridge.byteOffset)) {
+    if (!m.mdv.dataReady || microdriveOffsetIsGap(cartridge, cartridge.byteOffset)) {
         return 0;
     }
     const trackBit = 1 << track;
     if (m.mdv.latchedTracks === 0 || (m.mdv.latchedTracks & trackBit) !== 0) {
         m.mdv.latchedByteOffset = cartridge.byteOffset;
         m.mdv.latchedTracks = 0;
+        m.mdv.latchedAt = m.cpu.cycleCount;
     }
     let offset = m.mdv.latchedByteOffset + track;
-    if (offset >= cartridge.imageLen) {
-        offset -= cartridge.imageLen;
+    if (offset >= cartridge.image.length) {
+        offset -= cartridge.image.length;
     }
     const value = cartridge.image[offset];
     m.mdv.readingMask |= 1 << unit;
@@ -2374,4 +2356,239 @@ function microdriveReadTrackByte(m, addr) {
         m.mdv.cycleAnchor = m.cpu.cycleCount;
     }
     return value;
+}
+
+/**
+ * Move the selected cartridge's tape up to the current cycle, raising the gap
+ * interrupt where a gap starts. With drives selected but none holding a
+ * cartridge, or with the head on erased tape, a long enough silence also
+ * counts as a gap. While the CPU has read one track of a pair, the tape waits
+ * up to `microdriveLatchHoldPairs` pair periods for it to read the other.
+ *
+ * @param {Machine} m
+ */
+function microdriveAdvanceActive(m) {
+    const unit = microdriveActiveUnit(m);
+    if (unit < 0) {
+        m.mdv.dataReady = false;
+        if (m.mdv.selectedMask === 0) {
+            m.mdv.cycleAnchor = m.cpu.cycleCount;
+            m.mdv.gapActive = false;
+            return;
+        }
+        // Treat sustained silence as a gap without interrupting a slow select chain.
+        if (m.cpu.cycleCount - m.mdv.cycleAnchor < m.mdv.pairCycles * microdriveEmptyGapPairs) {
+            return;
+        }
+        if (!m.mdv.gapActive) {
+            m.mdv.gapActive = true;
+            microdriveRaiseGapInterrupt(m);
+        }
+        return;
+    }
+    const cartridge = m.mdv.cartridges[unit];
+    if (m.cpu.cycleCount < m.mdv.cycleAnchor) {
+        return;
+    }
+    if (
+        m.mdv.formattingUnit === unit &&
+        (m.mdv.control & microdriveEraseBit) !== 0 &&
+        (m.mdv.control & microdriveReadWriteBit) === 0
+    ) {
+        m.mdv.cycleAnchor = m.cpu.cycleCount;
+        return;
+    }
+    const elapsed = m.cpu.cycleCount - m.mdv.cycleAnchor;
+    const pairCycles = m.mdv.pairCycles;
+    const steps = Math.floor(elapsed / pairCycles);
+    if (steps === 0) {
+        return;
+    }
+    if (m.mdv.latchedTracks !== 0) {
+        if (m.cpu.cycleCount - m.mdv.latchedAt < pairCycles * microdriveLatchHoldPairs) {
+            m.mdv.cycleAnchor = m.cpu.cycleCount;
+            return;
+        }
+        m.mdv.latchedTracks = 0;
+    }
+    for (let step = 0; step < steps; step += 1) {
+        const oldGap = microdriveOffsetIsGap(cartridge, cartridge.byteOffset);
+        if ((m.mdv.control & microdriveEraseBit) !== 0) {
+            // The erase head clears both interleaved track bytes under it.
+            microdriveWriteImageByte(cartridge, cartridge.byteOffset, 0);
+            microdriveWriteImageByte(cartridge, (cartridge.byteOffset + 1) % cartridge.image.length, 0);
+            m.mdv.readingMask &= ~(1 << unit);
+        }
+        cartridge.byteOffset += 2;
+        if (cartridge.byteOffset >= cartridge.image.length) {
+            cartridge.byteOffset -= cartridge.image.length;
+        }
+        const newGap = microdriveOffsetIsGap(cartridge, cartridge.byteOffset);
+        const erased = microdriveTapeIsErased(cartridge, cartridge.byteOffset);
+        if (erased) {
+            m.mdv.silentPairs += 1;
+        } else {
+            m.mdv.silentPairs = 0;
+        }
+        if (!newGap) {
+            m.mdv.gapActive = false;
+        } else if (!m.mdv.gapActive) {
+            // Like an empty drive, erased tape interrupts only after a stretch of
+            // silence, so a select chain passing through does not see it.
+            if (!oldGap || m.mdv.silentPairs >= microdriveEmptyGapPairs) {
+                microdriveRaiseGapInterrupt(m);
+                m.mdv.gapActive = true;
+            } else if (!erased) {
+                m.mdv.gapActive = true;
+            }
+        }
+        m.mdv.dataReady = !newGap && !microdriveOffsetIsPreamble(cartridge, cartridge.byteOffset);
+    }
+    m.mdv.cycleAnchor += steps * pairCycles;
+}
+
+/**
+ * @param {Machine} m
+ * @returns {number}
+ */
+function microdriveActiveUnit(m) {
+    for (let i = 0; i < microdriveUnitCount; i += 1) {
+        const mask = 1 << i;
+        if ((m.mdv.selectedMask & mask) !== 0 && m.mdv.cartridges[i].inserted) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * Whether a tape offset lies in a gap: on erased tape, before a sector's
+ * header, between header and block, or after the block, which ends later
+ * while a format is writing or verifying the cartridge.
+ *
+ * @param {MicrodriveCartridge} cartridge
+ * @param {number} byteOffset
+ * @returns {boolean}
+ */
+function microdriveOffsetIsGap(cartridge, byteOffset) {
+    if (microdriveTapeIsErased(cartridge, byteOffset)) {
+        return true;
+    }
+    const sectorOffset = byteOffset % qlaySectorSize;
+    if (sectorOffset < microdriveHeaderGapEndOffset) {
+        return true;
+    }
+    if (sectorOffset >= qlayBlockPreambleOffset && sectorOffset < qlayBlockGapEndOffset) {
+        return true;
+    }
+    if (cartridge.formatting && !cartridge.formatVerified) {
+        return sectorOffset >= qlayFormatGapOffset;
+    }
+    return sectorOffset >= qlayGapOffset;
+}
+
+/**
+ * Whether the sector under `byteOffset` has no header flag byte: never
+ * written, as on a blank cartridge, or cleared by the erase head or as a bad
+ * sector. Erased tape carries no signal, so it reads as one long gap.
+ *
+ * @param {MicrodriveCartridge} cartridge
+ * @param {number} byteOffset
+ * @returns {boolean}
+ */
+function microdriveTapeIsErased(cartridge, byteOffset) {
+    return cartridge.image[byteOffset - byteOffset % qlaySectorSize + qlaySectorHeaderOffset] !== qlaySectorHeaderFlag;
+}
+
+/**
+ * Whether a tape offset lies in a record preamble: written sync bytes, not a
+ * gap, that hold back read-ready so a read starts on the first real byte. A
+ * running format writes its blocks without the data preamble.
+ *
+ * @param {MicrodriveCartridge} cartridge
+ * @param {number} byteOffset
+ * @returns {boolean}
+ */
+function microdriveOffsetIsPreamble(cartridge, byteOffset) {
+    const sectorOffset = byteOffset % qlaySectorSize;
+    if (sectorOffset >= microdriveHeaderGapEndOffset && sectorOffset < qlaySectorHeaderOffset) {
+        return true;
+    }
+    if (sectorOffset >= qlayBlockGapEndOffset && sectorOffset < qlayBlockHeaderOffset) {
+        return true;
+    }
+    if (cartridge.formatting && !cartridge.formatVerified) {
+        return false;
+    }
+    return sectorOffset >= qlayDataPreambleOffset && sectorOffset < qlayDataOffset;
+}
+
+/**
+ * Change one cartridge byte and retain that change for a later download.
+ *
+ * @param {MicrodriveCartridge} cartridge
+ * @param {number} offset
+ * @param {number} value
+ */
+function microdriveWriteImageByte(cartridge, offset, value) {
+    cartridge.image[offset] = value;
+    cartridge.modified = true;
+}
+
+/**
+ * Report a gap the head has reached, unless the gap interrupt is masked: a
+ * gap that starts while it is masked goes unreported, as Minerva relies on
+ * when it reads a file with interrupts briefly enabled.
+ *
+ * @param {Machine} m
+ */
+function microdriveRaiseGapInterrupt(m) {
+    if ((m.interruptMask & interruptGapEnableBit) === 0) {
+        return;
+    }
+    m.theInt |= microdriveGapInterruptBit;
+    cpu.requestInterrupt(m.cpu, cpu.qlInterruptLevel);
+}
+
+/**
+ * Image offset of the sector numbered 0, which holds the cartridge's sector
+ * map, or -1 when there is none.
+ *
+ * @param {MicrodriveCartridge} cartridge
+ * @returns {number}
+ */
+function microdriveMapSector(cartridge) {
+    const sectorCount = Math.floor(cartridge.image.length / qlaySectorSize);
+    for (let physical = 0; physical < sectorCount; physical += 1) {
+        const base = physical * qlaySectorSize;
+        if (cartridge.image[base + qlaySectorHeaderOffset + 1] === 0) {
+            return base;
+        }
+    }
+    return -1;
+}
+
+/**
+ * @param {ArrayBuffer | Uint8Array} bytes
+ * @returns {Uint8Array}
+ */
+function toBytes(bytes) {
+    if (bytes instanceof Uint8Array) {
+        return bytes;
+    }
+    return new Uint8Array(bytes);
+}
+
+/**
+ * Reject an empty image or one larger than `maxBytes`.
+ *
+ * @param {Uint8Array} src
+ * @param {number} maxBytes
+ * @returns {string | null}
+ */
+function sizeError(src, maxBytes) {
+    if (src.byteLength === 0 || src.byteLength > maxBytes) {
+        return "Expected 1 to " + maxBytes + ", got " + src.byteLength + " bytes.";
+    }
+    return null;
 }

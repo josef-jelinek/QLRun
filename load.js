@@ -3,10 +3,13 @@ import * as zip from "./zip.js";
 import * as media from "./media.js";
 
 const maxMediaBytes = 2 * 1024 * 1024;
-const maxZipBytes = 8 * 1024 * 1024;
+/** Largest ZIP archive accepted from a URL or a local file. */
+export const maxZipBytes = 8 * 1024 * 1024;
 
 /**
  * Fetch a Microdrive image, or a ZIP containing one, for `index.html?url=`.
+ * Returns an abort operation, or null when `onDone` has already run; aborting
+ * reports "Aborted." through `onDone`.
  *
  * @param {string} urlParam
  * @param {function(string | null, string | null, ArrayBuffer | null): void} onDone
@@ -31,7 +34,12 @@ export function fromUrl(urlParam, onDone) {
     } catch {
         // Not percent-encoded after all.
     }
-    const name = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+    let name = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+    try {
+        name = decodeURIComponent(name);
+    } catch {
+        // Not percent-encoded after all.
+    }
     const isZip = media.isZipName(url.pathname);
     if (!isZip && !media.isMdvName(url.pathname)) {
         onDone("Unsupported startup file type: " + url.pathname + ".", null, null);
@@ -66,13 +74,17 @@ export function fromUrl(urlParam, onDone) {
                 onDone(null, name, buf);
                 return;
             }
-            pickZipMember(buf, member, function (extractErr, extractName, extractBytes) {
-                if (done) {
-                    return;
-                }
-                done = true;
-                onDone(extractErr, extractName, extractBytes);
-            });
+            zipMember(
+                buf,
+                member,
+                function (extractErr, extractName, extractBytes) {
+                    if (done) {
+                        return;
+                    }
+                    done = true;
+                    onDone(extractErr, extractName, extractBytes);
+                },
+            );
         },
     );
     if (abort === null) {
@@ -89,20 +101,17 @@ export function fromUrl(urlParam, onDone) {
 }
 
 /**
- * Select one `.mdv` member and extract it as an ArrayBuffer.
+ * Select one `.mdv` member and extract it as an ArrayBuffer: the named
+ * member, or with an empty `member` the first usable image by name.
  *
  * @param {ArrayBuffer} buf
  * @param {string} member
  * @param {function(string | null, string | null, ArrayBuffer | null): void} onDone
  */
-function pickZipMember(buf, member, onDone) {
+export function zipMember(buf, member, onDone) {
     const listing = zip.list(buf);
-    if (listing.err !== null || listing.entries === null) {
-        let err = "Could not read ZIP.";
-        if (listing.err !== null) {
-            err = listing.err;
-        }
-        onDone(err, null, null);
+    if (listing.err !== null) {
+        onDone(listing.err, null, null);
         return;
     }
     /** @type {import("./zip.js").ZipEntry | null} */
@@ -149,15 +158,19 @@ function pickZipMember(buf, member, onDone) {
         onDone("ZIP entry " + chosen.name + " is larger than " + maxMediaBytes + " bytes.", null, null);
         return;
     }
-    zip.readEntry(buf, chosen, function (extractErr, bytes) {
-        if (extractErr !== null) {
-            onDone(extractErr, chosen.name, null);
-            return;
-        }
-        if (!(bytes instanceof ArrayBuffer)) {
-            onDone("Could not extract ZIP member.", chosen.name, null);
-            return;
-        }
-        onDone(null, chosen.name, bytes);
-    });
+    zip.readEntry(
+        buf,
+        chosen,
+        function (extractErr, bytes) {
+            if (extractErr !== null) {
+                onDone(extractErr, chosen.name, null);
+                return;
+            }
+            if (!(bytes instanceof ArrayBuffer)) {
+                onDone("Could not extract ZIP member.", chosen.name, null);
+                return;
+            }
+            onDone(null, chosen.name, bytes);
+        },
+    );
 }

@@ -22,6 +22,7 @@ export function loadShaders(onDone) {
     /**
      * @param {number} slot
      * @param {string} url
+     * @returns {(function(): void) | null}
      */
     function getShader(slot, url) {
         return io.httpGet(
@@ -50,7 +51,8 @@ export function loadShaders(onDone) {
 
 /**
  * Fetch a ROM image. It may be shorter than `maxBytes` and is padded with
- * zeros by the machine; it must not be empty or larger.
+ * zeros by the machine; it must not be empty or larger. Returns the abort
+ * operation, or null when `onDone` has already run.
  *
  * @param {string} url
  * @param {number} maxBytes

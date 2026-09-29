@@ -69,7 +69,6 @@ export function create() {
         reportedButtons: 0,
         queuedButtons: [],
     };
-    reset(q, 0);
     return q;
 }
 

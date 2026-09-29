@@ -1,12 +1,16 @@
 export const addressSpaceBytes = 0x100000;
 const addrMask = addressSpaceBytes - 1;
 export const qdosUserRamBase = 0x20000;
+/** Where the QDOS system variables start unless the ROM moves them. */
+const qdosSysvarDefaultBase = 0x28000;
+/** The long at the start of the QDOS system variables. */
+export const qdosSysvarIdent = 0xD2540000;
 export const qlPalClockHz = 7500000;
 export const qlNtscClockHz = 7552445;
 export const zx8301PalClocksPerFrame = 149760;
 export const zx8301NtscClocksPerFrame = 125760;
 export const internalIoBase = 0x18000;
-export const internalIoEnd = 0x1C000;
+const internalIoEnd = 0x1C000;
 const zx8301OnboardRamEnd = 0x40000;
 const busCycleClocks = 4;
 const peripheralEClocks = 10;
@@ -21,7 +25,6 @@ const zx8301BusSlotsPerChunk = zx8301TimingChunkClocks / busCycleClocks;
 const zx8301BusSlotsPerLine = zx8301TimingChunksPerLine * zx8301BusSlotsPerChunk;
 const zx8301DisplayBusSlots = zx8301DisplayChunksPerLine * zx8301BusSlotsPerChunk;
 const zx8301CpuDisplaySlot = zx8301BusSlotsPerChunk - 1;
-const busErrorVector = 2;
 const addressErrorVector = 3;
 const illegalInstructionVector = 4;
 const divideByZeroVector = 5;
@@ -33,7 +36,8 @@ const line1010Vector = 10;
 const line1111Vector = 11;
 const interruptLevelMask = 7;
 const nonmaskableInterruptLevel = 7;
-const frameInterruptLevel = 2;
+/** Every ZX8302 interrupt, frame and Microdrive gap alike, reaches the 68008 at this level. */
+export const qlInterruptLevel = 2;
 export const frameInterruptStatusBit = 8;
 const interruptExceptionClocks = 72;
 const exceptionFrameSize = 6;
@@ -44,11 +48,11 @@ const autovectorBase = 24;
 const qdosByteSize = 1;
 const qdosWordSize = 2;
 const qdosLongSize = 4;
-const qdosTrapVectorBase = 32;
 const qdosTrap0Vector = 32;
 const qdosTrap4Vector = 36;
 const qdosTrap15Vector = 47;
-const qdosExceptionStateSysvarAddr = 0x28050;
+const qdosExceptionStateSysvarOffset = 0x50;
+const qdosSysvarBlockMask = 0xF8000;
 const addressRegisterBase = 8;
 const registerCount = 16;
 const stackRegisterIndex = 15;
@@ -67,8 +71,6 @@ const opcodeClassSelectBit = 0x4000;
 const eaDestinationBit = 0x0100;
 const rewriteInvalidTarget = -1;
 const rewriteRegisterTargetBase = addrMask + 1;
-const eaMode7AbsoluteCount = 2;
-const eaMode7MemoryCount = 4;
 const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
 
 /**
@@ -87,8 +89,6 @@ const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
  *   qimsiEnd: number,
  *   qsoundBase: number,
  *   qsoundEnd: number,
- *   isUnmapped: function(number): boolean,
- *   isHw: function(number): boolean,
  *   isEClocked: function(number): boolean,
  *   beginHwAccess: function(number, boolean, number): void,
  *   endHwAccess: function(): void,
@@ -130,7 +130,6 @@ const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
  *   nInst2: number,
  *   cycleCount: number,
  *   cycleLimit: number,
- *   cycleLimitActive: boolean,
  *   accessActive: boolean,
  *   peripheralWaitCycles: number,
  *   instructionCycleOverride: number,
@@ -141,50 +140,6 @@ const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
  *   badCodeAddress: boolean,
  * }} Cpu
  */
-
-/**
- * Create an MC68008 execution state with power-on defaults.
- *
- * @returns {Cpu}
- */
-export function create() {
-    ensureOpcodeTable();
-    return {
-        reg: new Int32Array(registerCount),
-        pc: 0,
-        usp: 0,
-        ssp: 0,
-        code: 0,
-        interruptMask: 7,
-        trace: false,
-        supervisor: true,
-        xflag: false,
-        negative: false,
-        zero: false,
-        overflow: false,
-        carry: false,
-        exception: 0,
-        exceptionPc: -1,
-        currentInstructionPc: -1,
-        pendingInterrupt: 0,
-        stopped: false,
-        extraFlag: false,
-        doTrace: false,
-        nInst: 0,
-        nInst2: 0,
-        cycleCount: 0,
-        cycleLimit: 0,
-        cycleLimitActive: false,
-        accessActive: false,
-        peripheralWaitCycles: 0,
-        instructionCycleOverride: -1,
-        cycleBudget: 0,
-        rewriteTarget: -1,
-        badAddress: 0,
-        badReadAccess: false,
-        badCodeAddress: false,
-    };
-}
 
 const operandSizes = [
     {byteCount: 1, signBit: 0x80, valueMask: 0xFF},
@@ -209,11 +164,9 @@ const bitOpClear = 2;
 const bitOpSet = 3;
 const bitOperationMask = 3;
 
-const immediateLogicalOrOp = 0;
 const immediateLogicalAndOp = 1;
 const immediateLogicalEorOp = 5;
 const immediateCompareOp = 6;
-const immediateLogicalOperationMask = (1 << immediateLogicalOrOp) | (1 << immediateLogicalAndOp) | (1 << immediateLogicalEorOp);
 
 const shiftOperationArithmetic = 0;
 const shiftOperationLogical = 1;
@@ -255,1877 +208,87 @@ const exgAddressAddressForm = 0x0048;
 const exgDataAddressForm = 0x0088;
 
 /**
- * @param {number} value
- * @returns {number}
- */
-function asI8(value) {
-    return (value << 24) >> 24;
-}
-
-/**
- * @param {number} value
- * @returns {number}
- */
-function asI16(value) {
-    return (value << 16) >> 16;
-}
-
-/**
- * @param {number} base
- * @param {number} offset
- * @returns {number}
- */
-function addressOffset(base, offset) {
-    return ((base >>> 0) + (offset >>> 0)) | 0;
-}
-
-/**
- * @param {number} base
- * @param {number} offset
- * @returns {number}
- */
-function cpuAddressOffset(base, offset) {
-    return (base + offset) & addrMask;
-}
-
-/**
- * @param {number} x
- * @returns {number}
- */
-function popcount(x) {
-    let v = x >>> 0;
-    v -= (v >>> 1) & 0x55555555;
-    v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
-    return (((v + (v >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24;
-}
-
-/**
- * @param {number} bits
- * @returns {number}
- */
-function operandSizeFromBits(bits) {
-    const sizeField = bits & sizeFieldMask;
-    if (sizeField === invalidSizeField) {
-        return operandLong;
-    }
-    return sizeField;
-}
-
-/**
- * @param {number} opcode
- * @returns {number}
- */
-function opcodeQuickValue(opcode) {
-    const value = (opcode >> opcodeQuickValueShift) & opcodeQuickValueMask;
-    if (value === 0) {
-        return opcodeQuickZeroValue;
-    }
-    return value;
-}
-
-/**
- * @param {Cpu} c
- * @param {number} condition
- * @returns {boolean}
- */
-function conditionIsTrue(c, condition) {
-    switch (condition) {
-    case 0:
-        return true;
-    case 1:
-        return false;
-    case 2:
-        return !c.carry && !c.zero;
-    case 3:
-        return c.carry || c.zero;
-    case 4:
-        return !c.carry;
-    case 5:
-        return c.carry;
-    case 6:
-        return !c.zero;
-    case 7:
-        return c.zero;
-    case 8:
-        return !c.overflow;
-    case 9:
-        return c.overflow;
-    case 10:
-        return !c.negative;
-    case 11:
-        return c.negative;
-    case 12:
-        return c.negative === c.overflow;
-    case 13:
-        return c.negative !== c.overflow;
-    case 14:
-        return !c.zero && c.negative === c.overflow;
-    case 15:
-        return c.zero || c.negative !== c.overflow;
-    }
-    return false;
-}
-
-/**
- * @param {Cpu} c
- * @param {number} value
- * @param {number} size
- */
-function setNzClearCv(c, value, size) {
-    const info = operandSizes[size];
-    const masked = value & info.valueMask;
-    c.negative = (masked & info.signBit) !== 0;
-    c.zero = masked === 0;
-    c.overflow = false;
-    c.carry = false;
-}
-
-/**
- * @param {Cpu} c
- * @param {number} target
- * @param {number} source
- * @param {number} result
- * @param {number} size
- */
-function setCompareFlagsResult(c, target, source, result, size) {
-    const info = operandSizes[size];
-    const signBit = info.signBit;
-    const valueMask = info.valueMask;
-    target &= valueMask;
-    source &= valueMask;
-    result &= valueMask;
-    c.negative = (result & signBit) !== 0;
-    c.zero = result === 0;
-    c.carry = (((~target & source) | (result & (~target | source))) & signBit) !== 0;
-    c.overflow = ((target ^ source) & (target ^ result) & signBit) !== 0;
-}
-
-/**
- * @param {Cpu} c
- * @param {boolean} subtract
- * @param {number} target
- * @param {number} source
- * @param {number} result
- * @param {number} size
- */
-function setAddSubtractFlags(c, subtract, target, source, result, size) {
-    if (subtract) {
-        setCompareFlagsResult(c, target, source, result, size);
-        c.xflag = c.carry;
-        return;
-    }
-    const info = operandSizes[size];
-    const signBit = info.signBit;
-    const valueMask = info.valueMask;
-    target &= valueMask;
-    source &= valueMask;
-    result &= valueMask;
-    c.negative = (result & signBit) !== 0;
-    c.zero = result === 0;
-    c.carry = (((target & source) | ((target | source) & ~result)) & signBit) !== 0;
-    c.overflow = (~(target ^ source) & (target ^ result) & signBit) !== 0;
-    c.xflag = c.carry;
-}
-
-/**
- * Low `width` bits set, for widths of 1 to 32.
+ * Create an MC68008 execution state with power-on defaults.
  *
- * @param {number} width
- * @returns {number}
+ * @returns {Cpu}
  */
-function bitWidthMask(width) {
-    return 0xFFFFFFFF >>> (32 - width);
+export function create() {
+    ensureOpcodeTable();
+    return {
+        reg: new Int32Array(registerCount),
+        pc: 0,
+        usp: 0,
+        ssp: 0,
+        code: 0,
+        interruptMask: 7,
+        trace: false,
+        supervisor: true,
+        xflag: false,
+        negative: false,
+        zero: false,
+        overflow: false,
+        carry: false,
+        exception: 0,
+        exceptionPc: -1,
+        currentInstructionPc: -1,
+        pendingInterrupt: 0,
+        stopped: false,
+        extraFlag: false,
+        doTrace: false,
+        nInst: 0,
+        nInst2: 0,
+        cycleCount: 0,
+        cycleLimit: 0,
+        accessActive: false,
+        peripheralWaitCycles: 0,
+        instructionCycleOverride: -1,
+        cycleBudget: 0,
+        rewriteTarget: -1,
+        badAddress: 0,
+        badReadAccess: false,
+        badCodeAddress: false,
+    };
 }
 
 /**
- * @param {number} value
- * @param {number} count
- * @param {number} width
- * @returns {number}
- */
-function arithmeticShiftRight(value, count, width) {
-    width = Math.min(width, 32);
-    const valueMask = bitWidthMask(width);
-    value &= valueMask;
-    if (count === 0 || width === 0) {
-        return value;
-    }
-    const signBit = 1 << (width - 1);
-    if (count >= width) {
-        if ((value & signBit) !== 0) {
-            return valueMask;
-        }
-        return 0;
-    }
-    let shifted = value >>> count;
-    if ((value & signBit) !== 0) {
-        shifted |= valueMask << (width - count);
-    }
-    return shifted & valueMask;
-}
-
-/**
- * @param {number} value
- * @param {number} count
- * @param {number} width
- * @returns {{value: number, flag: boolean}}
- */
-function arithmeticShiftLeft(value, count, width) {
-    width = Math.min(width, 32);
-    const valueMask = bitWidthMask(width);
-    value &= valueMask;
-    if (count === 0) {
-        return {value, flag: false};
-    }
-    if (count >= width) {
-        return {value: 0, flag: value !== 0};
-    }
-    const signBit = 1 << (width - 1);
-    const oldNegative = (value & signBit) !== 0;
-    let shiftedOutMask = valueMask << (width - 1 - count);
-    shiftedOutMask &= valueMask;
-    let expected = 0;
-    if (oldNegative) {
-        expected = shiftedOutMask;
-    }
-    const newOverflow = (value & shiftedOutMask) !== expected;
-    return {value: (value << count) & valueMask, flag: newOverflow};
-}
-
-/**
- * @param {number} value
- * @param {number} count
- * @param {number} width
- * @param {boolean} left
- * @returns {number}
- */
-function rotateBits(value, count, width, left) {
-    width = Math.min(width, 32);
-    const valueMask = bitWidthMask(width);
-    value &= valueMask;
-    if (width === 0) {
-        return value;
-    }
-    count %= width;
-    if (count === 0) {
-        return value;
-    }
-    const otherCount = width - count;
-    if (left) {
-        return ((value << count) | (value >>> otherCount)) & valueMask;
-    }
-    return ((value >>> count) | (value << otherCount)) & valueMask;
-}
-
-/**
- * @param {number} value
- * @param {number} count
- * @param {number} width
- * @param {boolean} oldX
- * @param {boolean} left
- * @returns {{value: number, flag: boolean}}
- */
-function rotateExtend(value, count, width, oldX, left) {
-    width = Math.min(width, 32);
-    const valueMask = bitWidthMask(width);
-    let signBit = 1 << (width - 1);
-    if (width === 32) {
-        signBit = 0x80000000;
-    }
-    value &= valueMask;
-    count %= width + 1;
-    let x = oldX;
-    for (let i = 0; i < count; i += 1) {
-        if (left) {
-            const newX = (value & signBit) !== 0;
-            value = ((value << 1) | Number(x)) & valueMask;
-            x = newX;
-        } else {
-            const newX = (value & 1) !== 0;
-            value = value >>> 1;
-            if (x) {
-                value |= signBit;
-            }
-            x = newX;
-        }
-    }
-    return {value, flag: x};
-}
-
-/**
- * @param {number} value
- * @param {number} count
- * @param {number} width
- * @param {boolean} left
- * @returns {number}
- */
-function logicalShift(value, count, width, left) {
-    width = Math.min(width, 32);
-    if (count >= width) {
-        return 0;
-    }
-    const valueMask = bitWidthMask(width);
-    value &= valueMask;
-    if (left) {
-        return (value << count) & valueMask;
-    }
-    return value >>> count;
-}
-
-/**
- * Pack the current supervisor, interrupt-mask, and condition flags into SR.
+ * Add a host cycle budget and execute complete instructions until it is spent.
  *
- * @param {Cpu} c
- * @returns {number}
- */
-function getSr(c) {
-    let sr = (c.interruptMask & 7) << 8;
-    if (c.trace) {
-        sr |= 0x8000;
-    }
-    if (c.supervisor) {
-        sr |= 0x2000;
-    }
-    if (c.xflag) {
-        sr |= 0x0010;
-    }
-    if (c.negative) {
-        sr |= 0x0008;
-    }
-    if (c.zero) {
-        sr |= 0x0004;
-    }
-    if (c.overflow) {
-        sr |= 0x0002;
-    }
-    if (c.carry) {
-        sr |= 0x0001;
-    }
-    return sr;
-}
-
-/**
- * Replace the condition-code flags from the low byte of a status value.
- *
- * @param {Cpu} c
- * @param {number} cc
- */
-function putCcr(c, cc) {
-    c.xflag = (cc & 0x0010) !== 0;
-    c.negative = (cc & 0x0008) !== 0;
-    c.zero = (cc & 0x0004) !== 0;
-    c.overflow = (cc & 0x0002) !== 0;
-    c.carry = (cc & 0x0001) !== 0;
-}
-
-/**
- * Apply SR and swap active stack pointers when supervisor state changes.
- *
- * @param {Cpu} c
- * @param {number} sr
- */
-function putSr(c, sr) {
-    const oldSuper = c.supervisor;
-    c.trace = (sr & 0x8000) !== 0;
-    c.extraFlag = c.doTrace || c.trace || c.exception !== 0;
-    if (c.extraFlag) {
-        c.nInst2 = c.nInst;
-        c.nInst = 0;
-    }
-    c.supervisor = (sr & 0x2000) !== 0;
-    putCcr(c, sr);
-    c.interruptMask = (sr >> 8) & interruptLevelMask;
-    if (oldSuper !== c.supervisor) {
-        if (c.supervisor) {
-            c.usp = c.reg[stackRegisterIndex];
-            c.reg[stackRegisterIndex] = c.ssp;
-        } else {
-            c.ssp = c.reg[stackRegisterIndex];
-            c.reg[stackRegisterIndex] = c.usp;
-        }
-    }
-}
-
-/**
- * Stop the current instruction chunk and schedule a CPU exception vector.
- *
- * @param {Cpu} c
- * @param {number} vector
- */
-function coreRaiseException(c, vector) {
-    c.exception = vector;
-    c.extraFlag = true;
-    c.nInst2 = c.nInst;
-    c.nInst = 0;
-}
-
-/**
- * @param {Cpu} c
- * @param {number} vector
- */
-function raiseInstructionException(c, vector) {
-    c.exceptionPc = c.pc;
-    if (c.currentInstructionPc >= 0) {
-        c.exceptionPc = c.currentInstructionPc;
-    }
-    coreRaiseException(c, vector);
-}
-
-/**
  * @param {Cpu} c
  * @param {CpuBus} bus
+ * @param {number} cycles
  */
-function raiseIllegalInstruction(c, bus) {
-    raiseInstructionException(c, illegalInstructionVector);
-}
-
-/**
- * @param {Cpu} c
- * @param {number} vector
- * @param {number} addr
- * @param {boolean} readAccess
- * @param {boolean} instructionAccess
- */
-function raiseBusOrAddressError(c, vector, addr, readAccess, instructionAccess) {
-    coreRaiseException(c, vector);
-    c.badReadAccess = readAccess;
-    c.badAddress = addr;
-    c.badCodeAddress = instructionAccess;
-}
-
-/**
- * @param {Cpu} c
- * @param {number} addr
- */
-function setPc(c, addr) {
-    if ((addr & 1) !== 0) {
-        raiseBusOrAddressError(c, addressErrorVector, addr, true, true);
+export function executeCycleBudget(c, bus, cycles) {
+    if (cycles <= 0) {
         return;
     }
-    c.pc = addr & addrMask;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {boolean} valid
- * @returns {boolean}
- */
-function ensureEa(c, bus, valid) {
-    if (valid) {
-        return true;
-    }
-    raiseIllegalInstruction(c, bus);
-    return false;
-}
-
-/**
- * @param {Cpu} c
- * @returns {boolean}
- */
-function ensureSupervisor(c) {
-    if (c.supervisor) {
-        return true;
-    }
-    raiseInstructionException(c, privilegeViolationVector);
-    return false;
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @returns {boolean}
- */
-function eaIsValid(mode, r) {
-    return mode >= 0 && mode <= 7 && r >= 0 && r <= 7 && (mode !== 7 || r <= 4);
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @returns {boolean}
- */
-function eaIsData(mode, r) {
-    return eaIsValid(mode, r) && mode !== 1;
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @param {number} size
- * @returns {boolean}
- */
-function eaIsSizedSource(mode, r, size) {
-    return eaIsValid(mode, r) && (size !== operandByte || mode !== 1);
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @returns {boolean}
- */
-function eaIsDataAlterable(mode, r) {
-    return eaIsValid(mode, r) && (mode === 0 || (mode >= 2 && mode <= 6) || (mode === 7 && r <= 1));
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @returns {boolean}
- */
-function eaIsMemoryAlterable(mode, r) {
-    return mode !== 0 && eaIsDataAlterable(mode, r);
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @returns {boolean}
- */
-function eaIsControl(mode, r) {
-    return eaIsValid(mode, r) && (mode === 2 || mode === 5 || mode === 6 || (mode === 7 && r <= 3));
-}
-
-/**
- * @param {number} operation
- * @param {boolean} staticBit
- * @param {number} mode
- * @param {number} r
- * @returns {boolean}
- */
-function bitOpEaIsValid(operation, staticBit, mode, r) {
-    if (operation === bitOpTest) {
-        return eaIsData(mode, r) && (!staticBit || mode !== 7 || r !== 4);
-    }
-    return eaIsDataAlterable(mode, r);
-}
-
-/**
- * @param {number} addr
- * @returns {boolean}
- */
-function zx8301ContendsAddress(addr) {
-    const address = addr & addrMask;
-    return address >= qdosUserRamBase && address < zx8301OnboardRamEnd;
-}
-
-/**
- * @param {Cpu} c
- */
-function zx8301WaitForCpuRamSlot(c) {
-    const alignment = c.cycleCount % busCycleClocks;
-    if (alignment !== 0) {
-        c.cycleCount += busCycleClocks - alignment;
-    }
-    for (;;) {
-        const slot = Math.floor(c.cycleCount / busCycleClocks) % zx8301BusSlotsPerLine;
-        if (slot >= zx8301DisplayBusSlots || slot % zx8301BusSlotsPerChunk === zx8301CpuDisplaySlot) {
+    c.cycleBudget += cycles;
+    while (c.cycleCount < c.cycleBudget) {
+        const remaining = c.cycleBudget - c.cycleCount;
+        executeCycleChunk(c, bus, Math.min(remaining, 0x7FFFFFFF));
+        if (c.stopped) {
+            c.cycleCount = c.cycleBudget;
             return;
         }
-        c.cycleCount += busCycleClocks;
     }
 }
 
 /**
  * @param {Cpu} c
- * @param {number} addr
- * @param {number} busCycles
+ * @param {CpuBus} bus
+ * @param {number} cycles
  */
-function addCpuBusCycles(c, addr, busCycles) {
-    if (!c.accessActive) {
+function executeCycleChunk(c, bus, cycles) {
+    if (!prepareExecuteChunk(c, bus)) {
         return;
     }
-    for (let i = 0; i < busCycles; i += 1) {
-        if (zx8301ContendsAddress(addressOffset(addr, i))) {
-            zx8301WaitForCpuRamSlot(c);
-        }
-        c.cycleCount += busCycleClocks;
-    }
+    c.cycleLimit = c.cycleCount + cycles;
+    executeTimedLoop(c, bus);
 }
 
 /**
- * @param {number} size
- * @param {number} byteCycles
- * @param {number} wordCycles
- * @param {number} longCycles
- * @returns {number}
- */
-function cpuCyclesForSize(size, byteCycles, wordCycles, longCycles) {
-    if (size === operandByte) {
-        return byteCycles;
-    }
-    if (size === operandWord) {
-        return wordCycles;
-    }
-    return longCycles;
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @param {number} size
- * @returns {number}
- */
-function cpuEaReadCycles(mode, r, size) {
-    switch (mode) {
-    case 0:
-    case 1:
-        return 0;
-    case 2:
-    case 3:
-        return cpuCyclesForSize(size, 4, 8, 16);
-    case 4:
-        return cpuCyclesForSize(size, 6, 10, 18);
-    case 5:
-        return cpuCyclesForSize(size, 12, 16, 24);
-    case 6:
-        return cpuCyclesForSize(size, 14, 18, 26);
-    case 7:
-        switch (r) {
-        case 0:
-        case 2:
-            return cpuCyclesForSize(size, 12, 16, 24);
-        case 1:
-            return cpuCyclesForSize(size, 20, 24, 32);
-        case 3:
-            return cpuCyclesForSize(size, 14, 18, 26);
-        case 4:
-            return cpuCyclesForSize(size, 8, 8, 16);
-        }
-        break;
-    }
-    return 0;
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @param {number} size
- * @returns {number}
- */
-function cpuEaWriteCycles(mode, r, size) {
-    switch (mode) {
-    case 0:
-    case 1:
-        return 0;
-    case 2:
-    case 3:
-    case 4:
-        return cpuCyclesForSize(size, 4, 8, 16);
-    case 5:
-        return cpuCyclesForSize(size, 12, 16, 24);
-    case 6:
-        return cpuCyclesForSize(size, 14, 18, 26);
-    case 7:
-        if (r === 0) {
-            return cpuCyclesForSize(size, 12, 16, 24);
-        }
-        if (r === 1) {
-            return cpuCyclesForSize(size, 20, 24, 32);
-        }
-        break;
-    }
-    return 0;
-}
-
-/**
- * @param {number} opcode
- * @param {number} count
- * @returns {number}
- */
-function cpuShiftCycles(opcode, count) {
-    if (operandSizeFromBits(opcode >> sizeFieldShift) === operandLong) {
-        return 12 + 2 * count;
-    }
-    return 10 + 2 * count;
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @param {number} size
- * @returns {number}
- */
-function cpuStandardEaToDnCycles(mode, r, size) {
-    let baseCycles = cpuCyclesForSize(size, 8, 8, 10);
-    if (size === operandLong && (mode === 0 || mode === 1 || (mode === 7 && r === 4))) {
-        baseCycles = 12;
-    }
-    return baseCycles + cpuEaReadCycles(mode, r, size);
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @param {number} size
- * @param {number} byteBase
- * @returns {number}
- */
-function cpuSingleOperandCycles(mode, r, size, byteBase) {
-    if (mode === 0) {
-        return cpuCyclesForSize(size, byteBase, 8, 10);
-    }
-    return cpuCyclesForSize(size, 12, 16, 24) + cpuEaReadCycles(mode, r, size);
-}
-
-/**
- * @param {number} mode
- * @param {number} r
- * @param {number} anCycles
- * @param {number} dispCycles
- * @param {number} indexCycles
- * @returns {number}
- */
-function cpuJumpCycles(mode, r, anCycles, dispCycles, indexCycles) {
-    if (mode === 2) {
-        return anCycles;
-    }
-    if (mode === 5 || (mode === 7 && (r === 0 || r === 2))) {
-        return dispCycles;
-    }
-    if (mode === 6 || (mode === 7 && r === 3)) {
-        return indexCycles;
-    }
-    if (mode === 7 && r === 1) {
-        return dispCycles + 6;
-    }
-    return 0;
-}
-
-/**
- * @param {number} opcode
- * @returns {number}
- */
-function mc68008StaticInstructionCycles(opcode) {
-    const opcodeClass = opcode & 0xF000;
-    const eaMode = (opcode >> 3) & 7;
-    const eaReg = opcode & 7;
-    const sizeField = (opcode >> sizeFieldShift) & sizeFieldMask;
-    const standardSize = operandSizeFromBits(sizeField);
-
-    if (opcodeClass >= 0x1000 && opcodeClass <= 0x3000) {
-        const sizeCode = (opcode >> 12) & sizeFieldMask;
-        const size = moveOperandSizes[sizeCode];
-        const destMode = (opcode >> 6) & 7;
-        const destReg = (opcode >> 9) & 7;
-        return 8 + cpuEaReadCycles(eaMode, eaReg, size) + cpuEaWriteCycles(destMode, destReg, size);
-    }
-    if ((opcode & 0xF100) === 0x7000) {
-        return 8;
-    }
-    if (opcodeClass === 0x6000) {
-        const condition = (opcode >> 8) & conditionCodeMask;
-        if (condition === branchConditionSubroutine) {
-            return 34;
-        }
-        if (condition === branchConditionAlways) {
-            return 18;
-        }
-        return opcodeDynamicCycles;
-    }
-    if (opcodeClass === 0x0000) {
-        if ((opcode & 0xF138) === 0x0108) {
-            if ((opcode & movepLongBit) !== 0) {
-                return 32;
-            }
-            return 24;
-        }
-        switch (opcode & 0xFFBF) {
-        case 0x003C:
-        case 0x023C:
-        case 0x0A3C:
-        case 0x0C3C:
-            return 32;
-        }
-        const staticBitOp = (opcode & 0xFF00) === 0x0800;
-        const dynamicBitOp = (opcode & 0x0100) !== 0 && (opcode & 0x0038) !== 0x0008;
-        if (staticBitOp || dynamicBitOp) {
-            const operation = (opcode >> 6) & bitOperationMask;
-            let baseCycles = 12;
-            if (operation === bitOpClear) {
-                baseCycles = 8;
-                if (eaMode === 0) {
-                    baseCycles = 10;
-                }
-            } else if (eaMode === 0 && operation === bitOpChange) {
-                baseCycles = 14;
-            }
-            if (staticBitOp) {
-                baseCycles += 8;
-            }
-            if (eaMode === 0) {
-                return baseCycles;
-            }
-            return baseCycles + cpuEaReadCycles(eaMode, eaReg, operandByte);
-        }
-        const operation = (opcode >> 9) & 7;
-        if (eaMode === 0) {
-            if (operation === immediateCompareOp && standardSize === operandLong) {
-                return 26;
-            }
-            return cpuCyclesForSize(standardSize, 16, 16, 28);
-        }
-        if (operation === immediateCompareOp) {
-            return cpuCyclesForSize(standardSize, 16, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
-        }
-        return cpuCyclesForSize(standardSize, 20, 24, 40) + cpuEaReadCycles(eaMode, eaReg, standardSize);
-    }
-    if (opcodeClass === 0x5000) {
-        if ((opcode & 0x00F8) === 0x00C8) {
-            return opcodeDynamicCycles;
-        }
-        if (sizeField === invalidSizeField) {
-            if ((opcode & 0x0038) === 0) {
-                return opcodeDynamicCycles;
-            }
-            return 12 + cpuEaWriteCycles(eaMode, eaReg, operandByte);
-        }
-        if (eaMode === 0) {
-            return cpuCyclesForSize(standardSize, 8, 8, 12);
-        }
-        if (eaMode === 1) {
-            return 12;
-        }
-        return cpuCyclesForSize(standardSize, 12, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
-    }
-    if (opcodeClass === 0x8000) {
-        if ((opcode & 0xF1F0) === 0x8100) {
-            if ((opcode & 8) !== 0) {
-                return 20;
-            }
-            return 10;
-        }
-        if (sizeField === invalidSizeField && (opcode & 0x0100) === 0) {
-            return 144 + cpuEaReadCycles(eaMode, eaReg, operandWord);
-        }
-        if (sizeField === invalidSizeField) {
-            return 162 + cpuEaReadCycles(eaMode, eaReg, operandWord);
-        }
-        if ((opcode & 0x0100) !== 0) {
-            return cpuCyclesForSize(standardSize, 12, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
-        }
-        return cpuStandardEaToDnCycles(eaMode, eaReg, standardSize);
-    }
-    if (opcodeClass === 0x9000 || opcodeClass === 0xB000 || opcodeClass === 0xD000) {
-        if (opcodeClass === 0xB000 && (opcode & 0x0138) === 0x0108) {
-            return cpuCyclesForSize(standardSize, 16, 24, 40);
-        }
-        if (opcodeClass !== 0xB000 && (opcode & 0x0130) === 0x0100) {
-            if ((opcode & 8) !== 0) {
-                return cpuCyclesForSize(standardSize, 22, 50, 58);
-            }
-            return cpuCyclesForSize(standardSize, 8, 8, 12);
-        }
-        if (sizeField === invalidSizeField) {
-            let addressSize = operandWord;
-            if ((opcode & addressArithmeticLongBit) !== 0) {
-                addressSize = operandLong;
-            }
-            let baseCycles = 10;
-            const direct = eaMode === 0 || eaMode === 1 || (eaMode === 7 && eaReg === 4);
-            if (opcodeClass !== 0xB000 && (addressSize === operandWord || direct)) {
-                baseCycles = 12;
-            }
-            return baseCycles + cpuEaReadCycles(eaMode, eaReg, addressSize);
-        }
-        if ((opcode & 0x0100) !== 0) {
-            return cpuCyclesForSize(standardSize, 12, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
-        }
-        return cpuStandardEaToDnCycles(eaMode, eaReg, standardSize);
-    }
-    if (opcodeClass === 0xC000) {
-        const opcodeF1f8 = opcode & 0xF1F8;
-        if (opcodeF1f8 === 0xC140 || opcodeF1f8 === 0xC148 || opcodeF1f8 === 0xC188) {
-            return 10;
-        }
-        if ((opcode & 0xF1F0) === 0xC100) {
-            if ((opcode & 8) !== 0) {
-                return 20;
-            }
-            return 10;
-        }
-        if (sizeField === invalidSizeField) {
-            return 74 + cpuEaReadCycles(eaMode, eaReg, operandWord);
-        }
-        if ((opcode & 0x0100) !== 0) {
-            return cpuCyclesForSize(standardSize, 12, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
-        }
-        return cpuStandardEaToDnCycles(eaMode, eaReg, standardSize);
-    }
-    if (opcodeClass === 0xE000) {
-        if (sizeField === invalidSizeField) {
-            return 16 + cpuEaReadCycles(eaMode, eaReg, operandWord);
-        }
-        if ((opcode & dataRegisterShiftCountRegisterBit) !== 0) {
-            return opcodeDynamicCycles;
-        }
-        return cpuShiftCycles(opcode, opcodeQuickValue(opcode));
-    }
-    const opcodeFfc0 = opcode & 0xFFC0;
-    if (opcodeFfc0 === 0x40C0) {
-        if ((opcode & 0x0038) === 0) {
-            return 10;
-        }
-        return 16 + cpuEaWriteCycles(eaMode, eaReg, operandWord);
-    }
-    if ((opcodeFfc0 & 0xFDC0) === 0x44C0) {
-        if ((opcode & 0x0038) === 0) {
-            return 18;
-        }
-        return 18 + cpuEaReadCycles(eaMode, eaReg, operandWord);
-    }
-    const singleOperandGroup = opcodeFfc0 & 0xF9C0;
-    if (singleOperandGroup === 0x4000) {
-        return cpuSingleOperandCycles(eaMode, eaReg, operandByte, 8);
-    }
-    if (singleOperandGroup === 0x4040) {
-        return cpuSingleOperandCycles(eaMode, eaReg, operandWord, 8);
-    }
-    if (singleOperandGroup === 0x4080) {
-        return cpuSingleOperandCycles(eaMode, eaReg, operandLong, 10);
-    }
-    if ((opcodeFfc0 & 0xFF00) === 0x4A00 && sizeField !== invalidSizeField) {
-        return 8 + cpuEaReadCycles(eaMode, eaReg, standardSize);
-    }
-    if (opcodeFfc0 === 0x4800) {
-        return cpuSingleOperandCycles(eaMode, eaReg, operandByte, 10);
-    }
-    if (opcodeFfc0 === 0x4AC0) {
-        if ((opcode & 0x0038) === 0) {
-            return 8;
-        }
-        return 14 + cpuEaReadCycles(eaMode, eaReg, operandByte);
-    }
-    const opcodeFff8 = opcode & 0xFFF8;
-    if (opcodeFff8 === 0x4840 || (opcodeFff8 & 0xFFBF) === 0x4880) {
-        return 8;
-    }
-    if (opcodeFfc0 === 0x4840) {
-        return cpuJumpCycles(eaMode, eaReg, 24, 32, 36);
-    }
-    const movemGroup = opcodeFfc0 & 0xFB80;
-    if (movemGroup === 0x4880) {
-        return opcodeDynamicCycles;
-    }
-    const opcodeF1c0 = opcode & 0xF1C0;
-    if (opcodeF1c0 === 0x4180) {
-        return 14 + cpuEaReadCycles(eaMode, eaReg, operandWord);
-    }
-    if (opcodeF1c0 === 0x41C0) {
-        return cpuJumpCycles(eaMode, eaReg, 8, 16, 20);
-    }
-    if (opcodeFfc0 === 0x4E80) {
-        return cpuJumpCycles(eaMode, eaReg, 32, 34, 38);
-    }
-    if (opcodeFfc0 === 0x4EC0) {
-        return cpuJumpCycles(eaMode, eaReg, 16, 18, 22);
-    }
-    switch (opcode) {
-    case 0x4E70:
-        return 136;
-    case 0x4E71:
-    case 0x4E76:
-        return 8;
-    case 0x4E72:
-        return 4;
-    case 0x4E73:
-    case 0x4E77:
-        return 40;
-    case 0x4E75:
-        return 32;
-    }
-    if ((opcode & 0xFFF0) === 0x4E40) {
-        return 62;
-    }
-    if (opcodeFff8 === 0x4E50) {
-        return 32;
-    }
-    if (opcodeFff8 === 0x4E58) {
-        return 24;
-    }
-    if ((opcode & 0xFFF0) === 0x4E60) {
-        return 8;
-    }
-    return 0;
-}
-
-/**
- * @param {Cpu} c
- * @param {number} opcode
- * @returns {number}
- */
-function mc68008DynamicInstructionCycles(c, opcode) {
-    const opcodeClass = opcode & 0xF000;
-    if (opcodeClass === 0x6000) {
-        const condition = (opcode >> 8) & conditionCodeMask;
-        if (condition === branchConditionAlways || condition === branchConditionSubroutine) {
-            return 0;
-        }
-        if (conditionIsTrue(c, condition)) {
-            return 18;
-        }
-        if ((opcode & 0xFF) === 0) {
-            return 20;
-        }
-        return 12;
-    }
-    if (opcodeClass === 0x5000) {
-        const opcode00f8 = opcode & 0x00F8;
-        if (opcode00f8 !== 0x00C8 && opcode00f8 !== 0x00C0) {
-            return 0;
-        }
-        const condition = (opcode >> 8) & conditionCodeMask;
-        if (opcode00f8 === 0x00C8) {
-            if (conditionIsTrue(c, condition)) {
-                return 20;
-            }
-            const eaReg = opcode & 7;
-            if ((c.reg[eaReg] & 0xFFFF) === 0xFFFF) {
-                return 26;
-            }
-            return 18;
-        }
-        if (conditionIsTrue(c, condition)) {
-            return 10;
-        }
-        return 8;
-    }
-    if (opcodeClass === 0xE000) {
-        return cpuShiftCycles(opcode, c.reg[(opcode >> 9) & 7] & 63);
-    }
-    return 0;
-}
-
-/**
- * @param {Cpu} c
- * @param {number} addr
- * @param {boolean} readAccess
- * @returns {boolean}
- */
-function cpuWordOrLongFaultIfNeeded(c, addr, readAccess) {
-    if (!c.accessActive) {
-        return false;
-    }
-    if (c.exception !== 0) {
-        return true;
-    }
-    if ((addr & 1) !== 0) {
-        raiseBusOrAddressError(c, addressErrorVector, addr, readAccess, false);
-        return true;
-    }
-    return false;
-}
-
-/**
- * Report whether `addr` is ROM, RAM, or the selected QSound window.
+ * Run instructions until the cycle limit or the chunk's instruction count,
+ * entering exceptions and interrupts between them.
  *
- * @param {CpuBus} bus
- * @param {number} addr
- * @returns {boolean}
- */
-export function addressIsMapped(bus, addr) {
-    if (addr >= 0 && addr < bus.guestRamTop) {
-        return true;
-    }
-    return addr >= bus.qsoundBase && addr < bus.qsoundEnd;
-}
-
-/**
- * Report whether `addr` is the QIMSI, ZX8302, or selected QSound window.
- * ROM addresses below the ZX8302 window need only the QIMSI test.
- *
- * @param {CpuBus} bus
- * @param {number} addr
- * @returns {boolean}
- */
-export function addressIsHardware(bus, addr) {
-    if (addr < internalIoBase) {
-        return addr < bus.qimsiEnd && addr >= bus.qimsiBase;
-    }
-    if (addr < internalIoEnd) {
-        return true;
-    }
-    return addr >= bus.qsoundBase && addr < bus.qsoundEnd;
-}
-
-/**
- * @param {CpuBus} bus
- * @param {number} addr
- * @param {number} lowAddr
- * @returns {boolean}
- */
-function isDirectRamLongAccess(bus, addr, lowAddr) {
-    return addr <= maxLinearLongAddr &&
-        addressIsMapped(bus, addr) &&
-        addressIsMapped(bus, lowAddr) &&
-        !addressIsHardware(bus, addr >>> 0) &&
-        !addressIsHardware(bus, lowAddr >>> 0);
-}
-
-/**
- * @param {Uint8Array} mem
- * @param {number} addr
- * @returns {number}
- */
-export function readPointerWord(mem, addr) {
-    return (mem[addr] << 8) | mem[addr + 1];
-}
-
-/**
- * @param {Uint8Array} mem
- * @param {number} addr
- * @returns {number}
- */
-export function readPointerLong(mem, addr) {
-    return ((mem[addr] << 24) | (mem[addr + 1] << 16) | (mem[addr + 2] << 8) | mem[addr + 3]) >>> 0;
-}
-
-/**
- * @param {Uint8Array} mem
- * @param {number} addr
- * @param {number} v
- */
-export function writePointerWord(mem, addr, v) {
-    mem[addr] = (v >> 8) & 0xFF;
-    mem[addr + 1] = v & 0xFF;
-}
-
-/**
- * @param {Uint8Array} mem
- * @param {number} addr
- * @param {number} v
- */
-export function writePointerLong(mem, addr, v) {
-    mem[addr] = (v >>> 24) & 0xFF;
-    mem[addr + 1] = (v >>> 16) & 0xFF;
-    mem[addr + 2] = (v >>> 8) & 0xFF;
-    mem[addr + 3] = v & 0xFF;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} addr
- * @returns {number}
- */
-function readDecodedWord(c, bus, addr) {
-    const next = (addr + 1) & addrMask;
-    if (addressIsHardware(bus, addr) || ((addr & 1) !== 0 && (next === 0 || addressIsHardware(bus, next)))) {
-        const highByte = readByte(c, bus, addr);
-        const lowByte = readByte(c, bus, next);
-        return ((highByte << 8) | lowByte) & 0xFFFF;
-    }
-    addCpuBusCycles(c, addr, wordBusCycles);
-    if (!addressIsMapped(bus, addr)) {
-        return 0;
-    }
-    return readPointerWord(bus.mem, addr);
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} addr
- * @param {number} d
- */
-function writeDecodedWord(c, bus, addr, d) {
-    const next = (addr + 1) & addrMask;
-    if (addressIsHardware(bus, addr) || ((addr & 1) !== 0 && (next === 0 || addressIsHardware(bus, next)))) {
-        writeByte(c, bus, addr, (d >> 8) & 0xFF);
-        writeByte(c, bus, next, d & 0xFF);
-        return;
-    }
-    addCpuBusCycles(c, addr, wordBusCycles);
-    if (!addressIsMapped(bus, addr)) {
-        return;
-    }
-    if (addr >= qdosUserRamBase) {
-        bus.beforeMemoryWrite(addr, qdosWordSize);
-        writePointerWord(bus.mem, addr, d);
-    }
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} addr
- * @returns {number}
- */
-function readByte(c, bus, addr) {
-    addr &= addrMask;
-    const mapped = addressIsMapped(bus, addr);
-    if (mapped && (!c.accessActive || c.exception === 0) && addressIsHardware(bus, addr)) {
-        return accessHardwareByte(c, bus, addr, false, 0);
-    }
-    addCpuBusCycles(c, addr, byteBusCycles);
-    if (!mapped || (c.accessActive && c.exception !== 0)) {
-        return 0;
-    }
-    return bus.mem[addr];
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} addr
- * @returns {number}
- */
-function readWord(c, bus, addr) {
-    if (cpuWordOrLongFaultIfNeeded(c, addr, true)) {
-        addCpuBusCycles(c, addr, wordBusCycles);
-        return 0;
-    }
-    addr &= addrMask;
-    return readDecodedWord(c, bus, addr);
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} addr
- * @returns {number}
- */
-function readLong(c, bus, addr) {
-    if (cpuWordOrLongFaultIfNeeded(c, addr, true)) {
-        addCpuBusCycles(c, addr, longBusCycles);
-        return 0;
-    }
-    addr &= addrMask;
-    if (addr === internalIoBase) {
-        addCpuBusCycles(c, addr, longBusCycles);
-        return bus.readHwLongClock();
-    }
-    const lowAddr = (addr + qdosWordSize) & addrMask;
-    if (isDirectRamLongAccess(bus, addr, lowAddr)) {
-        addCpuBusCycles(c, addr, longBusCycles);
-        return readPointerLong(bus.mem, addr);
-    }
-    const highWord = readDecodedWord(c, bus, addr);
-    const lowWord = readDecodedWord(c, bus, lowAddr);
-    return ((highWord << 16) | lowWord) >>> 0;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} addr
- * @param {number} d
- */
-function writeByte(c, bus, addr, d) {
-    addr &= addrMask;
-    const mapped = addressIsMapped(bus, addr);
-    if (mapped && (!c.accessActive || c.exception === 0) && addressIsHardware(bus, addr)) {
-        accessHardwareByte(c, bus, addr, true, d & 0xFF);
-        return;
-    }
-    addCpuBusCycles(c, addr, byteBusCycles);
-    if (!mapped || (c.accessActive && c.exception !== 0)) {
-        return;
-    }
-    if (addr >= qdosUserRamBase) {
-        bus.beforeMemoryWrite(addr, qdosByteSize);
-        bus.mem[addr] = d & 0xFF;
-    }
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} addr
- * @param {number} d
- */
-function writeWord(c, bus, addr, d) {
-    if (cpuWordOrLongFaultIfNeeded(c, addr, false)) {
-        addCpuBusCycles(c, addr, wordBusCycles);
-        return;
-    }
-    addr &= addrMask;
-    writeDecodedWord(c, bus, addr, d);
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} addr
- * @param {number} d
- */
-function writeLong(c, bus, addr, d) {
-    if (cpuWordOrLongFaultIfNeeded(c, addr, false)) {
-        addCpuBusCycles(c, addr, longBusCycles);
-        return;
-    }
-    addr &= addrMask;
-    const lowAddr = (addr + qdosWordSize) & addrMask;
-    if (isDirectRamLongAccess(bus, addr, lowAddr)) {
-        addCpuBusCycles(c, addr, longBusCycles);
-        if (addr >= qdosUserRamBase) {
-            bus.beforeMemoryWrite(addr, qdosLongSize);
-            writePointerLong(bus.mem, addr, d);
-            return;
-        }
-        if (lowAddr >= qdosUserRamBase) {
-            bus.beforeMemoryWrite(lowAddr, qdosWordSize);
-            writePointerWord(bus.mem, lowAddr, d & 0xFFFF);
-        }
-        return;
-    }
-    writeDecodedWord(c, bus, addr, (d >>> 16) & 0xFFFF);
-    writeDecodedWord(c, bus, lowAddr, d & 0xFFFF);
-}
-
-/**
- * Sequence DS, the device transfer, and bus completion without moving time back.
- * E falls half a clock before multiples of ten; E-qualified VPA is sampled at
- * the end of S4, then a complete E-high transfer must finish before S7 ends.
- * Extra peripheral clocks are kept outside the instruction's internal padding.
- *
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} addr
- * @param {boolean} write
- * @param {number} data
- * @returns {number}
- */
-function accessHardwareByte(c, bus, addr, write, data) {
-    if (!c.accessActive) {
-        if (write) {
-            bus.writeHwByte(addr, data);
-            return 0;
-        }
-        return bus.readHwByte(addr);
-    }
-    const start = c.cycleCount;
-    let end = start + busCycleClocks;
-    const peripheral = bus.isEClocked(addr);
-    if (peripheral) {
-        let sync = start + 3;
-        const phase = sync % peripheralEClocks;
-        if (phase >= peripheralELowClocks) {
-            sync += peripheralEClocks - phase;
-        }
-        end = sync + peripheralEClocks - sync % peripheralEClocks;
-        c.peripheralWaitCycles += end - start - busCycleClocks;
-    }
-    c.cycleCount = start + 1 + Number(write);
-    bus.beginHwAccess(addr, write, data);
-    let transfer = end;
-    if (peripheral) {
-        transfer -= 1 - Number(write) * 0.5;
-    }
-    c.cycleCount = transfer;
-    let value = 0;
-    if (write) {
-        bus.writeHwByte(addr, data);
-    } else {
-        value = bus.readHwByte(addr);
-    }
-    if (peripheral) {
-        c.cycleCount = end - 0.5;
-    }
-    bus.endHwAccess();
-    c.cycleCount = end;
-    return value;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @returns {number}
- */
-function readPcWord(c, bus) {
-    if (c.exception !== 0) {
-        return 0;
-    }
-    const value = readWord(c, bus, c.pc);
-    if (c.exception !== 0) {
-        return 0;
-    }
-    c.pc = cpuAddressOffset(c.pc, qdosWordSize) | 0;
-    return value;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @returns {number}
- */
-function readPcLong(c, bus) {
-    const highWord = readPcWord(c, bus);
-    if (c.exception !== 0) {
-        return 0;
-    }
-    const lowWord = readPcWord(c, bus);
-    if (c.exception !== 0) {
-        return 0;
-    }
-    return ((highWord << 16) | lowWord) >>> 0;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} size
- * @returns {number}
- */
-function readPcImmediateSized(c, bus, size) {
-    if (size === operandLong) {
-        return readPcLong(c, bus);
-    }
-    return readPcWord(c, bus) & operandSizes[size].valueMask;
-}
-
-/**
- * @param {Cpu} c
- * @param {number} index
- * @param {number} size
- * @param {number} value
- */
-function writeDataRegisterSized(c, index, size, value) {
-    if (c.exception !== 0) {
-        return;
-    }
-    const valueMask = operandSizes[size].valueMask;
-    c.reg[index] = (((c.reg[index] >>> 0) & ~valueMask) | (value & valueMask)) | 0;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} size
- * @param {number} addr
- * @returns {number}
- */
-function readMemorySized(c, bus, size, addr) {
-    if (size === operandByte) {
-        return readByte(c, bus, addr);
-    }
-    if (size === operandWord) {
-        return readWord(c, bus, addr);
-    }
-    return readLong(c, bus, addr);
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} size
- * @param {number} addr
- * @param {number} value
- */
-function writeMemorySized(c, bus, size, addr, value) {
-    if (size === operandByte) {
-        writeByte(c, bus, addr, value);
-        return;
-    }
-    if (size === operandWord) {
-        writeWord(c, bus, addr, value);
-        return;
-    }
-    writeLong(c, bus, addr, value);
-}
-
-/**
- * @param {Cpu} c
- * @param {number} baseAddr
- * @param {number} extension
- * @returns {number}
- */
-function indexedAddress(c, baseAddr, extension) {
-    let index = c.reg[(extension >> 12) & 0x0F];
-    if ((extension & 0x0800) === 0) {
-        index = asI16(index);
-    }
-    return addressOffset(addressOffset(baseAddr, index), asI8(extension));
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} r
- * @returns {number}
- */
-function getEaM7(c, bus, r) {
-    switch (r) {
-    case 0:
-        return asI16(readPcWord(c, bus));
-    case 1:
-        return readPcLong(c, bus) | 0;
-    case 2: {
-        const base = c.pc;
-        return addressOffset(base, asI16(readPcWord(c, bus)));
-    }
-    case 3: {
-        const base = c.pc;
-        return indexedAddress(c, base, readPcWord(c, bus));
-    }
-    }
-    raiseInstructionException(c, illegalInstructionVector);
-    return 0;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} mode
- * @param {number} r
- * @returns {number}
- */
-function getEa(c, bus, mode, r) {
-    switch (mode) {
-    case 2:
-        return c.reg[addressRegisterBase + r];
-    case 5:
-        return addressOffset(c.reg[addressRegisterBase + r], asI16(readPcWord(c, bus)));
-    case 6:
-        return indexedAddress(c, c.reg[addressRegisterBase + r], readPcWord(c, bus));
-    case 7:
-        return getEaM7(c, bus, r);
-    default:
-        raiseInstructionException(c, illegalInstructionVector);
-        return 0;
-    }
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} mode
- * @param {number} r
- * @param {number} byteCount
- * @param {number} mode7Count
- * @returns {number}
- */
-function memoryEaAddr(c, bus, mode, r, byteCount, mode7Count) {
-    switch (mode) {
-    case 2:
-        return c.reg[addressRegisterBase + r];
-    case 3:
-    case 4: {
-        let step = byteCount;
-        if (byteCount === qdosByteSize && r === stackAddressRegister) {
-            step = qdosWordSize;
-        }
-        if (mode === 3) {
-            const addr = c.reg[addressRegisterBase + r];
-            c.reg[addressRegisterBase + r] = addressOffset(addr, step);
-            return addr;
-        }
-        const addr = addressOffset(c.reg[addressRegisterBase + r], -step);
-        c.reg[addressRegisterBase + r] = addr;
-        return addr;
-    }
-    case 5:
-        return addressOffset(c.reg[addressRegisterBase + r], asI16(readPcWord(c, bus)));
-    case 6:
-        return indexedAddress(c, c.reg[addressRegisterBase + r], readPcWord(c, bus));
-    case 7:
-        if (r >= mode7Count) {
-            raiseInstructionException(c, illegalInstructionVector);
-            return 0;
-        }
-        return getEaM7(c, bus, r);
-    default:
-        raiseInstructionException(c, illegalInstructionVector);
-        return 0;
-    }
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} size
- * @param {number} mode
- * @param {number} r
- * @returns {number}
- */
-function getFromEaSized(c, bus, size, mode, r) {
-    if (mode === 0) {
-        return c.reg[r] & operandSizes[size].valueMask;
-    }
-    if (mode === 1 && size !== operandByte) {
-        return c.reg[addressRegisterBase + r] & operandSizes[size].valueMask;
-    }
-    if (mode === 7 && r === 4) {
-        return readPcImmediateSized(c, bus, size);
-    }
-    const addr = memoryEaAddr(c, bus, mode, r, operandSizes[size].byteCount, eaMode7MemoryCount);
-    if (c.exception !== 0) {
-        return 0;
-    }
-    return readMemorySized(c, bus, size, addr);
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} size
- * @param {number} mode
- * @param {number} r
- * @returns {number}
- */
-function modifyAtEaSized(c, bus, size, mode, r) {
-    c.rewriteTarget = rewriteInvalidTarget;
-    if (c.exception !== 0) {
-        return 0;
-    }
-    if (mode === 0) {
-        c.rewriteTarget = rewriteRegisterTargetBase + r;
-        return c.reg[r] & operandSizes[size].valueMask;
-    }
-    const addr = memoryEaAddr(c, bus, mode, r, operandSizes[size].byteCount, eaMode7AbsoluteCount);
-    if (c.exception !== 0) {
-        return 0;
-    }
-    c.rewriteTarget = addr & addrMask;
-    return readMemorySized(c, bus, size, addr);
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} size
- * @param {number} value
- * @returns {boolean}
- */
-function rewriteEaSized(c, bus, size, value) {
-    const target = c.rewriteTarget;
-    c.rewriteTarget = rewriteInvalidTarget;
-    if (c.exception !== 0 || target < 0) {
-        return false;
-    }
-    if (target >= rewriteRegisterTargetBase) {
-        writeDataRegisterSized(c, target - rewriteRegisterTargetBase, size, value);
-        return c.exception === 0;
-    }
-    writeMemorySized(c, bus, size, target, value);
-    return c.exception === 0;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} size
- * @param {number} mode
- * @param {number} r
- * @param {number} value
- */
-function putToEaSized(c, bus, size, mode, r, value) {
-    if (c.exception !== 0) {
-        return;
-    }
-    if (mode === 0) {
-        writeDataRegisterSized(c, r, size, value);
-        return;
-    }
-    const addr = memoryEaAddr(c, bus, mode, r, operandSizes[size].byteCount, eaMode7AbsoluteCount);
-    if (c.exception !== 0) {
-        return;
-    }
-    writeMemorySized(c, bus, size, addr, value);
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} value
- * @returns {boolean}
- */
-function pushLongToStack(c, bus, value) {
-    if (c.exception !== 0) {
-        return false;
-    }
-    c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -qdosLongSize);
-    writeLong(c, bus, c.reg[stackRegisterIndex], value >>> 0);
-    return c.exception === 0;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} stackedPc
- */
-function pushCpuExceptionFrame(c, bus, stackedPc) {
-    if (!c.supervisor) {
-        c.usp = c.reg[stackRegisterIndex];
-        c.reg[stackRegisterIndex] = c.ssp;
-    }
-    c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -exceptionFrameSize);
-    writeLong(c, bus, addressOffset(c.reg[stackRegisterIndex], exceptionFramePcOffset), stackedPc >>> 0);
-    writeWord(c, bus, c.reg[stackRegisterIndex], getSr(c));
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- */
-function processInterrupts(c, bus) {
-    if (
-        c.exception === 0 &&
-        (c.pendingInterrupt === nonmaskableInterruptLevel || c.pendingInterrupt > c.interruptMask) &&
-        !c.doTrace
-    ) {
-        const interruptCycleStart = c.cycleCount;
-        const savedCpuAccessActive = c.accessActive;
-        const savedPeripheralWaitCycles = c.peripheralWaitCycles;
-        c.peripheralWaitCycles = 0;
-        c.accessActive = true;
-        pushCpuExceptionFrame(c, bus, c.pc);
-        const vectorAddr = (autovectorBase + c.pendingInterrupt) * qdosLongSize;
-        setPc(c, readLong(c, bus, vectorAddr) | 0);
-        c.interruptMask = c.pendingInterrupt;
-        c.pendingInterrupt = 0;
-        c.supervisor = true;
-        c.trace = false;
-        c.stopped = false;
-        c.extraFlag = false;
-        c.accessActive = savedCpuAccessActive;
-        const elapsed = c.cycleCount - interruptCycleStart;
-        const expectedCycles = interruptExceptionClocks + c.peripheralWaitCycles;
-        c.peripheralWaitCycles = savedPeripheralWaitCycles;
-        if (elapsed < expectedCycles) {
-            c.cycleCount += expectedCycles - elapsed;
-        }
-    }
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- */
-function exceptionProcessing(c, bus) {
-    if (c.pendingInterrupt !== 0 && !c.doTrace) {
-        processInterrupts(c, bus);
-    }
-    if (c.exception !== 0) {
-        if (c.exception < qdosTrap0Vector || c.exception > qdosTrap4Vector) {
-            c.extraFlag =
-                c.exception < addressErrorVector ||
-                (c.exception > traceVector && c.exception < qdosTrap0Vector) ||
-                c.exception > qdosTrap15Vector;
-            if (!c.extraFlag) {
-                c.extraFlag = readPointerLong(bus.mem, qdosExceptionStateSysvarAddr) === 0;
-            }
-            if (c.extraFlag) {
-                c.nInst2 = 0;
-                c.nInst = 0;
-            }
-        }
-        let stackedPc = c.pc;
-        if (c.exceptionPc >= 0) {
-            stackedPc = c.exceptionPc;
-        }
-        const vector = c.exception;
-        const handlerPc = readPointerLong(bus.mem, vector * qdosLongSize) | 0;
-        pushCpuExceptionFrame(c, bus, stackedPc);
-        setPc(c, handlerPc);
-        if (vector === busErrorVector || vector === addressErrorVector) {
-            c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -busErrorFrameSize);
-            writeWord(c, bus, addressOffset(c.reg[stackRegisterIndex], busErrorFrameOpcodeOffset), c.code);
-            writeLong(c, bus, addressOffset(c.reg[stackRegisterIndex], exceptionFramePcOffset), c.badAddress >>> 0);
-            let busErrorFrame = 9 + 16 * Number(c.badReadAccess) + Number(c.badCodeAddress) + 4 * Number(c.supervisor);
-            writeWord(c, bus, c.reg[stackRegisterIndex], busErrorFrame);
-            c.badCodeAddress = false;
-        }
-        c.exception = 0;
-        c.exceptionPc = -1;
-        c.extraFlag = false;
-        c.supervisor = true;
-        c.trace = false;
-    }
-    if (c.doTrace) {
-        pushCpuExceptionFrame(c, bus, c.pc);
-        setPc(c, readPointerLong(bus.mem, traceVector * qdosLongSize) | 0);
-        if (c.nInst === 0) {
-            c.exception = traceVector;
-        }
-        c.supervisor = true;
-        c.trace = false;
-        c.extraFlag = false;
-        c.stopped = false;
-    }
-    c.doTrace = c.trace;
-    if (c.doTrace) {
-        c.nInst2 = c.nInst;
-        c.nInst = 1;
-    }
-    if (c.pendingInterrupt !== 0 && !c.doTrace) {
-        c.extraFlag = true;
-        c.nInst2 = c.nInst;
-        c.nInst = 0;
-    }
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} opcode
- * @param {number} instructionCycleStart
- */
-function executeLoadedOpcode(c, bus, opcode, instructionCycleStart) {
-    const baseCycles = opcodeBaseCycles[opcode];
-    c.accessActive = baseCycles >= opcodeDynamicCycles;
-    c.instructionCycleOverride = -1;
-    c.code = opcode;
-    opcodeTable[opcode](c, bus);
-
-    let expectedCycles = c.instructionCycleOverride;
-    if (expectedCycles < 0) {
-        expectedCycles = baseCycles;
-        if (c.exception !== 0) {
-            expectedCycles = 62;
-            const eaMode = (opcode >> 3) & 7;
-            const eaReg = opcode & 7;
-            switch (c.exception) {
-            case busErrorVector:
-            case addressErrorVector:
-                expectedCycles = 94;
-                break;
-            case divideByZeroVector:
-                expectedCycles = 66 + cpuEaReadCycles(eaMode, eaReg, operandWord);
-                break;
-            case chkVector:
-                expectedCycles = 68 + cpuEaReadCycles(eaMode, eaReg, operandWord);
-                break;
-            case trapvVector:
-                expectedCycles = 66;
-                break;
-            }
-        }
-        if (expectedCycles < opcodeDynamicCycles) {
-            expectedCycles = -expectedCycles - opcodeHostCycleBias;
-        }
-        if (expectedCycles === opcodeDynamicCycles) {
-            expectedCycles = mc68008DynamicInstructionCycles(c, opcode);
-        }
-    }
-    if (expectedCycles > 0) {
-        expectedCycles += c.peripheralWaitCycles;
-        const elapsed = c.cycleCount - instructionCycleStart;
-        if (elapsed < expectedCycles) {
-            c.cycleCount += expectedCycles - elapsed;
-        }
-    }
-    c.accessActive = false;
-    c.currentInstructionPc = -1;
-    bus.afterInstruction();
-    processInterrupts(c, bus);
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- */
-function executeTimedPcInstruction(c, bus) {
-    const instructionCycleStart = c.cycleCount;
-    c.peripheralWaitCycles = 0;
-    c.currentInstructionPc = c.pc;
-    c.accessActive = true;
-    const opcode = readDecodedWord(c, bus, c.pc);
-    c.pc = cpuAddressOffset(c.pc, qdosWordSize) | 0;
-    executeLoadedOpcode(c, bus, opcode, instructionCycleStart);
-}
-
-/**
  * @param {Cpu} c
  * @param {CpuBus} bus
  */
@@ -2134,7 +297,7 @@ function executeTimedLoop(c, bus) {
         while (c.nInst > 0) {
             c.nInst -= 1;
             executeTimedPcInstruction(c, bus);
-            if (c.cycleLimitActive && c.cycleCount >= c.cycleLimit) {
+            if (c.cycleCount >= c.cycleLimit) {
                 c.nInst = 0;
                 break;
             }
@@ -2151,12 +314,14 @@ function executeTimedLoop(c, bus) {
 }
 
 /**
+ * Take a pending interrupt and set the instruction counters for the next
+ * chunk; false while the CPU stays stopped.
+ *
  * @param {Cpu} c
  * @param {CpuBus} bus
- * @param {number} instructionCount
  * @returns {boolean}
  */
-function prepareExecuteChunk(c, bus, instructionCount) {
+function prepareExecuteChunk(c, bus) {
     c.extraFlag = false;
     processInterrupts(c, bus);
     if (c.stopped) {
@@ -2168,56 +333,12 @@ function prepareExecuteChunk(c, bus, instructionCount) {
         c.doTrace ||
         c.pendingInterrupt === nonmaskableInterruptLevel ||
         c.pendingInterrupt > c.interruptMask;
-    c.nInst = instructionCount;
+    c.nInst = 0x7FFFFFFF;
     if (c.extraFlag) {
         c.nInst2 = c.nInst;
         c.nInst = 0;
     }
     return true;
-}
-
-/**
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} cycles
- */
-function executeCycleChunk(c, bus, cycles) {
-    if (cycles <= 0 || !prepareExecuteChunk(c, bus, 0x7FFFFFFF)) {
-        return;
-    }
-    c.cycleLimit = c.cycleCount + cycles;
-    c.cycleLimitActive = true;
-    executeTimedLoop(c, bus);
-    c.cycleLimitActive = false;
-}
-
-/**
- * Add a host cycle budget and execute complete instructions until it is spent.
- *
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @param {number} cycles
- */
-export function executeCycleBudget(c, bus, cycles) {
-    if (cycles <= 0) {
-        return;
-    }
-    c.cycleBudget += cycles;
-    if (c.cycleCount >= c.cycleBudget) {
-        return;
-    }
-    while (c.cycleCount < c.cycleBudget) {
-        const remaining = c.cycleBudget - c.cycleCount;
-        let cycleChunk = 0x7FFFFFFF;
-        if (remaining <= 0x7FFFFFFF) {
-            cycleChunk = remaining;
-        }
-        executeCycleChunk(c, bus, cycleChunk);
-        if (c.stopped) {
-            c.cycleCount = c.cycleBudget;
-            return;
-        }
-    }
 }
 
 /**
@@ -2227,7 +348,7 @@ export function executeCycleBudget(c, bus, cycles) {
  * @param {CpuBus} bus
  */
 export function frameInterrupt(c, bus) {
-    requestInterrupt(c, frameInterruptLevel);
+    requestInterrupt(c, qlInterruptLevel);
     processInterrupts(c, bus);
 }
 
@@ -2251,7 +372,6 @@ export function requestInterrupt(c, level) {
  * @param {CpuBus} bus
  */
 export function reset(c, bus) {
-    ensureOpcodeTable();
     for (let i = 0; i < registerCount; i += 1) {
         c.reg[i] = 0;
     }
@@ -2277,7 +397,6 @@ export function reset(c, bus) {
     c.accessActive = false;
     c.peripheralWaitCycles = 0;
     c.cycleCount = 0;
-    c.cycleLimitActive = false;
     c.cycleLimit = 0;
     c.instructionCycleOverride = -1;
     c.cycleBudget = 0;
@@ -2291,29 +410,42 @@ export function reset(c, bus) {
 }
 
 /**
- * @param {string} pattern
+ * Replace one opcode slot after the table is built for ROM pseudo-ops.
+ * Line-A/F host hooks are charged as a trap-sized 62 clocks.
+ *
+ * @param {number} opcode
  * @param {function(Cpu, CpuBus): void} handler
  */
-function setOpcodeHandler(pattern, handler) {
-    let fixedBits = 0;
-    let floatingBits = 0;
-    for (let i = 0; i < opcodeBitCount; i += 1) {
-        const c = pattern.charCodeAt(i);
-        const bit = 1 << (opcodeBitCount - 1 - i);
-        if (c === 49) {
-            fixedBits |= bit;
-        } else if (c === 120) {
-            floatingBits |= bit;
-        }
+export function setOpcode(opcode, handler) {
+    ensureOpcodeTable();
+    opcodeTable[opcode] = handler;
+    let hostCycles = mc68008StaticInstructionCycles(opcode);
+    if (hostCycles === opcodeDynamicCycles) {
+        hostCycles = 0;
     }
-    let floatingVariant = floatingBits;
-    for (;;) {
-        opcodeTable[fixedBits | floatingVariant] = handler;
-        if (floatingVariant === 0) {
-            break;
-        }
-        floatingVariant = (floatingVariant - 1) & floatingBits;
+    const opcodeClass = opcode & 0xF000;
+    if (hostCycles <= 0 && (opcodeClass === 0xA000 || opcodeClass === 0xF000)) {
+        hostCycles = 62;
     }
+    opcodeBaseCycles[opcode] = -hostCycles - opcodeHostCycleBias;
+}
+
+/**
+ * Run a handler without fetching an opcode word, leaving PC on any immediate.
+ * Used to finish a ROM instruction after a patched opcode has been restored,
+ * and by the disk drivers to return from a host call with RTS.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} opcode
+ */
+export function executeOpcode(c, bus, opcode) {
+    const instructionCycleStart = c.cycleCount;
+    const savedPeripheralWaitCycles = c.peripheralWaitCycles;
+    c.peripheralWaitCycles = 0;
+    c.currentInstructionPc = c.pc;
+    executeLoadedOpcode(c, bus, opcode, instructionCycleStart);
+    c.peripheralWaitCycles = savedPeripheralWaitCycles;
 }
 
 /** Build the shared opcode dispatch and base-cycle tables once. */
@@ -2417,42 +549,391 @@ function ensureOpcodeTable() {
 }
 
 /**
- * Replace one opcode slot after the table is built for ROM pseudo-ops.
- * Line-A/F host hooks are charged as a trap-sized 62 clocks.
- *
- * @param {number} opcode
- * @param {function(Cpu, CpuBus): void} handler
- */
-export function setOpcode(opcode, handler) {
-    ensureOpcodeTable();
-    opcodeTable[opcode] = handler;
-    let hostCycles = mc68008StaticInstructionCycles(opcode);
-    if (hostCycles === opcodeDynamicCycles) {
-        hostCycles = 0;
-    }
-    const opcodeClass = opcode & 0xF000;
-    if (hostCycles <= 0 && (opcodeClass === 0xA000 || opcodeClass === 0xF000)) {
-        hostCycles = 62;
-    }
-    opcodeBaseCycles[opcode] = -hostCycles - opcodeHostCycleBias;
-}
-
-/**
- * Run a handler without fetching an opcode word, leaving PC on any immediate.
- * Used to finish a ROM instruction after a patched opcode has been restored.
+ * The opcode table's default handler, so it takes the shared handler
+ * signature; other code raises the vector directly.
  *
  * @param {Cpu} c
  * @param {CpuBus} bus
- * @param {number} opcode
  */
-export function executeOpcode(c, bus, opcode) {
-    ensureOpcodeTable();
-    const instructionCycleStart = c.cycleCount;
-    const savedPeripheralWaitCycles = c.peripheralWaitCycles;
-    c.peripheralWaitCycles = 0;
-    c.currentInstructionPc = c.pc;
-    executeLoadedOpcode(c, bus, opcode, instructionCycleStart);
-    c.peripheralWaitCycles = savedPeripheralWaitCycles;
+function raiseIllegalInstruction(c, bus) {
+    raiseInstructionException(c, illegalInstructionVector);
+}
+
+/**
+ * MC68008 clocks known from the opcode alone. `opcodeDynamicCycles` marks
+ * instructions whose time depends on run-time state, like taken branches,
+ * DBcc, register shift counts and MOVEM; 0 leaves an opcode untimed.
+ *
+ * @param {number} opcode
+ * @returns {number}
+ */
+function mc68008StaticInstructionCycles(opcode) {
+    const opcodeClass = opcode & 0xF000;
+    const eaMode = (opcode >> 3) & 7;
+    const eaReg = opcode & 7;
+    const sizeField = (opcode >> sizeFieldShift) & sizeFieldMask;
+    const standardSize = operandSizeFromBits(sizeField);
+
+    switch (opcodeClass) {
+    case 0x1000:
+    case 0x2000:
+    case 0x3000:
+        const sizeCode = (opcode >> 12) & sizeFieldMask;
+        const size = moveOperandSizes[sizeCode];
+        const destMode = (opcode >> 6) & 7;
+        const destReg = (opcode >> 9) & 7;
+        return 8 + cpuEaReadCycles(eaMode, eaReg, size) + cpuEaWriteCycles(destMode, destReg, size);
+    case 0x7000:
+        if ((opcode & 0x0100) === 0) {
+            return 8;
+        }
+        break;
+    case 0x6000:
+        switch ((opcode >> 8) & conditionCodeMask) {
+        case branchConditionSubroutine:
+            return 34;
+        case branchConditionAlways:
+            return 18;
+        default:
+            return opcodeDynamicCycles;
+        }
+    case 0x0000:
+        if ((opcode & 0xF138) === 0x0108) {
+            if ((opcode & movepLongBit) !== 0) {
+                return 32;
+            }
+            return 24;
+        }
+        switch (opcode & 0xFFBF) {
+        case 0x003C:
+        case 0x023C:
+        case 0x0A3C:
+            return 32;
+        }
+        const staticBitOp = (opcode & 0xFF00) === 0x0800;
+        const dynamicBitOp = (opcode & 0x0100) !== 0 && (opcode & 0x0038) !== 0x0008;
+        if (staticBitOp || dynamicBitOp) {
+            const operation = (opcode >> 6) & bitOperationMask;
+            let baseCycles = 12;
+            if (operation === bitOpClear) {
+                baseCycles = 8;
+                if (eaMode === 0) {
+                    baseCycles = 10;
+                }
+            } else if (eaMode === 0 && operation === bitOpChange) {
+                baseCycles = 14;
+            }
+            if (staticBitOp) {
+                baseCycles += 8;
+            }
+            if (eaMode === 0) {
+                return baseCycles;
+            }
+            return baseCycles + cpuEaReadCycles(eaMode, eaReg, operandByte);
+        }
+        const operation = (opcode >> 9) & 7;
+        if (eaMode === 0) {
+            if (operation === immediateCompareOp && standardSize === operandLong) {
+                return 26;
+            }
+            return cpuCyclesForSize(standardSize, 16, 16, 28);
+        }
+        if (operation === immediateCompareOp) {
+            return cpuCyclesForSize(standardSize, 16, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
+        }
+        return cpuCyclesForSize(standardSize, 20, 24, 40) + cpuEaReadCycles(eaMode, eaReg, standardSize);
+    case 0x5000:
+        if ((opcode & 0x00F8) === 0x00C8) {
+            return opcodeDynamicCycles;
+        }
+        if (sizeField === invalidSizeField) {
+            if ((opcode & 0x0038) === 0) {
+                return opcodeDynamicCycles;
+            }
+            return 12 + cpuEaWriteCycles(eaMode, eaReg, operandByte);
+        }
+        switch (eaMode) {
+        case 0:
+            return cpuCyclesForSize(standardSize, 8, 8, 12);
+        case 1:
+            return 12;
+        default:
+            return cpuCyclesForSize(standardSize, 12, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
+        }
+    case 0x8000:
+        if ((opcode & 0xF1F0) === 0x8100) {
+            if ((opcode & 8) !== 0) {
+                return 20;
+            }
+            return 10;
+        }
+        if (sizeField === invalidSizeField && (opcode & 0x0100) === 0) {
+            return 144 + cpuEaReadCycles(eaMode, eaReg, operandWord);
+        }
+        if (sizeField === invalidSizeField) {
+            return 162 + cpuEaReadCycles(eaMode, eaReg, operandWord);
+        }
+        if ((opcode & 0x0100) !== 0) {
+            return cpuCyclesForSize(standardSize, 12, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
+        }
+        return cpuStandardEaToDnCycles(eaMode, eaReg, standardSize);
+    case 0x9000:
+    case 0xB000:
+    case 0xD000:
+        if (opcodeClass === 0xB000 && (opcode & 0x0138) === 0x0108) {
+            return cpuCyclesForSize(standardSize, 16, 24, 40);
+        }
+        if (opcodeClass !== 0xB000 && (opcode & 0x0130) === 0x0100) {
+            if ((opcode & 8) !== 0) {
+                return cpuCyclesForSize(standardSize, 22, 50, 58);
+            }
+            return cpuCyclesForSize(standardSize, 8, 8, 12);
+        }
+        if (sizeField === invalidSizeField) {
+            let addressSize = operandWord;
+            if ((opcode & addressArithmeticLongBit) !== 0) {
+                addressSize = operandLong;
+            }
+            let baseCycles = 10;
+            const direct = eaMode === 0 || eaMode === 1 || (eaMode === 7 && eaReg === 4);
+            if (opcodeClass !== 0xB000 && (addressSize === operandWord || direct)) {
+                baseCycles = 12;
+            }
+            return baseCycles + cpuEaReadCycles(eaMode, eaReg, addressSize);
+        }
+        if ((opcode & 0x0100) !== 0) {
+            return cpuCyclesForSize(standardSize, 12, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
+        }
+        return cpuStandardEaToDnCycles(eaMode, eaReg, standardSize);
+    case 0xC000:
+        const opcodeF1f8 = opcode & 0xF1F8;
+        if (opcodeF1f8 === 0xC140 || opcodeF1f8 === 0xC148 || opcodeF1f8 === 0xC188) {
+            return 10;
+        }
+        if ((opcode & 0xF1F0) === 0xC100) {
+            if ((opcode & 8) !== 0) {
+                return 20;
+            }
+            return 10;
+        }
+        if (sizeField === invalidSizeField) {
+            return 74 + cpuEaReadCycles(eaMode, eaReg, operandWord);
+        }
+        if ((opcode & 0x0100) !== 0) {
+            return cpuCyclesForSize(standardSize, 12, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
+        }
+        return cpuStandardEaToDnCycles(eaMode, eaReg, standardSize);
+    case 0xE000:
+        if (sizeField === invalidSizeField) {
+            return 16 + cpuEaReadCycles(eaMode, eaReg, operandWord);
+        }
+        if ((opcode & dataRegisterShiftCountRegisterBit) !== 0) {
+            return opcodeDynamicCycles;
+        }
+        return cpuShiftCycles(opcode, opcodeQuickValue(opcode));
+    }
+    const opcodeFfc0 = opcode & 0xFFC0;
+    switch (opcodeFfc0 & 0xF9C0) {
+    case 0x4000:
+        return cpuSingleOperandCycles(eaMode, eaReg, operandByte, 8);
+    case 0x4040:
+        return cpuSingleOperandCycles(eaMode, eaReg, operandWord, 8);
+    case 0x4080:
+        return cpuSingleOperandCycles(eaMode, eaReg, operandLong, 10);
+    }
+    if ((opcodeFfc0 & 0xFF00) === 0x4A00 && sizeField !== invalidSizeField) {
+        return 8 + cpuEaReadCycles(eaMode, eaReg, standardSize);
+    }
+    switch (opcodeFfc0) {
+    case 0x40C0:
+        // MOVE from SR
+        if ((opcode & 0x0038) === 0) {
+            return 10;
+        }
+        return 16 + cpuEaWriteCycles(eaMode, eaReg, operandWord);
+    case 0x44C0:
+    case 0x46C0:
+        // MOVE to CCR and SR
+        if ((opcode & 0x0038) === 0) {
+            return 18;
+        }
+        return 18 + cpuEaReadCycles(eaMode, eaReg, operandWord);
+    case 0x4800:
+        return cpuSingleOperandCycles(eaMode, eaReg, operandByte, 10);
+    case 0x4AC0:
+        if ((opcode & 0x0038) === 0) {
+            return 8;
+        }
+        return 14 + cpuEaReadCycles(eaMode, eaReg, operandByte);
+    case 0x4840:
+        // SWAP Dn, then PEA
+        if ((opcode & 0x0038) === 0) {
+            return 8;
+        }
+        return cpuJumpCycles(eaMode, eaReg, 24, 32, 36);
+    case 0x4E80:
+        return cpuJumpCycles(eaMode, eaReg, 32, 34, 38);
+    case 0x4EC0:
+        return cpuJumpCycles(eaMode, eaReg, 16, 18, 22);
+    }
+    const opcodeFff8 = opcode & 0xFFF8;
+    if ((opcodeFff8 & 0xFFBF) === 0x4880) {
+        return 8;
+    }
+    const movemGroup = opcodeFfc0 & 0xFB80;
+    if (movemGroup === 0x4880) {
+        return opcodeDynamicCycles;
+    }
+    switch (opcode & 0xF1C0) {
+    case 0x4180:
+        return 14 + cpuEaReadCycles(eaMode, eaReg, operandWord);
+    case 0x41C0:
+        return cpuJumpCycles(eaMode, eaReg, 8, 16, 20);
+    }
+    switch (opcode) {
+    case 0x4E70:
+        return 136;
+    case 0x4E71:
+    case 0x4E76:
+        return 8;
+    case 0x4E72:
+        return 4;
+    case 0x4E73:
+    case 0x4E77:
+        return 40;
+    case 0x4E75:
+        return 32;
+    }
+    switch (opcode & 0xFFF0) {
+    case 0x4E40:
+        return 62;
+    case 0x4E60:
+        return 8;
+    }
+    switch (opcodeFff8) {
+    case 0x4E50:
+        return 32;
+    case 0x4E58:
+        return 24;
+    }
+    return 0;
+}
+
+/**
+ * @param {number} mode
+ * @param {number} r
+ * @param {number} size
+ * @returns {number}
+ */
+function cpuEaWriteCycles(mode, r, size) {
+    switch (mode) {
+    case 0:
+    case 1:
+        return 0;
+    case 2:
+    case 3:
+    case 4:
+        return cpuCyclesForSize(size, 4, 8, 16);
+    case 5:
+        return cpuCyclesForSize(size, 12, 16, 24);
+    case 6:
+        return cpuCyclesForSize(size, 14, 18, 26);
+    case 7:
+        switch (r) {
+        case 0:
+            return cpuCyclesForSize(size, 12, 16, 24);
+        case 1:
+            return cpuCyclesForSize(size, 20, 24, 32);
+        }
+        break;
+    }
+    return 0;
+}
+
+/**
+ * @param {number} mode
+ * @param {number} r
+ * @param {number} size
+ * @returns {number}
+ */
+function cpuStandardEaToDnCycles(mode, r, size) {
+    let baseCycles = cpuCyclesForSize(size, 8, 8, 10);
+    if (size === operandLong && (mode === 0 || mode === 1 || (mode === 7 && r === 4))) {
+        baseCycles = 12;
+    }
+    return baseCycles + cpuEaReadCycles(mode, r, size);
+}
+
+/**
+ * Clocks for a single-operand instruction: `registerCycles` on a data
+ * register, otherwise its memory form for the size plus the operand fetch.
+ *
+ * @param {number} mode
+ * @param {number} r
+ * @param {number} size
+ * @param {number} registerCycles
+ * @returns {number}
+ */
+function cpuSingleOperandCycles(mode, r, size, registerCycles) {
+    if (mode === 0) {
+        return registerCycles;
+    }
+    return cpuCyclesForSize(size, 12, 16, 24) + cpuEaReadCycles(mode, r, size);
+}
+
+/**
+ * @param {number} mode
+ * @param {number} r
+ * @param {number} anCycles
+ * @param {number} dispCycles
+ * @param {number} indexCycles
+ * @returns {number}
+ */
+function cpuJumpCycles(mode, r, anCycles, dispCycles, indexCycles) {
+    if (mode === 2) {
+        return anCycles;
+    }
+    if (mode === 5 || (mode === 7 && (r === 0 || r === 2))) {
+        return dispCycles;
+    }
+    if (mode === 6 || (mode === 7 && r === 3)) {
+        return indexCycles;
+    }
+    if (mode === 7 && r === 1) {
+        return dispCycles + 6;
+    }
+    return 0;
+}
+
+/**
+ * Install a handler for every opcode that matches a 16-character pattern,
+ * most significant bit first: `0` and `1` are fixed bits and `x` matches both.
+ *
+ * @param {string} pattern
+ * @param {function(Cpu, CpuBus): void} handler
+ */
+function setOpcodeHandler(pattern, handler) {
+    let fixedBits = 0;
+    let floatingBits = 0;
+    for (let i = 0; i < opcodeBitCount; i += 1) {
+        const bit = 1 << (opcodeBitCount - 1 - i);
+        switch (pattern[i]) {
+        case "1":
+            fixedBits |= bit;
+            break;
+        case "x":
+            floatingBits |= bit;
+            break;
+        }
+    }
+    let floatingVariant = floatingBits;
+    for (;;) {
+        opcodeTable[fixedBits | floatingVariant] = handler;
+        if (floatingVariant === 0) {
+            break;
+        }
+        floatingVariant = (floatingVariant - 1) & floatingBits;
+    }
 }
 
 /**
@@ -2470,7 +951,7 @@ export function callTrap(c, bus, trap, callId, instructionLimit) {
         return;
     }
     c.reg[0] = callId;
-    c.exception = qdosTrapVectorBase + trap;
+    c.exception = qdosTrap0Vector + trap;
     c.extraFlag = true;
     runGuestCall(c, bus, c.pc, instructionLimit);
 }
@@ -2513,9 +994,7 @@ function runGuestCall(c, bus, returnPc, instructionLimit) {
     const savedOverride = c.instructionCycleOverride;
     const savedNInst = c.nInst;
     const savedNInst2 = c.nInst2;
-    const savedCycleLimitActive = c.cycleLimitActive;
     c.accessActive = false;
-    c.cycleLimitActive = false;
     if (!c.extraFlag) {
         c.exception = 0;
     }
@@ -2549,7 +1028,244 @@ function runGuestCall(c, bus, returnPc, instructionLimit) {
     c.accessActive = savedAccess;
     c.peripheralWaitCycles = savedPeripheralWaitCycles;
     c.instructionCycleOverride = savedOverride;
-    c.cycleLimitActive = savedCycleLimitActive;
+}
+
+/**
+ * Enter a pending interrupt, then a raised exception, then a trace exception,
+ * and set the instruction counters for the next check. Address errors get the
+ * longer group 0 frame.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
+function exceptionProcessing(c, bus) {
+    if (c.pendingInterrupt !== 0 && !c.doTrace) {
+        processInterrupts(c, bus);
+    }
+    if (c.exception !== 0) {
+        if (c.exception < qdosTrap0Vector || c.exception > qdosTrap4Vector) {
+            c.extraFlag =
+                (c.exception > traceVector && c.exception < qdosTrap0Vector) ||
+                c.exception > qdosTrap15Vector;
+            if (!c.extraFlag) {
+                const sysvars = qdosSysvarBase(c, bus.mem);
+                c.extraFlag = readPointerLong(bus.mem, sysvars + qdosExceptionStateSysvarOffset) === 0;
+            }
+            if (c.extraFlag) {
+                c.nInst2 = 0;
+                c.nInst = 0;
+            }
+        }
+        let stackedPc = c.pc;
+        if (c.exceptionPc >= 0) {
+            stackedPc = c.exceptionPc;
+        }
+        const vector = c.exception;
+        const handlerPc = readPointerLong(bus.mem, vector * qdosLongSize) | 0;
+        pushCpuExceptionFrame(c, bus, stackedPc);
+        setPc(c, handlerPc);
+        if (vector === addressErrorVector) {
+            c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -busErrorFrameSize);
+            writeWord(c, bus, addressOffset(c.reg[stackRegisterIndex], busErrorFrameOpcodeOffset), c.code);
+            writeLong(c, bus, addressOffset(c.reg[stackRegisterIndex], exceptionFramePcOffset), c.badAddress >>> 0);
+            const busErrorFrame = 9 + 16 * Number(c.badReadAccess) + Number(c.badCodeAddress) + 4 * Number(c.supervisor);
+            writeWord(c, bus, c.reg[stackRegisterIndex], busErrorFrame);
+            c.badCodeAddress = false;
+        }
+        c.exception = 0;
+        c.exceptionPc = -1;
+        c.extraFlag = false;
+        c.supervisor = true;
+        c.trace = false;
+    }
+    if (c.doTrace) {
+        pushCpuExceptionFrame(c, bus, c.pc);
+        setPc(c, readPointerLong(bus.mem, traceVector * qdosLongSize) | 0);
+        if (c.nInst === 0) {
+            c.exception = traceVector;
+        }
+        c.supervisor = true;
+        c.trace = false;
+        c.extraFlag = false;
+        c.stopped = false;
+    }
+    c.doTrace = c.trace;
+    if (c.doTrace) {
+        c.nInst2 = c.nInst;
+        c.nInst = 1;
+    }
+    if (c.pendingInterrupt !== 0 && !c.doTrace) {
+        c.extraFlag = true;
+        c.nInst2 = c.nInst;
+        c.nInst = 0;
+    }
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
+function executeTimedPcInstruction(c, bus) {
+    const instructionCycleStart = c.cycleCount;
+    c.peripheralWaitCycles = 0;
+    c.currentInstructionPc = c.pc;
+    c.accessActive = true;
+    const opcode = readDecodedWord(c, bus, c.pc);
+    c.pc = cpuAddressOffset(c.pc, qdosWordSize);
+    executeLoadedOpcode(c, bus, opcode, instructionCycleStart);
+}
+
+/**
+ * Run one opcode and pad the clock to its MC68008 time: the handler's
+ * override, the timing of an exception it raised, or the table's static or
+ * dynamic count. Interrupts are taken after the instruction.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} opcode
+ * @param {number} instructionCycleStart
+ */
+function executeLoadedOpcode(c, bus, opcode, instructionCycleStart) {
+    const baseCycles = opcodeBaseCycles[opcode];
+    c.accessActive = baseCycles >= opcodeDynamicCycles;
+    c.instructionCycleOverride = -1;
+    c.code = opcode;
+    opcodeTable[opcode](c, bus);
+
+    let expectedCycles = c.instructionCycleOverride;
+    if (expectedCycles < 0) {
+        expectedCycles = baseCycles;
+        if (c.exception !== 0) {
+            expectedCycles = 62;
+            const eaMode = (opcode >> 3) & 7;
+            const eaReg = opcode & 7;
+            switch (c.exception) {
+            case addressErrorVector:
+                expectedCycles = 94;
+                break;
+            case divideByZeroVector:
+                expectedCycles = 66 + cpuEaReadCycles(eaMode, eaReg, operandWord);
+                break;
+            case chkVector:
+                expectedCycles = 68 + cpuEaReadCycles(eaMode, eaReg, operandWord);
+                break;
+            case trapvVector:
+                expectedCycles = 66;
+                break;
+            }
+        }
+        if (expectedCycles < opcodeDynamicCycles) {
+            expectedCycles = -expectedCycles - opcodeHostCycleBias;
+        }
+        if (expectedCycles === opcodeDynamicCycles) {
+            expectedCycles = mc68008DynamicInstructionCycles(c, opcode);
+        }
+    }
+    if (expectedCycles > 0) {
+        expectedCycles += c.peripheralWaitCycles;
+        c.cycleCount = Math.max(c.cycleCount, instructionCycleStart + expectedCycles);
+    }
+    c.accessActive = false;
+    c.currentInstructionPc = -1;
+    bus.afterInstruction();
+    processInterrupts(c, bus);
+}
+
+/**
+ * MC68008 clocks for Bcc, DBcc, and Scc Dn from the flags and the DBcc counter
+ * after the instruction; 0 for anything else.
+ *
+ * @param {Cpu} c
+ * @param {number} opcode
+ * @returns {number}
+ */
+function mc68008DynamicInstructionCycles(c, opcode) {
+    switch (opcode & 0xF000) {
+    case 0x6000: {
+        const condition = (opcode >> 8) & conditionCodeMask;
+        if (condition === branchConditionAlways || condition === branchConditionSubroutine) {
+            return 0;
+        }
+        if (conditionIsTrue(c, condition)) {
+            return 18;
+        }
+        if ((opcode & 0xFF) === 0) {
+            return 20;
+        }
+        return 12;
+    }
+    case 0x5000:
+        const condition = (opcode >> 8) & conditionCodeMask;
+        switch (opcode & 0x00F8) {
+        case 0x00C8:
+            // DBcc: the counter reads 0xFFFF once the loop has run out.
+            if (conditionIsTrue(c, condition)) {
+                return 20;
+            }
+            if ((c.reg[opcode & 7] & 0xFFFF) === 0xFFFF) {
+                return 26;
+            }
+            return 18;
+        case 0x00C0:
+            // Scc Dn
+            if (conditionIsTrue(c, condition)) {
+                return 10;
+            }
+            return 8;
+        }
+    }
+    return 0;
+}
+
+/**
+ * Enter the pending interrupt when its level is above the mask, or is the
+ * non-maskable level 7, unless an exception or trace comes first. The entry
+ * takes at least 72 clocks.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ */
+function processInterrupts(c, bus) {
+    if (
+        c.exception !== 0 ||
+        (c.pendingInterrupt !== nonmaskableInterruptLevel && c.pendingInterrupt <= c.interruptMask) ||
+        c.doTrace
+    ) {
+        return;
+    }
+    const interruptCycleStart = c.cycleCount;
+    const savedCpuAccessActive = c.accessActive;
+    const savedPeripheralWaitCycles = c.peripheralWaitCycles;
+    c.peripheralWaitCycles = 0;
+    c.accessActive = true;
+    pushCpuExceptionFrame(c, bus, c.pc);
+    const vectorAddr = (autovectorBase + c.pendingInterrupt) * qdosLongSize;
+    setPc(c, readLong(c, bus, vectorAddr) | 0);
+    c.interruptMask = c.pendingInterrupt;
+    c.pendingInterrupt = 0;
+    c.supervisor = true;
+    c.trace = false;
+    c.stopped = false;
+    c.extraFlag = false;
+    c.accessActive = savedCpuAccessActive;
+    const expectedCycles = interruptExceptionClocks + c.peripheralWaitCycles;
+    c.peripheralWaitCycles = savedPeripheralWaitCycles;
+    c.cycleCount = Math.max(c.cycleCount, interruptCycleStart + expectedCycles);
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} stackedPc
+ */
+function pushCpuExceptionFrame(c, bus, stackedPc) {
+    if (!c.supervisor) {
+        c.usp = c.reg[stackRegisterIndex];
+        c.reg[stackRegisterIndex] = c.ssp;
+    }
+    c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -exceptionFrameSize);
+    writeLong(c, bus, addressOffset(c.reg[stackRegisterIndex], exceptionFramePcOffset), stackedPc >>> 0);
+    writeWord(c, bus, c.reg[stackRegisterIndex], getSr(c));
 }
 
 /**
@@ -2628,12 +1344,12 @@ function addSubtractOp(c, bus) {
     let target = source;
     const eaDestination = (code & eaDestinationBit) !== 0;
     if (eaDestination) {
-        if (!ensureEa(c, bus, eaIsMemoryAlterable(eaMode, eaReg))) {
+        if (!ensureEa(c, eaIsMemoryAlterable(eaMode, eaReg))) {
             return;
         }
         target = modifyAtEaSized(c, bus, size, eaMode, eaReg);
     } else {
-        if (!ensureEa(c, bus, eaIsSizedSource(eaMode, eaReg, size))) {
+        if (!ensureEa(c, eaIsSizedSource(eaMode, eaReg, size))) {
             return;
         }
         source = getFromEaSized(c, bus, size, eaMode, eaReg);
@@ -2663,7 +1379,7 @@ function addressArithmeticOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsValid(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsValid(eaMode, eaReg))) {
         return;
     }
     let size = operandWord;
@@ -2693,7 +1409,7 @@ function immediateAddSubtractOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     const subtract = (code & immediateAddBit) === 0;
@@ -2721,7 +1437,7 @@ function quickDataAlterable(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     const subtract = (code & quickSubtractBit) !== 0;
@@ -2796,6 +1512,33 @@ function extendArithmeticOp(c, bus) {
 
 /**
  * @param {Cpu} c
+ * @param {boolean} subtract
+ * @param {number} target
+ * @param {number} source
+ * @param {number} result
+ * @param {number} size
+ */
+function setAddSubtractFlags(c, subtract, target, source, result, size) {
+    if (subtract) {
+        setCompareFlagsResult(c, target, source, result, size);
+        c.xflag = c.carry;
+        return;
+    }
+    const info = operandSizes[size];
+    const signBit = info.signBit;
+    const valueMask = info.valueMask;
+    target &= valueMask;
+    source &= valueMask;
+    result &= valueMask;
+    c.negative = (result & signBit) !== 0;
+    c.zero = result === 0;
+    c.carry = (((target & source) | ((target | source) & ~result)) & signBit) !== 0;
+    c.overflow = (~(target ^ source) & (target ^ result) & signBit) !== 0;
+    c.xflag = c.carry;
+}
+
+/**
+ * @param {Cpu} c
  * @param {CpuBus} bus
  */
 function logicalRegisterOp(c, bus) {
@@ -2815,12 +1558,12 @@ function logicalRegisterOp(c, bus) {
         if (exclusiveOr) {
             validEa = eaIsDataAlterable(eaMode, eaReg);
         }
-        if (!ensureEa(c, bus, validEa)) {
+        if (!ensureEa(c, validEa)) {
             return;
         }
         target = modifyAtEaSized(c, bus, size, eaMode, eaReg);
     } else {
-        if (!ensureEa(c, bus, eaIsData(eaMode, eaReg))) {
+        if (!ensureEa(c, eaIsData(eaMode, eaReg))) {
             return;
         }
         source = getFromEaSized(c, bus, size, eaMode, eaReg);
@@ -2856,28 +1599,13 @@ function immediateLogicalOp(c, bus) {
         return;
     }
     const operation = (code >> 9) & 7;
-    if ((immediateLogicalOperationMask & (1 << operation)) === 0) {
-        raiseInstructionException(c, illegalInstructionVector);
-        return;
-    }
     if (statusDestination) {
         const target = getSr(c);
         const source = readPcWord(c, bus);
         if (c.exception !== 0) {
             return;
         }
-        let result = 0;
-        switch (operation) {
-        case immediateLogicalAndOp:
-            result = target & source;
-            break;
-        case immediateLogicalEorOp:
-            result = target ^ source;
-            break;
-        default:
-            result = target | source;
-            break;
-        }
+        const result = immediateLogicalResult(operation, target, source);
         if (statusRegister) {
             putSr(c, result);
             return;
@@ -2887,7 +1615,7 @@ function immediateLogicalOp(c, bus) {
     }
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     const size = operandSizeFromBits(code >> sizeFieldShift);
@@ -2896,22 +1624,28 @@ function immediateLogicalOp(c, bus) {
     if (c.exception !== 0) {
         return;
     }
-    let result = 0;
-    switch (operation) {
-    case immediateLogicalAndOp:
-        result = target & source;
-        break;
-    case immediateLogicalEorOp:
-        result = target ^ source;
-        break;
-    default:
-        result = target | source;
-        break;
-    }
+    const result = immediateLogicalResult(operation, target, source);
     if (!rewriteEaSized(c, bus, size, result)) {
         return;
     }
     setNzClearCv(c, result, size);
+}
+
+/**
+ * @param {number} operation
+ * @param {number} target
+ * @param {number} source
+ * @returns {number}
+ */
+function immediateLogicalResult(operation, target, source) {
+    switch (operation) {
+    case immediateLogicalAndOp:
+        return target & source;
+    case immediateLogicalEorOp:
+        return target ^ source;
+    default:
+        return target | source;
+    }
 }
 
 /**
@@ -2953,7 +1687,12 @@ function bitOp(c, bus) {
     const eaReg = code & 7;
     const operation = (code >> 6) & bitOperationMask;
     const staticBit = (code & bitDynamicSourceBit) === 0;
-    if (!ensureEa(c, bus, bitOpEaIsValid(operation, staticBit, eaMode, eaReg))) {
+    let eaValid = eaIsDataAlterable(eaMode, eaReg);
+    if (operation === bitOpTest) {
+        // BTST also reads PC-relative operands, but a static bit number takes no immediate.
+        eaValid = eaIsData(eaMode, eaReg) && (!staticBit || eaMode !== 7 || eaReg !== 4);
+    }
+    if (!ensureEa(c, eaValid)) {
         return;
     }
     let bit = c.reg[(code >> 9) & 7];
@@ -2965,8 +1704,8 @@ function bitOp(c, bus) {
     }
     if (eaMode === 0) {
         const mask = (1 << (bit & 31)) >>> 0;
-        c.zero = ((c.reg[eaReg] >>> 0) & mask) === 0;
         let value = c.reg[eaReg] >>> 0;
+        c.zero = (value & mask) === 0;
         switch (operation) {
         case bitOpTest:
             return;
@@ -3022,7 +1761,7 @@ function chkOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsData(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsData(eaMode, eaReg))) {
         return;
     }
     const d = asI16(c.reg[(code >> 9) & 7]);
@@ -3049,7 +1788,7 @@ function clrOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     const size = operandSizeFromBits(code >> sizeFieldShift);
@@ -3073,13 +1812,13 @@ function cmpOp(c, bus) {
     let size = operandSizeFromBits(code >> sizeFieldShift);
     const addressRegisterTarget = opmode === 3 || opmode === 7;
     if (addressRegisterTarget) {
-        if (!ensureEa(c, bus, eaIsValid(eaMode, eaReg))) {
+        if (!ensureEa(c, eaIsValid(eaMode, eaReg))) {
             return;
         }
         if (opmode === 3) {
             size = operandWord;
         }
-    } else if (!ensureEa(c, bus, eaIsSizedSource(eaMode, eaReg, size))) {
+    } else if (!ensureEa(c, eaIsSizedSource(eaMode, eaReg, size))) {
         return;
     }
     let source = getFromEaSized(c, bus, size, eaMode, eaReg);
@@ -3105,7 +1844,7 @@ function cmpiOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     const size = operandSizeFromBits(code >> sizeFieldShift);
@@ -3172,7 +1911,7 @@ function divideOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsData(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsData(eaMode, eaReg))) {
         return;
     }
     const index = (code >> 9) & 7;
@@ -3266,7 +2005,7 @@ function jumpOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsControl(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsControl(eaMode, eaReg))) {
         return;
     }
     const ea = getEa(c, bus, eaMode, eaReg);
@@ -3287,7 +2026,7 @@ function leaOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsControl(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsControl(eaMode, eaReg))) {
         return;
     }
     const ea = getEa(c, bus, eaMode, eaReg);
@@ -3323,12 +2062,8 @@ function moveOp(c, bus) {
     const destMode = (code >> 6) & 7;
     const destReg = (code >> 9) & 7;
     const sizeCode = (code >> 12) & sizeFieldMask;
-    if (sizeCode === 0) {
-        raiseInstructionException(c, illegalInstructionVector);
-        return;
-    }
     const size = moveOperandSizes[sizeCode];
-    if (!ensureEa(c, bus, eaIsDataAlterable(destMode, destReg)) || !ensureEa(c, bus, eaIsSizedSource(sourceMode, sourceReg, size))) {
+    if (!ensureEa(c, eaIsDataAlterable(destMode, destReg)) || !ensureEa(c, eaIsSizedSource(sourceMode, sourceReg, size))) {
         return;
     }
     const value = getFromEaSized(c, bus, size, sourceMode, sourceReg);
@@ -3343,6 +2078,16 @@ function moveOp(c, bus) {
 }
 
 /**
+ * @param {number} mode
+ * @param {number} r
+ * @param {number} size
+ * @returns {boolean}
+ */
+function eaIsSizedSource(mode, r, size) {
+    return eaIsValid(mode, r) && (size !== operandByte || mode !== 1);
+}
+
+/**
  * @param {Cpu} c
  * @param {CpuBus} bus
  */
@@ -3354,7 +2099,7 @@ function moveToStatus(c, bus) {
     }
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsData(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsData(eaMode, eaReg))) {
         return;
     }
     const x = getFromEaSized(c, bus, operandWord, eaMode, eaReg) & 0xFFFF;
@@ -3376,10 +2121,42 @@ function moveFromSr(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     putToEaSized(c, bus, operandWord, eaMode, eaReg, getSr(c));
+}
+
+/**
+ * Pack the current supervisor, interrupt-mask, and condition flags into SR.
+ *
+ * @param {Cpu} c
+ * @returns {number}
+ */
+function getSr(c) {
+    let sr = (c.interruptMask & 7) << 8;
+    if (c.trace) {
+        sr |= 0x8000;
+    }
+    if (c.supervisor) {
+        sr |= 0x2000;
+    }
+    if (c.xflag) {
+        sr |= 0x0010;
+    }
+    if (c.negative) {
+        sr |= 0x0008;
+    }
+    if (c.zero) {
+        sr |= 0x0004;
+    }
+    if (c.overflow) {
+        sr |= 0x0002;
+    }
+    if (c.carry) {
+        sr |= 0x0001;
+    }
+    return sr;
 }
 
 /**
@@ -3407,7 +2184,7 @@ function moveaOp(c, bus) {
     const code = c.code;
     const sourceMode = (code >> 3) & 7;
     const sourceReg = code & 7;
-    if (!ensureEa(c, bus, eaIsValid(sourceMode, sourceReg))) {
+    if (!ensureEa(c, eaIsValid(sourceMode, sourceReg))) {
         return;
     }
     const destIndex = addressRegisterBase + ((code >> 9) & 7);
@@ -3439,7 +2216,8 @@ function movemOp(c, bus) {
         size = operandLong;
     }
     const step = operandSizes[size].byteCount;
-    if (load && eaMode !== 3 && !ensureEa(c, bus, eaIsControl(eaMode, eaReg))) {
+    const valueMask = operandSizes[size].valueMask;
+    if (load && eaMode !== 3 && !ensureEa(c, eaIsControl(eaMode, eaReg))) {
         return;
     }
     if (!load && eaMode !== 4 && (!eaIsControl(eaMode, eaReg) || (eaMode === 7 && eaReg > 1))) {
@@ -3472,20 +2250,14 @@ function movemOp(c, bus) {
             }
         }
         if ((ea & 1) !== 0) {
-            if (size === operandLong) {
-                readLong(c, bus, ea);
-            } else {
-                readWord(c, bus, ea);
-            }
+            readMemorySized(c, bus, size, ea);
             return;
         }
         for (let i = 0; mask !== 0; i += 1) {
             if ((mask & 1) !== 0) {
-                let value;
-                if (size === operandLong) {
-                    value = readLong(c, bus, ea) | 0;
-                } else {
-                    value = readWord(c, bus, ea);
+                let value = readMemorySized(c, bus, size, ea);
+                if (size === operandWord) {
+                    value = asI16(value);
                 }
                 if (c.exception !== 0) {
                     return;
@@ -3504,21 +2276,13 @@ function movemOp(c, bus) {
     if (eaMode === 4) {
         let ea = c.reg[addressRegisterBase + eaReg];
         if ((ea & 1) !== 0) {
-            if (size === operandLong) {
-                writeLong(c, bus, ea, 0);
-            } else {
-                writeWord(c, bus, ea, 0);
-            }
+            writeMemorySized(c, bus, size, ea, 0);
             return;
         }
         for (let i = registerCount - 1; mask !== 0; i -= 1) {
             if ((mask & 1) !== 0) {
                 ea = addressOffset(ea, -step);
-                if (size === operandLong) {
-                    writeLong(c, bus, ea, c.reg[i] >>> 0);
-                } else {
-                    writeWord(c, bus, ea, c.reg[i] & 0xFFFF);
-                }
+                writeMemorySized(c, bus, size, ea, (c.reg[i] & valueMask) >>> 0);
                 if (c.exception !== 0) {
                     return;
                 }
@@ -3534,20 +2298,12 @@ function movemOp(c, bus) {
         return;
     }
     if ((ea & 1) !== 0) {
-        if (size === operandLong) {
-            writeLong(c, bus, ea, 0);
-        } else {
-            writeWord(c, bus, ea, 0);
-        }
+        writeMemorySized(c, bus, size, ea, 0);
         return;
     }
     for (let i = 0; mask !== 0; i += 1) {
         if ((mask & 1) !== 0) {
-            if (size === operandLong) {
-                writeLong(c, bus, ea, c.reg[i] >>> 0);
-            } else {
-                writeWord(c, bus, ea, c.reg[i] & 0xFFFF);
-            }
+            writeMemorySized(c, bus, size, ea, (c.reg[i] & valueMask) >>> 0);
             if (c.exception !== 0) {
                 return;
             }
@@ -3615,7 +2371,7 @@ function multiplyOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsData(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsData(eaMode, eaReg))) {
         return;
     }
     const index = (code >> 9) & 7;
@@ -3640,6 +2396,81 @@ function multiplyOp(c, bus) {
 }
 
 /**
+ * @param {number} x
+ * @returns {number}
+ */
+function popcount(x) {
+    let v = x >>> 0;
+    v -= (v >>> 1) & 0x55555555;
+    v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+    return (((v + (v >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24;
+}
+
+/**
+ * @param {number} mode
+ * @param {number} r
+ * @returns {boolean}
+ */
+function eaIsData(mode, r) {
+    return eaIsValid(mode, r) && mode !== 1;
+}
+
+/**
+ * @param {number} mode
+ * @param {number} r
+ * @param {number} size
+ * @returns {number}
+ */
+function cpuEaReadCycles(mode, r, size) {
+    switch (mode) {
+    case 0:
+    case 1:
+        return 0;
+    case 2:
+    case 3:
+        return cpuCyclesForSize(size, 4, 8, 16);
+    case 4:
+        return cpuCyclesForSize(size, 6, 10, 18);
+    case 5:
+        return cpuCyclesForSize(size, 12, 16, 24);
+    case 6:
+        return cpuCyclesForSize(size, 14, 18, 26);
+    case 7:
+        switch (r) {
+        case 0:
+        case 2:
+            return cpuCyclesForSize(size, 12, 16, 24);
+        case 1:
+            return cpuCyclesForSize(size, 20, 24, 32);
+        case 3:
+            return cpuCyclesForSize(size, 14, 18, 26);
+        case 4:
+            return cpuCyclesForSize(size, 8, 8, 16);
+        }
+        break;
+    }
+    return 0;
+}
+
+/**
+ * @param {number} size
+ * @param {number} byteCycles
+ * @param {number} wordCycles
+ * @param {number} longCycles
+ * @returns {number}
+ */
+function cpuCyclesForSize(size, byteCycles, wordCycles, longCycles) {
+    switch (size) {
+    case operandByte:
+        return byteCycles;
+    case operandWord:
+        return wordCycles;
+    default:
+        return longCycles;
+    }
+}
+
+/**
  * @param {Cpu} c
  * @param {CpuBus} bus
  */
@@ -3647,7 +2478,7 @@ function nbcdOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     const d = modifyAtEaSized(c, bus, operandByte, eaMode, eaReg);
@@ -3682,7 +2513,7 @@ function negOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     const size = operandSizeFromBits(code >> sizeFieldShift);
@@ -3708,6 +2539,26 @@ function negOp(c, bus) {
 
 /**
  * @param {Cpu} c
+ * @param {number} target
+ * @param {number} source
+ * @param {number} result
+ * @param {number} size
+ */
+function setCompareFlagsResult(c, target, source, result, size) {
+    const info = operandSizes[size];
+    const signBit = info.signBit;
+    const valueMask = info.valueMask;
+    target &= valueMask;
+    source &= valueMask;
+    result &= valueMask;
+    c.negative = (result & signBit) !== 0;
+    c.zero = result === 0;
+    c.carry = (((~target & source) | (result & (~target | source))) & signBit) !== 0;
+    c.overflow = ((target ^ source) & (target ^ result) & signBit) !== 0;
+}
+
+/**
+ * @param {Cpu} c
  * @param {CpuBus} bus
  */
 function nopOp(c, bus) {
@@ -3721,7 +2572,7 @@ function notOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     const size = operandSizeFromBits(code >> sizeFieldShift);
@@ -3755,13 +2606,59 @@ function peaOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsControl(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsControl(eaMode, eaReg))) {
         return;
     }
     const ea = getEa(c, bus, eaMode, eaReg);
-    if (c.exception !== 0 || !pushLongToStack(c, bus, ea)) {
-        return;
+    pushLongToStack(c, bus, ea);
+}
+
+/**
+ * @param {number} mode
+ * @param {number} r
+ * @returns {boolean}
+ */
+function eaIsControl(mode, r) {
+    return mode === 2 || mode === 5 || mode === 6 || (mode === 7 && r <= 3);
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} mode
+ * @param {number} r
+ * @returns {number}
+ */
+function getEa(c, bus, mode, r) {
+    switch (mode) {
+    case 2:
+        return c.reg[addressRegisterBase + r];
+    case 5:
+        return addressOffset(c.reg[addressRegisterBase + r], asI16(readPcWord(c, bus)));
+    case 6:
+        return indexedAddress(c, c.reg[addressRegisterBase + r], readPcWord(c, bus));
+    default:
+        // Mode 7: the callers accept only control modes.
+        return getEaM7(c, bus, r);
     }
+}
+
+/**
+ * Push a long onto the active stack; false when an exception is pending or
+ * the write raised one.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} value
+ * @returns {boolean}
+ */
+function pushLongToStack(c, bus, value) {
+    if (c.exception !== 0) {
+        return false;
+    }
+    c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -qdosLongSize);
+    writeLong(c, bus, c.reg[stackRegisterIndex], value >>> 0);
+    return c.exception === 0;
 }
 
 /**
@@ -3783,7 +2680,7 @@ function shiftRotateMemoryWord(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsMemoryAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsMemoryAlterable(eaMode, eaReg))) {
         return;
     }
     const left = (code & shiftRotateLeftBit) !== 0;
@@ -3814,12 +2711,11 @@ function shiftRotateMemoryWord(c, bus) {
             value = logicalShift(value, 1, 16, left);
         }
         break;
-    case shiftOperationRotateExtend: {
+    case shiftOperationRotateExtend:
         const rotated = rotateExtend(value, 1, 16, c.xflag, left);
         value = rotated.value;
         newCarry = rotated.flag;
         break;
-    }
     case shiftOperationRotate:
         value = rotateBits(value, 1, 16, left);
         if (left) {
@@ -3839,6 +2735,15 @@ function shiftRotateMemoryWord(c, bus) {
     }
     c.negative = (value & 0x8000) !== 0;
     c.zero = value === 0;
+}
+
+/**
+ * @param {number} mode
+ * @param {number} r
+ * @returns {boolean}
+ */
+function eaIsMemoryAlterable(mode, r) {
+    return mode !== 0 && eaIsDataAlterable(mode, r);
 }
 
 /**
@@ -3907,13 +2812,25 @@ function rtsOp(c, bus) {
 
 /**
  * @param {Cpu} c
+ * @param {number} addr
+ */
+function setPc(c, addr) {
+    if ((addr & 1) !== 0) {
+        raiseAddressError(c, addr, true, true);
+        return;
+    }
+    c.pc = addr & addrMask;
+}
+
+/**
+ * @param {Cpu} c
  * @param {CpuBus} bus
  */
 function sccOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     let conditionValue = 0;
@@ -3922,6 +2839,72 @@ function sccOp(c, bus) {
         conditionValue = 0xFF;
     }
     putToEaSized(c, bus, operandByte, eaMode, eaReg, conditionValue);
+}
+
+/**
+ * @param {Cpu} c
+ * @param {number} condition
+ * @returns {boolean}
+ */
+function conditionIsTrue(c, condition) {
+    switch (condition) {
+    case 0:
+        return true;
+    case 1:
+        return false;
+    case 2:
+        return !c.carry && !c.zero;
+    case 3:
+        return c.carry || c.zero;
+    case 4:
+        return !c.carry;
+    case 5:
+        return c.carry;
+    case 6:
+        return !c.zero;
+    case 7:
+        return c.zero;
+    case 8:
+        return !c.overflow;
+    case 9:
+        return c.overflow;
+    case 10:
+        return !c.negative;
+    case 11:
+        return c.negative;
+    case 12:
+        return c.negative === c.overflow;
+    case 13:
+        return c.negative !== c.overflow;
+    case 14:
+        return !c.zero && c.negative === c.overflow;
+    case 15:
+        return c.zero || c.negative !== c.overflow;
+    }
+    return false;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} size
+ * @param {number} mode
+ * @param {number} r
+ * @param {number} value
+ */
+function putToEaSized(c, bus, size, mode, r, value) {
+    if (c.exception !== 0) {
+        return;
+    }
+    if (mode === 0) {
+        writeDataRegisterSized(c, r, size, value);
+        return;
+    }
+    const addr = memoryEaAddr(c, bus, mode, r, operandSizes[size].byteCount);
+    if (c.exception !== 0) {
+        return;
+    }
+    writeMemorySized(c, bus, size, addr, value);
 }
 
 /**
@@ -3937,12 +2920,63 @@ function stopOp(c, bus) {
         return;
     }
     putSr(c, sr);
-    if (c.exception !== 0) {
-        return;
-    }
     c.stopped = true;
     c.nInst2 = 0;
     c.nInst = 0;
+}
+
+/**
+ * Apply SR and swap active stack pointers when supervisor state changes.
+ *
+ * @param {Cpu} c
+ * @param {number} sr
+ */
+function putSr(c, sr) {
+    const oldSuper = c.supervisor;
+    c.trace = (sr & 0x8000) !== 0;
+    c.extraFlag = c.doTrace || c.trace || c.exception !== 0;
+    if (c.extraFlag) {
+        c.nInst2 = c.nInst;
+        c.nInst = 0;
+    }
+    c.supervisor = (sr & 0x2000) !== 0;
+    putCcr(c, sr);
+    c.interruptMask = (sr >> 8) & interruptLevelMask;
+    if (oldSuper !== c.supervisor) {
+        if (c.supervisor) {
+            c.usp = c.reg[stackRegisterIndex];
+            c.reg[stackRegisterIndex] = c.ssp;
+        } else {
+            c.ssp = c.reg[stackRegisterIndex];
+            c.reg[stackRegisterIndex] = c.usp;
+        }
+    }
+}
+
+/**
+ * Replace the condition-code flags from the low byte of a status value.
+ *
+ * @param {Cpu} c
+ * @param {number} cc
+ */
+function putCcr(c, cc) {
+    c.xflag = (cc & 0x0010) !== 0;
+    c.negative = (cc & 0x0008) !== 0;
+    c.zero = (cc & 0x0004) !== 0;
+    c.overflow = (cc & 0x0002) !== 0;
+    c.carry = (cc & 0x0001) !== 0;
+}
+
+/**
+ * @param {Cpu} c
+ * @returns {boolean}
+ */
+function ensureSupervisor(c) {
+    if (c.supervisor) {
+        return true;
+    }
+    raiseInstructionException(c, privilegeViolationVector);
+    return false;
 }
 
 /**
@@ -3965,7 +2999,7 @@ function tasOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     const value = modifyAtEaSized(c, bus, operandByte, eaMode, eaReg);
@@ -3976,11 +3010,208 @@ function tasOp(c, bus) {
 }
 
 /**
+ * Read the operand of a read-modify-write instruction and remember where it
+ * came from for `rewriteEaSized`: a data register as `rewriteRegisterTargetBase`
+ * plus its number, memory as its address.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} size
+ * @param {number} mode
+ * @param {number} r
+ * @returns {number}
+ */
+function modifyAtEaSized(c, bus, size, mode, r) {
+    c.rewriteTarget = rewriteInvalidTarget;
+    if (c.exception !== 0) {
+        return 0;
+    }
+    if (mode === 0) {
+        c.rewriteTarget = rewriteRegisterTargetBase + r;
+        return c.reg[r] & operandSizes[size].valueMask;
+    }
+    const addr = memoryEaAddr(c, bus, mode, r, operandSizes[size].byteCount);
+    if (c.exception !== 0) {
+        return 0;
+    }
+    c.rewriteTarget = addr & addrMask;
+    return readMemorySized(c, bus, size, addr);
+}
+
+/**
+ * Store a read-modify-write result where `modifyAtEaSized` read the operand;
+ * false when that read raised an exception.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} size
+ * @param {number} value
+ * @returns {boolean}
+ */
+function rewriteEaSized(c, bus, size, value) {
+    const target = c.rewriteTarget;
+    c.rewriteTarget = rewriteInvalidTarget;
+    if (c.exception !== 0 || target < 0) {
+        return false;
+    }
+    if (target >= rewriteRegisterTargetBase) {
+        writeDataRegisterSized(c, target - rewriteRegisterTargetBase, size, value);
+        return true;
+    }
+    // The read of the same address and size already succeeded.
+    writeMemorySized(c, bus, size, target, value);
+    return true;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} size
+ * @param {number} addr
+ * @param {number} value
+ */
+function writeMemorySized(c, bus, size, addr, value) {
+    switch (size) {
+    case operandByte:
+        writeByte(c, bus, addr, value);
+        break;
+    case operandWord:
+        writeWord(c, bus, addr, value);
+        break;
+    default:
+        writeLong(c, bus, addr, value);
+        break;
+    }
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @param {number} d
+ */
+function writeWord(c, bus, addr, d) {
+    if (cpuWordOrLongFaultIfNeeded(c, addr, false)) {
+        addCpuBusCycles(c, addr, wordBusCycles);
+        return;
+    }
+    addr &= addrMask;
+    writeDecodedWord(c, bus, addr, d);
+}
+
+/**
+ * Write a long straight to memory when neither word is hardware, leaving ROM
+ * words alone, or otherwise as two decoded word writes.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @param {number} d
+ */
+function writeLong(c, bus, addr, d) {
+    if (cpuWordOrLongFaultIfNeeded(c, addr, false)) {
+        addCpuBusCycles(c, addr, longBusCycles);
+        return;
+    }
+    addr &= addrMask;
+    const lowAddr = (addr + qdosWordSize) & addrMask;
+    if (isDirectRamLongAccess(bus, addr, lowAddr)) {
+        addCpuBusCycles(c, addr, longBusCycles);
+        if (addr >= qdosUserRamBase) {
+            bus.beforeMemoryWrite(addr, qdosLongSize);
+            writePointerLong(bus.mem, addr, d);
+            return;
+        }
+        if (lowAddr >= qdosUserRamBase) {
+            bus.beforeMemoryWrite(lowAddr, qdosWordSize);
+            writePointerWord(bus.mem, lowAddr, d & 0xFFFF);
+        }
+        return;
+    }
+    writeDecodedWord(c, bus, addr, (d >>> 16) & 0xFFFF);
+    writeDecodedWord(c, bus, lowAddr, d & 0xFFFF);
+}
+
+/**
+ * Big-endian long stored straight into a byte array. Guest RAM written this way
+ * bypasses the bus, so callers notify it first with `beforeMemoryWrite`.
+ *
+ * @param {Uint8Array} mem
+ * @param {number} addr
+ * @param {number} v
+ */
+export function writePointerLong(mem, addr, v) {
+    mem[addr] = (v >>> 24) & 0xFF;
+    mem[addr + 1] = (v >>> 16) & 0xFF;
+    mem[addr + 2] = (v >>> 8) & 0xFF;
+    mem[addr + 3] = v & 0xFF;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @param {number} d
+ */
+function writeDecodedWord(c, bus, addr, d) {
+    const next = (addr + 1) & addrMask;
+    if (addressIsHardware(bus, addr) || ((addr & 1) !== 0 && (next === 0 || addressIsHardware(bus, next)))) {
+        writeByte(c, bus, addr, (d >> 8) & 0xFF);
+        writeByte(c, bus, next, d & 0xFF);
+        return;
+    }
+    addCpuBusCycles(c, addr, wordBusCycles);
+    if (!addressIsMapped(bus, addr)) {
+        return;
+    }
+    if (addr >= qdosUserRamBase) {
+        bus.beforeMemoryWrite(addr, qdosWordSize);
+        writePointerWord(bus.mem, addr, d);
+    }
+}
+
+/**
+ * Big-endian word stored straight into a byte array. Guest RAM written this way
+ * bypasses the bus, so callers notify it first with `beforeMemoryWrite`.
+ *
+ * @param {Uint8Array} mem
+ * @param {number} addr
+ * @param {number} v
+ */
+export function writePointerWord(mem, addr, v) {
+    mem[addr] = (v >> 8) & 0xFF;
+    mem[addr + 1] = v & 0xFF;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @param {number} d
+ */
+function writeByte(c, bus, addr, d) {
+    addr &= addrMask;
+    const mapped = addressIsMapped(bus, addr);
+    if (mapped && (!c.accessActive || c.exception === 0) && addressIsHardware(bus, addr)) {
+        accessHardwareByte(c, bus, addr, true, d & 0xFF);
+        return;
+    }
+    addCpuBusCycles(c, addr, byteBusCycles);
+    if (!mapped || (c.accessActive && c.exception !== 0)) {
+        return;
+    }
+    if (addr >= qdosUserRamBase) {
+        bus.beforeMemoryWrite(addr, qdosByteSize);
+        bus.mem[addr] = d & 0xFF;
+    }
+}
+
+/**
  * @param {Cpu} c
  * @param {CpuBus} bus
  */
 function trapOp(c, bus) {
-    coreRaiseException(c, qdosTrapVectorBase + (c.code & 15));
+    coreRaiseException(c, qdosTrap0Vector + (c.code & 15));
 }
 
 /**
@@ -4001,7 +3232,7 @@ function tstOp(c, bus) {
     const code = c.code;
     const eaMode = (code >> 3) & 7;
     const eaReg = code & 7;
-    if (!ensureEa(c, bus, eaIsDataAlterable(eaMode, eaReg))) {
+    if (!ensureEa(c, eaIsDataAlterable(eaMode, eaReg))) {
         return;
     }
     const size = operandSizeFromBits(code >> sizeFieldShift);
@@ -4010,6 +3241,280 @@ function tstOp(c, bus) {
         return;
     }
     setNzClearCv(c, value, size);
+}
+
+/**
+ * @param {Cpu} c
+ * @param {number} value
+ * @param {number} size
+ */
+function setNzClearCv(c, value, size) {
+    const info = operandSizes[size];
+    const masked = value & info.valueMask;
+    c.negative = (masked & info.signBit) !== 0;
+    c.zero = masked === 0;
+    c.overflow = false;
+    c.carry = false;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {boolean} valid
+ * @returns {boolean}
+ */
+function ensureEa(c, valid) {
+    if (valid) {
+        return true;
+    }
+    raiseInstructionException(c, illegalInstructionVector);
+    return false;
+}
+
+/**
+ * @param {number} mode
+ * @param {number} r
+ * @returns {boolean}
+ */
+function eaIsDataAlterable(mode, r) {
+    return mode === 0 || (mode >= 2 && mode <= 6) || (mode === 7 && r <= 1);
+}
+
+/**
+ * @param {number} mode
+ * @param {number} r
+ * @returns {boolean}
+ */
+function eaIsValid(mode, r) {
+    return mode !== 7 || r <= 4;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} size
+ * @param {number} mode
+ * @param {number} r
+ * @returns {number}
+ */
+function getFromEaSized(c, bus, size, mode, r) {
+    if (mode === 0) {
+        return c.reg[r] & operandSizes[size].valueMask;
+    }
+    if (mode === 1 && size !== operandByte) {
+        return c.reg[addressRegisterBase + r] & operandSizes[size].valueMask;
+    }
+    if (mode === 7 && r === 4) {
+        return readPcImmediateSized(c, bus, size);
+    }
+    const addr = memoryEaAddr(c, bus, mode, r, operandSizes[size].byteCount);
+    if (c.exception !== 0) {
+        return 0;
+    }
+    return readMemorySized(c, bus, size, addr);
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} size
+ * @returns {number}
+ */
+function readPcImmediateSized(c, bus, size) {
+    if (size === operandLong) {
+        return readPcLong(c, bus);
+    }
+    return readPcWord(c, bus) & operandSizes[size].valueMask;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} size
+ * @param {number} addr
+ * @returns {number}
+ */
+function readMemorySized(c, bus, size, addr) {
+    switch (size) {
+    case operandByte:
+        return readByte(c, bus, addr);
+    case operandWord:
+        return readWord(c, bus, addr);
+    default:
+        return readLong(c, bus, addr);
+    }
+}
+
+/**
+ * Address of a memory operand, stepping (An)+ and -(An), where a byte step on
+ * A7 stays a word. Callers pass only memory modes their instruction accepts.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} mode
+ * @param {number} r
+ * @param {number} byteCount
+ * @returns {number}
+ */
+function memoryEaAddr(c, bus, mode, r, byteCount) {
+    switch (mode) {
+    case 2:
+        return c.reg[addressRegisterBase + r];
+    case 3:
+    case 4:
+        let step = byteCount;
+        if (byteCount === qdosByteSize && r === stackAddressRegister) {
+            step = qdosWordSize;
+        }
+        if (mode === 3) {
+            const addr = c.reg[addressRegisterBase + r];
+            c.reg[addressRegisterBase + r] = addressOffset(addr, step);
+            return addr;
+        }
+        const addr = addressOffset(c.reg[addressRegisterBase + r], -step);
+        c.reg[addressRegisterBase + r] = addr;
+        return addr;
+    case 5:
+        return addressOffset(c.reg[addressRegisterBase + r], asI16(readPcWord(c, bus)));
+    case 6:
+        return indexedAddress(c, c.reg[addressRegisterBase + r], readPcWord(c, bus));
+    default:
+        // Mode 7: the callers have already checked the addressing mode.
+        return getEaM7(c, bus, r);
+    }
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} r
+ * @returns {number}
+ */
+function getEaM7(c, bus, r) {
+    switch (r) {
+    case 0:
+        return asI16(readPcWord(c, bus));
+    case 1:
+        return readPcLong(c, bus) | 0;
+    case 2: {
+        const base = c.pc;
+        return addressOffset(base, asI16(readPcWord(c, bus)));
+    }
+    default:
+        // (d8,PC,Xn); the callers have already rejected r above 3.
+        const base = c.pc;
+        return indexedAddress(c, base, readPcWord(c, bus));
+    }
+}
+
+/**
+ * Raise an exception that stacks the address of the faulting instruction, as
+ * illegal opcodes, privilege violations, and Line-A/F do. `coreRaiseException`
+ * keeps the current PC.
+ *
+ * @param {Cpu} c
+ * @param {number} vector
+ */
+function raiseInstructionException(c, vector) {
+    c.exceptionPc = c.pc;
+    if (c.currentInstructionPc >= 0) {
+        c.exceptionPc = c.currentInstructionPc;
+    }
+    coreRaiseException(c, vector);
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @returns {number}
+ */
+function readPcLong(c, bus) {
+    const highWord = readPcWord(c, bus);
+    if (c.exception !== 0) {
+        return 0;
+    }
+    const lowWord = readPcWord(c, bus);
+    if (c.exception !== 0) {
+        return 0;
+    }
+    return ((highWord << 16) | lowWord) >>> 0;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @returns {number}
+ */
+function readPcWord(c, bus) {
+    if (c.exception !== 0) {
+        return 0;
+    }
+    const value = readWord(c, bus, c.pc);
+    if (c.exception !== 0) {
+        return 0;
+    }
+    c.pc = cpuAddressOffset(c.pc, qdosWordSize);
+    return value;
+}
+
+/**
+ * Offset within the 1 MiB address space, wrapping at 20 bits like the
+ * 68008's address bus.
+ *
+ * @param {number} base
+ * @param {number} offset
+ * @returns {number}
+ */
+function cpuAddressOffset(base, offset) {
+    return (base + offset) & addrMask;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @returns {number}
+ */
+function readWord(c, bus, addr) {
+    if (cpuWordOrLongFaultIfNeeded(c, addr, true)) {
+        addCpuBusCycles(c, addr, wordBusCycles);
+        return 0;
+    }
+    addr &= addrMask;
+    return readDecodedWord(c, bus, addr);
+}
+
+/**
+ * @param {Cpu} c
+ * @param {number} baseAddr
+ * @param {number} extension
+ * @returns {number}
+ */
+function indexedAddress(c, baseAddr, extension) {
+    let index = c.reg[(extension >> 12) & 0x0F];
+    if ((extension & 0x0800) === 0) {
+        index = asI16(index);
+    }
+    return addressOffset(addressOffset(baseAddr, index), asI8(extension));
+}
+
+/**
+ * Sign-extend the low byte.
+ *
+ * @param {number} value
+ * @returns {number}
+ */
+export function asI8(value) {
+    return (value << 24) >> 24;
+}
+
+/**
+ * Sign-extend the low word.
+ *
+ * @param {number} value
+ * @returns {number}
+ */
+export function asI16(value) {
+    return (value << 16) >> 16;
 }
 
 /**
@@ -4031,19 +3536,328 @@ function unlkOp(c, bus) {
 /**
  * @param {Cpu} c
  * @param {CpuBus} bus
+ * @param {number} addr
+ * @returns {number}
+ */
+function readLong(c, bus, addr) {
+    if (cpuWordOrLongFaultIfNeeded(c, addr, true)) {
+        addCpuBusCycles(c, addr, longBusCycles);
+        return 0;
+    }
+    addr &= addrMask;
+    if (addr === internalIoBase) {
+        addCpuBusCycles(c, addr, longBusCycles);
+        return bus.readHwLongClock();
+    }
+    const lowAddr = (addr + qdosWordSize) & addrMask;
+    if (isDirectRamLongAccess(bus, addr, lowAddr)) {
+        addCpuBusCycles(c, addr, longBusCycles);
+        return readPointerLong(bus.mem, addr);
+    }
+    const highWord = readDecodedWord(c, bus, addr);
+    const lowWord = readDecodedWord(c, bus, lowAddr);
+    return ((highWord << 16) | lowWord) >>> 0;
+}
+
+/**
+ * Raise an address error for an odd word or long access. True means skip the
+ * access, which also follows an earlier exception; untimed accesses never
+ * fault.
+ *
+ * @param {Cpu} c
+ * @param {number} addr
+ * @param {boolean} readAccess
+ * @returns {boolean}
+ */
+function cpuWordOrLongFaultIfNeeded(c, addr, readAccess) {
+    if (!c.accessActive) {
+        return false;
+    }
+    if (c.exception !== 0) {
+        return true;
+    }
+    if ((addr & 1) !== 0) {
+        raiseAddressError(c, addr, readAccess, false);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {number} addr
+ * @param {boolean} readAccess
+ * @param {boolean} instructionAccess
+ */
+function raiseAddressError(c, addr, readAccess, instructionAccess) {
+    coreRaiseException(c, addressErrorVector);
+    c.badReadAccess = readAccess;
+    c.badAddress = addr;
+    c.badCodeAddress = instructionAccess;
+}
+
+/**
+ * Stop the current instruction chunk and schedule a CPU exception vector.
+ *
+ * @param {Cpu} c
+ * @param {number} vector
+ */
+function coreRaiseException(c, vector) {
+    c.exception = vector;
+    c.extraFlag = true;
+    c.nInst2 = c.nInst;
+    c.nInst = 0;
+}
+
+/**
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @param {number} lowAddr
+ * @returns {boolean}
+ */
+function isDirectRamLongAccess(bus, addr, lowAddr) {
+    return addr <= maxLinearLongAddr &&
+        addressIsMapped(bus, addr) &&
+        addressIsMapped(bus, lowAddr) &&
+        !addressIsHardware(bus, addr) &&
+        !addressIsHardware(bus, lowAddr);
+}
+
+/**
+ * Base of the QDOS system variables: the 32 KiB block that holds the
+ * supervisor stack, where Minerva finds them too, as its dual-screen mode
+ * moves them above the second screen. Until that block starts with the QDOS
+ * identification, the default base.
+ *
+ * @param {Cpu} c
+ * @param {Uint8Array} mem
+ * @returns {number}
+ */
+export function qdosSysvarBase(c, mem) {
+    let ssp = c.ssp;
+    if (c.supervisor) {
+        ssp = c.reg[stackRegisterIndex];
+    }
+    const base = ssp & qdosSysvarBlockMask;
+    if (base >= qdosUserRamBase && base + 4 <= mem.length && readPointerLong(mem, base) === qdosSysvarIdent) {
+        return base;
+    }
+    return qdosSysvarDefaultBase;
+}
+
+/**
+ * Big-endian unsigned long read straight from a byte array, without bus timing
+ * or hardware decode.
+ *
+ * @param {Uint8Array} mem
+ * @param {number} addr
+ * @returns {number}
+ */
+export function readPointerLong(mem, addr) {
+    return ((mem[addr] << 24) | (mem[addr + 1] << 16) | (mem[addr + 2] << 8) | mem[addr + 3]) >>> 0;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @returns {number}
+ */
+function readDecodedWord(c, bus, addr) {
+    const next = (addr + 1) & addrMask;
+    if (addressIsHardware(bus, addr) || ((addr & 1) !== 0 && (next === 0 || addressIsHardware(bus, next)))) {
+        const highByte = readByte(c, bus, addr);
+        const lowByte = readByte(c, bus, next);
+        return ((highByte << 8) | lowByte) & 0xFFFF;
+    }
+    addCpuBusCycles(c, addr, wordBusCycles);
+    if (!addressIsMapped(bus, addr)) {
+        return 0;
+    }
+    return readPointerWord(bus.mem, addr);
+}
+
+/**
+ * Big-endian unsigned word read straight from a byte array, without bus timing
+ * or hardware decode.
+ *
+ * @param {Uint8Array} mem
+ * @param {number} addr
+ * @returns {number}
+ */
+export function readPointerWord(mem, addr) {
+    return (mem[addr] << 8) | mem[addr + 1];
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @returns {number}
+ */
+function readByte(c, bus, addr) {
+    addr &= addrMask;
+    const mapped = addressIsMapped(bus, addr);
+    if (mapped && (!c.accessActive || c.exception === 0) && addressIsHardware(bus, addr)) {
+        return accessHardwareByte(c, bus, addr, false, 0);
+    }
+    addCpuBusCycles(c, addr, byteBusCycles);
+    if (!mapped || (c.accessActive && c.exception !== 0)) {
+        return 0;
+    }
+    return bus.mem[addr];
+}
+
+/**
+ * @param {Cpu} c
+ * @param {number} addr
+ * @param {number} busCycles
+ */
+function addCpuBusCycles(c, addr, busCycles) {
+    if (!c.accessActive) {
+        return;
+    }
+    for (let i = 0; i < busCycles; i += 1) {
+        // Only the onboard RAM shares its bus with the ZX8301.
+        const address = addressOffset(addr, i) & addrMask;
+        if (address >= qdosUserRamBase && address < zx8301OnboardRamEnd) {
+            zx8301WaitForCpuRamSlot(c);
+        }
+        c.cycleCount += busCycleClocks;
+    }
+}
+
+/**
+ * Full 32-bit address arithmetic, as held in an address register; the bus
+ * masks the result to 20 bits when it is used.
+ *
+ * @param {number} base
+ * @param {number} offset
+ * @returns {number}
+ */
+function addressOffset(base, offset) {
+    return ((base >>> 0) + (offset >>> 0)) | 0;
+}
+
+/**
+ * Hold a CPU access to onboard RAM until the ZX8301 leaves a bus slot free:
+ * any slot after the display fetch, or the CPU slot of a display chunk.
+ *
+ * @param {Cpu} c
+ */
+function zx8301WaitForCpuRamSlot(c) {
+    const alignment = c.cycleCount % busCycleClocks;
+    if (alignment !== 0) {
+        c.cycleCount += busCycleClocks - alignment;
+    }
+    for (;;) {
+        const slot = Math.floor(c.cycleCount / busCycleClocks) % zx8301BusSlotsPerLine;
+        if (slot >= zx8301DisplayBusSlots || slot % zx8301BusSlotsPerChunk === zx8301CpuDisplaySlot) {
+            return;
+        }
+        c.cycleCount += busCycleClocks;
+    }
+}
+
+/**
+ * Report whether `addr` is ROM, RAM, or the selected QSound window.
+ *
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @returns {boolean}
+ */
+export function addressIsMapped(bus, addr) {
+    if (addr >= 0 && addr < bus.guestRamTop) {
+        return true;
+    }
+    return addr >= bus.qsoundBase && addr < bus.qsoundEnd;
+}
+
+/**
+ * Report whether `addr` is the QIMSI, ZX8302, or selected QSound window.
+ * ROM addresses below the ZX8302 window need only the QIMSI test.
+ *
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @returns {boolean}
+ */
+export function addressIsHardware(bus, addr) {
+    if (addr < internalIoBase) {
+        return addr < bus.qimsiEnd && addr >= bus.qimsiBase;
+    }
+    if (addr < internalIoEnd) {
+        return true;
+    }
+    return addr >= bus.qsoundBase && addr < bus.qsoundEnd;
+}
+
+/**
+ * Sequence DS, the device transfer, and bus completion without moving time back.
+ * E falls half a clock before multiples of ten; E-qualified VPA is sampled at
+ * the end of S4, then a complete E-high transfer must finish before S7 ends.
+ * Extra peripheral clocks are kept outside the instruction's internal padding.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @param {number} addr
+ * @param {boolean} write
+ * @param {number} data
+ * @returns {number}
+ */
+function accessHardwareByte(c, bus, addr, write, data) {
+    if (!c.accessActive) {
+        if (write) {
+            bus.writeHwByte(addr, data);
+            return 0;
+        }
+        return bus.readHwByte(addr);
+    }
+    const start = c.cycleCount;
+    let end = start + busCycleClocks;
+    const peripheral = bus.isEClocked(addr);
+    if (peripheral) {
+        let sync = start + 3;
+        const phase = sync % peripheralEClocks;
+        if (phase >= peripheralELowClocks) {
+            sync += peripheralEClocks - phase;
+        }
+        end = sync + peripheralEClocks - sync % peripheralEClocks;
+        c.peripheralWaitCycles += end - start - busCycleClocks;
+    }
+    c.cycleCount = start + 1 + Number(write);
+    bus.beginHwAccess(addr, write, data);
+    let transfer = end;
+    if (peripheral) {
+        transfer -= 1 - Number(write) * 0.5;
+    }
+    c.cycleCount = transfer;
+    let value = 0;
+    if (write) {
+        bus.writeHwByte(addr, data);
+    } else {
+        value = bus.readHwByte(addr);
+    }
+    if (peripheral) {
+        c.cycleCount = end - 0.5;
+    }
+    bus.endHwAccess();
+    c.cycleCount = end;
+    return value;
+}
+
+/**
+ * @param {Cpu} c
+ * @param {CpuBus} bus
  */
 function shiftRotateDataRegister(c, bus) {
     const code = c.code;
     const left = (code & shiftRotateLeftBit) !== 0;
-    const sizeField = (code >> sizeFieldShift) & sizeFieldMask;
-    if (sizeField === invalidSizeField) {
-        raiseInstructionException(c, illegalInstructionVector);
-        return;
-    }
-    const size = operandSizeFromBits(sizeField);
+    const size = operandSizeFromBits(code >> sizeFieldShift);
     let count = opcodeQuickValue(code);
     if ((code & dataRegisterShiftCountRegisterBit) !== 0) {
         count = c.reg[(code >> 9) & 7] & 63;
+        // Timed here, from the count before the shift can overwrite it.
+        c.instructionCycleOverride = cpuShiftCycles(code, count);
     }
     const width = 8 << size;
     const operation = (code >> dataRegisterShiftOperationShift) & shiftOperationMask;
@@ -4062,6 +3876,9 @@ function shiftRotateDataRegister(c, bus) {
                     carryBit = signBit >>> (count - 1);
                 }
                 c.carry = (value & carryBit) !== 0;
+            } else if (operation === shiftOperationArithmetic && !left) {
+                // Every bit shifted out past the operand is a copy of the sign.
+                c.carry = (value & signBit) !== 0;
             }
             if (operation === shiftOperationArithmetic) {
                 if (left) {
@@ -4075,12 +3892,11 @@ function shiftRotateDataRegister(c, bus) {
                 value = logicalShift(value, count, width, left);
             }
             break;
-        case shiftOperationRotateExtend: {
+        case shiftOperationRotateExtend:
             const rotated = rotateExtend(value, count, width, c.xflag, left);
             value = rotated.value;
             c.carry = rotated.flag;
             break;
-        }
         case shiftOperationRotate:
             value = rotateBits(value, count, width, left);
             if (left) {
@@ -4100,4 +3916,192 @@ function shiftRotateDataRegister(c, bus) {
     c.negative = (value & signBit) !== 0;
     c.zero = value === 0;
     c.overflow = newOverflow;
+}
+
+/**
+ * @param {number} opcode
+ * @param {number} count
+ * @returns {number}
+ */
+function cpuShiftCycles(opcode, count) {
+    if (operandSizeFromBits(opcode >> sizeFieldShift) === operandLong) {
+        return 12 + 2 * count;
+    }
+    return 10 + 2 * count;
+}
+
+/**
+ * @param {number} bits
+ * @returns {number}
+ */
+function operandSizeFromBits(bits) {
+    const sizeField = bits & sizeFieldMask;
+    if (sizeField === invalidSizeField) {
+        return operandLong;
+    }
+    return sizeField;
+}
+
+/**
+ * @param {number} opcode
+ * @returns {number}
+ */
+function opcodeQuickValue(opcode) {
+    const value = (opcode >> opcodeQuickValueShift) & opcodeQuickValueMask;
+    if (value === 0) {
+        return opcodeQuickZeroValue;
+    }
+    return value;
+}
+
+/**
+ * Shift right, copying the sign bit in; `count` must be at least 1.
+ *
+ * @param {number} value
+ * @param {number} count
+ * @param {number} width
+ * @returns {number}
+ */
+function arithmeticShiftRight(value, count, width) {
+    const valueMask = bitWidthMask(width);
+    value &= valueMask;
+    const signBit = 1 << (width - 1);
+    if (count >= width) {
+        if ((value & signBit) !== 0) {
+            return valueMask;
+        }
+        return 0;
+    }
+    let shifted = value >>> count;
+    if ((value & signBit) !== 0) {
+        shifted |= valueMask << (width - count);
+    }
+    return shifted & valueMask;
+}
+
+/**
+ * Shift left; `flag` is the overflow, set when the sign bit changes at any
+ * step.
+ *
+ * @param {number} value
+ * @param {number} count
+ * @param {number} width
+ * @returns {{value: number, flag: boolean}}
+ */
+function arithmeticShiftLeft(value, count, width) {
+    const valueMask = bitWidthMask(width);
+    value &= valueMask;
+    if (count >= width) {
+        return {value: 0, flag: value !== 0};
+    }
+    const signBit = 1 << (width - 1);
+    const oldNegative = (value & signBit) !== 0;
+    let shiftedOutMask = valueMask << (width - 1 - count);
+    shiftedOutMask &= valueMask;
+    let expected = 0;
+    if (oldNegative) {
+        expected = shiftedOutMask;
+    }
+    const newOverflow = (value & shiftedOutMask) !== expected;
+    return {value: (value << count) & valueMask, flag: newOverflow};
+}
+
+/**
+ * @param {number} value
+ * @param {number} count
+ * @param {number} width
+ * @param {boolean} left
+ * @returns {number}
+ */
+function rotateBits(value, count, width, left) {
+    const valueMask = bitWidthMask(width);
+    value &= valueMask;
+    count %= width;
+    if (count === 0) {
+        return value;
+    }
+    const otherCount = width - count;
+    if (left) {
+        return ((value << count) | (value >>> otherCount)) & valueMask;
+    }
+    return ((value >>> count) | (value << otherCount)) & valueMask;
+}
+
+/**
+ * Rotate through X; `flag` is the final X bit.
+ *
+ * @param {number} value
+ * @param {number} count
+ * @param {number} width
+ * @param {boolean} oldX
+ * @param {boolean} left
+ * @returns {{value: number, flag: boolean}}
+ */
+function rotateExtend(value, count, width, oldX, left) {
+    const valueMask = bitWidthMask(width);
+    const signBit = 1 << (width - 1);
+    value &= valueMask;
+    count %= width + 1;
+    let x = oldX;
+    for (let i = 0; i < count; i += 1) {
+        if (left) {
+            const newX = (value & signBit) !== 0;
+            value = ((value << 1) | Number(x)) & valueMask;
+            x = newX;
+        } else {
+            const newX = (value & 1) !== 0;
+            value = value >>> 1;
+            if (x) {
+                value |= signBit;
+            }
+            x = newX;
+        }
+    }
+    return {value, flag: x};
+}
+
+/**
+ * @param {number} value
+ * @param {number} count
+ * @param {number} width
+ * @param {boolean} left
+ * @returns {number}
+ */
+function logicalShift(value, count, width, left) {
+    if (count >= width) {
+        return 0;
+    }
+    const valueMask = bitWidthMask(width);
+    value &= valueMask;
+    if (left) {
+        return (value << count) & valueMask;
+    }
+    return value >>> count;
+}
+
+/**
+ * Low `width` bits set, for widths of 1 to 32.
+ *
+ * @param {number} width
+ * @returns {number}
+ */
+function bitWidthMask(width) {
+    return 0xFFFFFFFF >>> (32 - width);
+}
+
+/**
+ * Replace the low byte, word, or all of a data register; skipped while an
+ * exception is pending.
+ *
+ * @param {Cpu} c
+ * @param {number} index
+ * @param {number} size
+ * @param {number} value
+ */
+function writeDataRegisterSized(c, index, size, value) {
+    if (c.exception !== 0) {
+        return;
+    }
+    const valueMask = operandSizes[size].valueMask;
+    c.reg[index] = (((c.reg[index] >>> 0) & ~valueMask) | (value & valueMask)) | 0;
 }

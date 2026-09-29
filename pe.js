@@ -2,10 +2,8 @@ import * as cpu from "./cpu.js";
 
 // Pointer Environment linkage fields follow the SMSQ/E `keys/con` names, which
 // ptr_gen 2.x shares. Offsets are from the block that `sys_clnk` points to.
-const sysIdentAddr = 0x28000;
-const sysIdent = 0xD2540000;
-const sysChannelTableAddr = 0x28078;
-const sysPointerLinkageAddr = 0x280C4;
+const sysChannelTableOffset = 0x78;
+const sysPointerLinkageOffset = 0xC4;
 const channelDriverOffset = 4;
 const linkageIodOffset = 0x18;
 const linkageSize = 0x130;
@@ -122,14 +120,16 @@ export function setButtons(p, mask) {
  * Write pending host pointer changes into a detected PE linkage. Called once
  * per field before the CPU runs, so the PE scheduler sees at most one button
  * level per frame tick. Moves raise the interrupt count as QPC's driver does,
- * which also wakes a pointer suppressed while a job reads keys.
+ * which also wakes a pointer suppressed while a job reads keys. `sysvars` is
+ * the base of the QDOS system variables.
  *
  * @param {State} p
  * @param {import("./cpu.js").CpuBus} bus
+ * @param {number} sysvars
  */
-export function update(p, bus) {
+export function update(p, bus, sysvars) {
     const mem = bus.mem;
-    const linkage = findLinkage(mem, bus.guestRamTop);
+    const linkage = findLinkage(mem, bus.guestRamTop, sysvars);
     if (linkage === 0) {
         p.armed = true;
         const n = p.queuedButtons.length;
@@ -183,25 +183,26 @@ export function update(p, bus) {
  *
  * @param {Uint8Array} mem
  * @param {number} ramTop
+ * @param {number} sysvars
  * @returns {number}
  */
-function findLinkage(mem, ramTop) {
-    if (cpu.readPointerLong(mem, sysIdentAddr) !== sysIdent) {
+function findLinkage(mem, ramTop, sysvars) {
+    if (cpu.readPointerLong(mem, sysvars) !== cpu.qdosSysvarIdent) {
         return 0;
     }
-    const linkage = cpu.readPointerLong(mem, sysPointerLinkageAddr);
-    if ((linkage & 1) !== 0 || linkage < sysIdentAddr || linkage + linkageSize > ramTop) {
+    const linkage = cpu.readPointerLong(mem, sysvars + sysPointerLinkageOffset);
+    if ((linkage & 1) !== 0 || linkage < sysvars || linkage + linkageSize > ramTop) {
         return 0;
     }
     if (cpu.readPointerLong(mem, linkage + identOffset) !== pointerIdent) {
         return 0;
     }
-    const table = cpu.readPointerLong(mem, sysChannelTableAddr);
-    if (table < sysIdentAddr || table + 4 > ramTop) {
+    const table = cpu.readPointerLong(mem, sysvars + sysChannelTableOffset);
+    if (table < sysvars || table + 4 > ramTop) {
         return 0;
     }
     const channel = cpu.readPointerLong(mem, table);
-    if (channel < sysIdentAddr || channel + channelDriverOffset + 4 > ramTop) {
+    if (channel < sysvars || channel + channelDriverOffset + 4 > ramTop) {
         return 0;
     }
     if (cpu.readPointerLong(mem, channel + channelDriverOffset) !== linkage + linkageIodOffset) {

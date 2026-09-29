@@ -6,85 +6,205 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" type="image/x-icon" href="favicon.ico">
 <style>
+/* A QL Pointer Environment desktop: the mode-4 palette, stippled backdrops,
+   windows with striped title bars and hard shadows, and loose menu items. */
 :root {
     color-scheme: dark;
-    --paper: #111;
-    --ink: #EEE;
-    --muted: #999;
-    --line: #333;
-    --accent: #6C6;
+    --k: #000;
+    --r: #EE2A1F;
+    --g: #22D24C;
+    --w: #F3F3EC;
+    --font: "DejaVu Sans Mono", Menlo, Consolas, "Lucida Console", monospace;
+    --stipple-g: conic-gradient(var(--g) 0 25%, var(--k) 0 100%) 0 0 / 3px 3px;
+    --stipple-r: conic-gradient(var(--r) 0 25%, var(--k) 0 100%) 0 0 / 2px 2px;
+    /* One red pixel every 12 px on every third row, each dotted row shifted by
+       half a period from the last: each layer paints the top-left pixel of its
+       12×6 tile. */
+    --stipple-sparse:
+        conic-gradient(at 1px 1px, transparent 0 270deg, var(--r) 0) 0 1px / 12px 6px,
+        conic-gradient(at 1px 1px, transparent 0 270deg, var(--r) 0) 6px 4px / 12px 6px,
+        var(--k);
+    --stripes-r: repeating-linear-gradient(var(--r) 0 2px, var(--k) 2px 4px);
+    --ring: 0 0 0 2px var(--k), 0 0 0 4px var(--r);
+    --side-w: 400px;
+}
+* {
+    box-sizing: border-box;
+}
+[hidden] {
+    display: none !important;
 }
 html,
 body {
     height: 100%;
-    font: 13px/1.2 monospace;
-    background: var(--paper);
-    color: var(--ink);
-}
-body {
-    display: flex;
-    flex-direction: column;
     margin: 0;
 }
-header {
-    padding: 10px 14px 5px;
-    border-bottom: 1px solid var(--line);
-}
-.colbox,
-.rowbox {
-    display: flex;
-    gap: 6px;
-}
-.colbox {
-    flex: 0;
-    flex-direction: column;
-}
-.rowbox {
-    flex-wrap: wrap;
-    align-items: center;
-    min-width: 0;
-}
-a {
-    color: var(--accent);
-}
-button,
-.switch {
-    padding: 5px 12px;
-    border: 1px solid #666;
-    border-radius: 3.5px;
-    font-weight: bold;
-    background: #333;
-    color: var(--ink);
-    cursor: pointer;
+body {
+    background: var(--stipple-g);
+    color: var(--w);
+    font: 700 13px/1.25 var(--font);
+    letter-spacing: 0.2px;
+    -webkit-font-smoothing: none;
 }
 button {
     font: inherit;
+    color: inherit;
+    letter-spacing: inherit;
+}
+a {
+    color: var(--w);
+}
+a:hover {
+    color: var(--r);
+}
+::selection {
+    background: var(--g);
+    color: var(--k);
+}
+/* The icon symbols, kept out of the layout */
+.icon-defs {
+    position: absolute;
+}
+svg.i {
+    flex: none;
+    width: 15px;
+    height: 15px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.2;
+    stroke-linecap: square;
+}
+kbd {
+    padding: 0 4px;
+    border: 2px solid var(--w);
+    font: 700 11px var(--font);
+}
+.error {
+    color: var(--r);
+}
+
+/* ---------- desktop grid ---------- */
+.app {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--side-w);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: "top top" "stage side" "status status";
+    gap: 18px 22px;
+    height: 100%;
+    padding: 14px 26px 26px 14px;
+}
+
+/* ---------- windows ---------- */
+.win {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    border: 2px solid var(--w);
+    background: var(--k);
+    box-shadow: 8px 8px 0 var(--k);
+}
+.win.red {
+    border-color: var(--r);
+}
+.title {
+    display: flex;
+    flex: none;
+    gap: 6px;
+    height: 26px;
+    padding: 3px;
+    border-bottom: 2px solid var(--w);
+    background: var(--stripes-r);
+}
+.win.red > .title {
+    border-bottom-color: var(--r);
+}
+.title .name {
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    background: var(--w);
+    color: var(--k);
     white-space: nowrap;
 }
-.switch {
-    position: relative;
+.title .info {
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+    overflow: hidden;
+    background: var(--k);
+    color: var(--g);
+    white-space: nowrap;
 }
-button:hover,
-.switch:hover {
-    background: #444;
+.title .fill {
+    flex: 1;
 }
-button:active,
-.switch:active {
-    background: #000;
-}
-button:disabled {
-    color: var(--muted);
+.ctrl {
+    display: grid;
+    place-items: center;
+    min-width: 22px;
+    padding: 0 5px;
+    border: 0;
+    background: var(--k);
+    font-size: 11px;
     cursor: default;
-    background: #222;
 }
-.switch:has(> input:checked) {
-    color: #000;
-    background: var(--accent);
+.ctrl:hover {
+    background: var(--w);
+    color: var(--k);
 }
-.turbo-spacer {
-    visibility: hidden;
+/* A lit control shows its setting is on; hovering shows the usual highlight. */
+body:has(#crt:checked) #crt-ctrl:not(:hover),
+body:has(#stretch:checked) #stretch-ctrl:not(:hover) {
+    background: var(--g);
+    color: var(--k);
 }
-.switch > input {
+
+/* ---------- loose items (buttons and switches) ---------- */
+.li {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 11px;
+    border: 2px solid var(--w);
+    background: var(--k);
+    text-transform: uppercase;
+    white-space: nowrap;
+    cursor: default;
+}
+.li:hover {
+    box-shadow: var(--ring);
+}
+.li:disabled {
+    border-style: dotted;
+    border-color: var(--r);
+    color: var(--r);
+    box-shadow: none;
+    opacity: 0.8;
+}
+.li.sm {
+    gap: 5px;
+    height: 26px;
+    padding: 0 8px;
+    font-size: 12px;
+}
+.li.icon {
+    width: 34px;
+    padding: 0;
+}
+.li.sm.icon {
+    width: 28px;
+}
+.li.act {
+    border-color: var(--r);
+}
+.li > input,
+.tab > input,
+.seg input,
+.toggle > input {
     position: absolute;
     width: 0;
     height: 0;
@@ -92,122 +212,152 @@ button:disabled {
     opacity: 0;
     pointer-events: none;
 }
-.media-info {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow-wrap: break-word;
-    color: var(--muted);
-}
-.media-info.error,
-.media-info > .error {
-    font-weight: 600;
-    color: var(--accent);
-}
-.media-group {
-    display: flex;
-    flex: 1 1 0;
-    flex-wrap: nowrap;
-    align-items: center;
-    gap: 6px;
-}
-.media-group > .media-info {
-    min-width: 16ch;
-}
-#sound-info {
-    flex: 0 1 auto;
-    text-align: right;
-}
-#tab-bar .switch:has(> input:focus-visible) {
-    outline: 1px solid var(--ink);
+.li:has(> input:focus-visible),
+.seg label:has(> input:focus-visible),
+.toggle:has(> input:focus-visible) {
+    outline: 2px solid var(--g);
     outline-offset: 2px;
 }
-#tab-panels {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    margin: 0 -14px;
-    padding: 6px 14px 0;
-    border-top: 1px solid var(--line);
+.sel,
+.menu[open] > summary,
+.seg label:has(> input:checked) {
+    border-color: var(--g);
+    background: var(--g);
+    color: var(--k);
 }
-.tab-panel {
-    grid-area: 1 / 1;
-    visibility: hidden;
-}
-#page-header:has(#tab-media:checked) #panel-media,
-#page-header:has(#tab-roms:checked) #panel-roms,
-#page-header:has(#tab-hardware:checked) #panel-hardware,
-#page-header:has(#tab-display:checked) #panel-display {
-    visibility: visible;
-}
-.media-group-right {
-    justify-content: flex-end;
-}
-.media-group-right > .media-info {
-    text-align: right;
-}
-.mdv-info::before {
-    content: "";
-    display: inline-block;
-    box-sizing: border-box;
-    width: 9px;
-    height: 9px;
-    margin-right: 6px;
-    border: 1px solid #555;
-    border-radius: 50%;
-    background: #222;
-}
-.mdv-info.mdv-motor::before {
-    border-color: var(--accent);
-}
-.mdv-info.mdv-read::before {
-    border-color: var(--accent);
-    background: var(--accent);
-}
-.mdv-info.mdv-write::before {
-    border-color: var(--accent);
-    background: #FFF;
-}
-.mdv-info.mdv-read::before,
-.mdv-info.mdv-write::before {
-    animation: mdv-activity-pulse 600ms ease-in-out infinite alternate;
-}
-@keyframes mdv-activity-pulse {
-    from {
-        opacity: 0.35;
-    }
-    to {
-        opacity: 1;
-    }
-}
-@media (prefers-reduced-motion: reduce) {
-    .mdv-info.mdv-read::before,
-    .mdv-info.mdv-write::before {
-        animation: none;
-    }
-}
-#workspace {
+/* Grouped buttons show the group's white through a 2px gap, so each one sits
+   in the same white edge on all four sides. The hover ring redraws that white
+   before the black gap and red ring of a standalone button, and the hovered
+   button is lifted so the next one does not paint over its ring. */
+.btnwin {
     display: flex;
-    flex: 1;
-    flex-direction: column;
-    min-height: 0;
-    padding: 6px;
+    gap: 2px;
+    border: 2px solid var(--w);
+    background: var(--w);
+    box-shadow: 6px 6px 0 var(--k);
 }
+.btnwin .li {
+    position: relative;
+    border: 0;
+}
+.btnwin .li:hover {
+    z-index: 1;
+    box-shadow: 0 0 0 2px var(--w), 0 0 0 4px var(--k), 0 0 0 6px var(--r);
+}
+.when-paused,
+.when-muted {
+    display: none;
+}
+/* :where() leaves these state rules at one class of specificity, so the
+   narrow layout can still hide the labels. */
+:where(body:has(#paused:checked)) .when-paused,
+:where(body:has(#muted:checked)) .when-muted {
+    display: inline;
+}
+:where(body:has(#paused:checked)) .when-running,
+:where(body:has(#muted:checked)) .when-sound {
+    display: none;
+}
+body:has(#paused:checked) #pause-button,
+body:has(#muted:checked) #mute-quick,
+body:has(#keyboard-toggle:checked) #keyboard-quick {
+    background: var(--g);
+    color: var(--k);
+}
+
+/* ---------- top bar ---------- */
+.top {
+    grid-area: top;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 14px;
+}
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 36px;
+    padding: 0 12px 0 4px;
+    border: 2px solid var(--r);
+    background: var(--k);
+    box-shadow: 6px 6px 0 var(--k);
+}
+.brand .logo {
+    padding: 3px 6px;
+    background: var(--r);
+    font-size: 15px;
+}
+.brand-name {
+    font-size: 15px;
+}
+.brand-sub {
+    color: var(--g);
+    font-size: 12px;
+    font-weight: 400;
+}
+.chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 0;
+}
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 10px;
+    border: 2px solid var(--w);
+    background: var(--k);
+    color: var(--g);
+    box-shadow: 4px 4px 0 var(--k);
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+.chip b {
+    color: var(--w);
+}
+.chip:hover {
+    box-shadow: var(--ring);
+}
+.chip .dot {
+    width: 8px;
+    height: 8px;
+    background: var(--g);
+}
+.top-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-left: auto;
+}
+
+/* ---------- screen ---------- */
+.stage {
+    grid-area: stage;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    min-width: 0;
+    min-height: 0;
+}
+#monitor {
+    flex: 1;
+    min-height: 160px;
+}
+/* The canvas sizes itself to this slot, so the slot must be its parent. The
+   opaque canvas covers the stipple wherever the picture reaches. */
 #screen-slot {
+    position: relative;
     display: flex;
     flex: 1;
     align-items: center;
     justify-content: center;
     min-height: 0;
-}
-#screen-slot:fullscreen {
-    width: 100%;
-    height: 100%;
-    background: #000;
-}
-#screen-slot:fullscreen::backdrop {
-    background: #000;
+    background: var(--stipple-sparse);
 }
 #screen {
-    display: block;
     image-rendering: pixelated;
 }
 #screen.crt {
@@ -219,213 +369,1157 @@ body:has(#mouse-pe:checked) #screen {
 body:has(#mouse-cursor:checked) #screen {
     cursor: auto;
 }
-#keyboard-split {
-    flex: 0 0 6px;
-    cursor: row-resize;
-    background: var(--line);
-    touch-action: none;
+/* The QL pointer stops with the machine, so the host one shows instead. */
+body:has(#paused:checked) #screen {
+    filter: grayscale(0.5) brightness(0.5);
+    cursor: default;
 }
-#keyboard-split:hover,
-body.keyboard-splitting #keyboard-split {
-    background: var(--accent);
+.pause-pill {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    display: none;
+    translate: -50% -50%;
+}
+body:has(#paused:checked) .pause-pill {
+    display: inline-flex;
+}
+.screen-hint {
+    flex: none;
+    padding: 6px 12px;
+    border-top: 2px solid var(--w);
+    color: var(--g);
+    text-align: center;
+}
+
+/* ---------- onscreen keyboard ---------- */
+#keyboard-panel {
+    flex: none;
+}
+#keyboard-split {
+    cursor: row-resize;
+    touch-action: none;
 }
 body.keyboard-splitting {
     user-select: none;
 }
 #keyboard {
-    flex-shrink: 0;
-    padding: 10px 14px 14px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    padding: 14px 20px 16px;
     touch-action: none;
 }
+/* Board units: 1U keys are 28 square with a 6 gap both ways, so the board is
+   560×180. Labels scale with the board through container query units. */
 .keyboard-face {
     position: relative;
-    width: 768px;
-    aspect-ratio: 768 / 180;
-    margin: 0 auto;
-    background: #1A1A1A;
-    border: 1px solid #444;
-    border-radius: 6px;
-    isolation: isolate;
+    width: min(100%, 700px);
+    max-width: 100%;
+    aspect-ratio: 560 / 180;
+    container-type: inline-size;
     user-select: none;
     -webkit-user-select: none;
     -webkit-touch-callout: none;
     -webkit-user-drag: none;
     -webkit-tap-highlight-color: transparent;
-    touch-action: none;
 }
 .keyboard-hit {
+    --b: 2px;
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 2px 0 2px 4px;
+    border: var(--b) solid var(--w);
+    background: var(--k);
+    font-size: clamp(7px, 100cqw * 9.5 / 560, 13px);
+    line-height: 1;
+}
+.keyboard-hit small {
+    min-height: 1em;
+    color: var(--r);
+    font-size: 0.85em;
+}
+.keyboard-hit.fn {
+    border-color: var(--r);
+}
+.keyboard-hit.hover {
+    box-shadow: 0 0 0 2px var(--r);
+}
+.keyboard-hit.on {
+    border-color: var(--g);
+    background: var(--g);
+    color: var(--k);
+}
+.keyboard-hit.on small {
+    color: var(--k);
+}
+/* ENTER is a mirrored L: the key is the bottom-row foot, and ::after is the
+   upright filling the empty 1U above its right end. The upright has no bottom
+   border and its face covers the foot's top border under it, so one outline
+   runs round the whole shape. ::before is the upright's share of the hover
+   ring, ending on the foot's own ring and painted under the upright. Sizes
+   are board units: foot 1.75U (53.5×28), upright 1U wide, one row (34) high. */
+.keyboard-hit.enter {
+    --o: 2px;
+}
+.keyboard-hit.enter::before,
+.keyboard-hit.enter::after {
+    content: "";
     position: absolute;
     box-sizing: border-box;
+}
+.keyboard-hit.enter::before {
+    display: none;
+    right: calc(-1 * var(--b) - var(--o));
+    bottom: calc(100% + var(--b));
+    width: calc(28 / 53.5 * (100% + 2 * var(--b)) + 2 * var(--o));
+    height: calc(34 / 28 * (100% + 2 * var(--b)) + var(--o));
+    background: var(--r);
+}
+.keyboard-hit.enter.hover::before {
+    display: block;
+}
+.keyboard-hit.enter::after {
+    right: calc(-1 * var(--b));
+    bottom: 100%;
+    width: calc(28 / 53.5 * (100% + 2 * var(--b)));
+    height: calc(34 / 28 * (100% + 2 * var(--b)) + var(--b));
+    border: var(--b) solid var(--w);
+    border-bottom: 0;
+    background: var(--k);
+}
+.keyboard-hit.enter.on::after {
+    border-color: var(--g);
+    background: var(--g);
+}
+
+/* ---------- settings ---------- */
+.side {
+    grid-area: side;
+}
+.tabs {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    margin: 12px 12px 0;
+    border: 2px solid var(--w);
+}
+.tab {
     display: flex;
     flex-direction: column;
     align-items: center;
+    gap: 4px;
+    padding: 7px 2px 6px;
+    font-size: 11.5px;
+    text-transform: uppercase;
+}
+.tab + .tab {
+    border-left: 2px solid var(--w);
+}
+.tab svg.i {
+    width: 17px;
+    height: 17px;
+    color: var(--r);
+}
+.tab:hover {
+    background: var(--w);
+    color: var(--k);
+}
+.tab:has(> input:checked) {
+    background: var(--g);
+    color: var(--k);
+}
+.tab:hover svg.i,
+.tab:has(> input:checked) svg.i {
+    color: var(--k);
+}
+.tab:has(> input:focus-visible) {
+    outline: 2px solid var(--r);
+    outline-offset: -5px;
+}
+#tab-panels {
+    flex: 1;
+    min-height: 0;
+    padding: 4px 14px 16px;
+    overflow: auto;
+    scrollbar-color: var(--w) var(--k);
+    scrollbar-width: thin;
+}
+.panel {
+    display: none;
+}
+.app:has(#tab-media:checked) #panel-media,
+.app:has(#tab-roms:checked) #panel-roms,
+.app:has(#tab-hardware:checked) #panel-hardware,
+.app:has(#tab-display:checked) #panel-display {
+    display: block;
+}
+.section-h {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 16px 0 10px;
+    color: var(--r);
+    text-transform: uppercase;
+}
+.section-h::after {
+    content: "";
+    flex: 1;
+    order: 1;
+    height: 6px;
+    background: var(--stripes-r);
+}
+.section-h .aside {
+    display: inline-flex;
+    order: 2;
+    align-items: center;
+    gap: 8px;
+    color: var(--w);
+}
+.section-h .aside.error {
+    color: var(--r);
+}
+.stack {
+    display: grid;
+    gap: 10px;
+}
+
+/* drive and ROM cards */
+.card {
+    border: 2px solid var(--w);
+}
+.drive {
+    padding: 10px;
+}
+.card.empty {
+    border-style: dotted;
+    border-color: var(--r);
+}
+.drive-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.drive-ico {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border: 2px solid var(--w);
+}
+.card.empty .drive-ico {
+    border-style: dotted;
+    border-color: var(--r);
+    color: var(--r);
+}
+.drive-title {
+    flex: 1;
+    min-width: 0;
+}
+.drive-id {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--r);
+    font-size: 12px;
+}
+.drive-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.card.empty .drive-name {
+    color: var(--r);
+}
+.badge {
+    padding: 0 5px;
+    background: var(--r);
+    color: var(--w);
+    font-size: 10.5px;
+    text-transform: uppercase;
+}
+.badge.neutral {
+    background: var(--w);
+    color: var(--k);
+}
+.led {
+    flex: none;
+    width: 10px;
+    height: 10px;
+    border: 2px dotted var(--r);
+}
+.led.on {
+    border: 2px solid var(--w);
+}
+.led.motor {
+    background: var(--w);
+}
+.led.read {
+    border: 2px solid var(--g);
+    background: var(--g);
+}
+.led.write {
+    border: 2px solid var(--r);
+    background: var(--r);
+}
+.meter {
+    margin: 10px 0 2px;
+}
+.meter-bar {
+    height: 12px;
+    border: 2px solid var(--w);
+}
+.meter-bar i {
+    display: block;
+    height: 100%;
+    background: repeating-linear-gradient(90deg, var(--g) 0 4px, var(--k) 4px 6px);
+}
+/* Green notes at the regular weight */
+.meter-text,
+.drop-hint,
+.row-label p,
+.desc,
+.addr {
+    color: var(--g);
+    font-size: 12px;
+    font-weight: 400;
+}
+.meter-text {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 5px;
+}
+.drive-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+}
+.drive-actions .grow {
+    flex: 1;
+}
+.drop-hint {
+    margin-top: 8px;
+}
+.card:not(.empty) .drop-hint {
+    display: none;
+}
+
+/* New menus */
+.menu {
+    position: relative;
+}
+.menu > summary::-webkit-details-marker {
+    display: none;
+}
+.menu-list {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    z-index: 20;
+    min-width: 250px;
+    border: 2px solid var(--w);
+    background: var(--k);
+    box-shadow: 8px 8px 0 var(--k);
+}
+.menu.up .menu-list {
+    top: auto;
+    bottom: calc(100% + 8px);
+}
+.menu-list::before {
+    content: "";
+    display: block;
+    height: 20px;
+    border-bottom: 2px solid var(--w);
+    background: var(--stripes-r);
+}
+.menu-list button {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    background: var(--k);
+    text-align: left;
+    text-transform: uppercase;
+}
+.menu-list button + button {
+    border-top: 2px solid var(--w);
+}
+.menu-list button:hover {
+    background: var(--w);
+    color: var(--k);
+}
+.menu-list button span {
+    color: var(--g);
+    font-size: 11.5px;
+    font-weight: 400;
+    text-transform: none;
+}
+.menu-list button:hover span {
+    color: var(--k);
+}
+
+/* settings rows */
+.rows {
+    padding: 2px 12px;
+}
+.row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 11px 0;
+    border-bottom: 2px dotted var(--w);
+}
+.row:last-child {
+    border-bottom: 0;
+}
+.row.col {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+.row-label {
+    min-width: 0;
+}
+.row-label strong {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    text-transform: uppercase;
+}
+.row-label p,
+.desc {
+    margin: 3px 0 0;
+}
+.resets {
+    color: var(--r);
+}
+.row:has(.toggle > input:disabled) .row-label strong,
+.row:has(.toggle > input:disabled) .row-label p {
+    color: var(--r);
+}
+
+/* OFF|ON switch: the active cell is filled, red for off and green for on */
+.toggle {
+    display: inline-flex;
+    flex: none;
+    border: 2px solid var(--w);
+}
+.toggle span {
+    padding: 3px 7px;
+    font-size: 11.5px;
+}
+.toggle span + span {
+    border-left: 2px solid var(--w);
+}
+.toggle:not(:has(> input:checked)) span:first-of-type {
+    background: var(--r);
+    color: var(--k);
+}
+.toggle:has(> input:checked) span:last-of-type {
+    background: var(--g);
+    color: var(--k);
+}
+.toggle:hover {
+    box-shadow: var(--ring);
+}
+.toggle:has(> input:disabled),
+.seg label:has(> input:disabled) {
+    border-style: dotted;
+    border-color: var(--r);
+    color: var(--r);
+    box-shadow: none;
+}
+.toggle:has(> input:disabled) span {
+    background: var(--k) !important;
+    color: var(--r) !important;
+}
+.toggle:has(> input:disabled) span + span {
+    border-left-color: var(--r);
+}
+
+/* segmented choice: a row of loose items, one selected */
+.seg {
+    display: grid;
+    grid-auto-columns: 1fr;
+    grid-auto-flow: column;
+    gap: 6px;
+}
+.seg label {
+    display: flex;
+    align-items: center;
     justify-content: center;
-    border: 1px solid #555;
-    border-radius: 4px;
-    background: #2A2A2A;
-    color: #DDD;
-    font: 12px/1 monospace;
-    letter-spacing: 0.02em;
-    user-select: none;
-    -webkit-user-select: none;
-    touch-action: none;
-    -webkit-touch-callout: none;
-    -webkit-tap-highlight-color: transparent;
+    height: 30px;
+    padding: 0 6px;
+    border: 2px solid var(--w);
+    text-transform: uppercase;
+    white-space: nowrap;
 }
-.keyboard-hit.hover {
-    background: color-mix(in srgb, var(--accent) 25%, #2A2A2A);
+.seg label:hover {
+    box-shadow: var(--ring);
 }
-.keyboard-hit.on,
-.keyboard-hit.on.hover {
-    background: #FFF;
-    color: #111;
-    mix-blend-mode: difference;
+/* Selected but not available yet, like QSound while its ROM loads */
+.seg label:has(> input:checked:disabled) {
+    border-color: var(--g);
+    background: var(--k);
+    color: var(--g);
 }
-@media (max-width: 700px) {
-    .media-group {
-        flex-basis: 100%;
-        flex-wrap: wrap;
+.seg small {
+    margin-left: 5px;
+    color: var(--r);
+    font-size: 10.5px;
+}
+.seg label:has(> input:checked) small {
+    color: var(--k);
+}
+.note {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 9px;
+    background: var(--r);
+    font-size: 12px;
+}
+.note svg.i {
+    margin-top: 1px;
+}
+
+/* ROMs */
+.memmap {
+    display: flex;
+    height: 34px;
+    margin: 4px 0 12px;
+    border: 2px solid var(--w);
+}
+.memmap div {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    padding: 0 6px;
+    overflow: hidden;
+    border-right: 2px solid var(--w);
+    color: var(--r);
+    font-size: 10.5px;
+    line-height: 1.15;
+    white-space: nowrap;
+}
+/* The 48K system ROM beside the 16K cartridge and I/O areas */
+.memmap div:first-child {
+    flex: 3;
+}
+.memmap div:last-child {
+    border-right: 0;
+}
+.memmap div.full {
+    background: var(--stipple-r);
+    color: var(--w);
+    text-shadow: 0 0 2px var(--k), 0 0 2px var(--k), 0 0 2px var(--k);
+}
+.rom {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+}
+/* A ROM card with a button group, when too narrow for its title and buttons,
+   moves the buttons to a second line, keeping them at the right edge. */
+.rom:has(> .rom-actions) {
+    flex-wrap: wrap;
+}
+.rom:has(> .rom-actions) > .drive-title {
+    flex-basis: 10em;
+}
+.rom-actions {
+    display: flex;
+    gap: 10px;
+    margin-left: auto;
+}
+
+/* ---------- status bar ---------- */
+.status {
+    grid-area: status;
+    flex-direction: row;
+    align-items: center;
+    gap: 14px;
+    height: 34px;
+    padding: 0 12px 0 0;
+    overflow: hidden;
+    white-space: nowrap;
+}
+.status .tag {
+    display: flex;
+    align-items: center;
+    align-self: stretch;
+    padding: 0 10px;
+    border-right: 2px solid var(--w);
+    background: var(--stripes-r);
+}
+.status .tag span {
+    padding: 1px 8px;
+    background: var(--w);
+    color: var(--k);
+}
+.messages {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.messages span:not(:first-child):not(:empty)::before {
+    content: " · ";
+    color: var(--g);
+}
+.status-right {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-left: auto;
+}
+.leds {
+    display: flex;
+    gap: 10px;
+}
+.leds span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11.5px;
+}
+#stats-info {
+    display: flex;
+    gap: 14px;
+}
+#stats-info b {
+    color: var(--g);
+}
+.status a {
+    display: inline-flex;
+}
+
+/* ---------- drop overlay ---------- */
+#drop {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    display: none;
+    place-items: center;
+    background: var(--stipple-r);
+}
+#drop.on {
+    display: grid;
+}
+#drop .win {
+    width: min(540px, 90vw);
+}
+.drop-body {
+    padding: 16px 18px;
+}
+.drop-routes {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px 18px;
+    margin-top: 12px;
+    font-weight: 400;
+}
+.drop-routes b {
+    color: var(--g);
+}
+
+/* ---------- screen only: fullscreen and its fallback ---------- */
+body.screen-only .app {
+    grid-template-areas: "stage";
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    height: 100%;
+    padding: 0;
+}
+body.screen-only .top,
+body.screen-only .side,
+body.screen-only .status,
+body.screen-only #monitor > .title,
+body.screen-only .screen-hint {
+    display: none;
+}
+body.screen-only #monitor {
+    flex: 1;
+    border: 0;
+    box-shadow: none;
+}
+body.screen-only #screen-slot {
+    flex: 1;
+    height: auto;
+    background: var(--k);
+}
+
+/* ---------- narrower windows ---------- */
+@media (max-width: 1100px) {
+    :root {
+        --side-w: 360px;
     }
-    .turbo-spacer {
+    .chip.opt,
+    .brand-sub {
+        display: none;
+    }
+}
+@media (max-width: 900px) {
+    .app {
+        grid-template-areas: "top" "stage" "side" "status";
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto auto auto auto;
+        height: auto;
+        min-height: 100%;
+        padding: 10px 18px 22px 10px;
+    }
+    #monitor {
+        flex: none;
+    }
+    #screen-slot {
+        flex: none;
+        height: min(72vw, 64vh);
+    }
+    #tab-panels {
+        overflow: visible;
+    }
+    .chips,
+    .leds {
+        display: none;
+    }
+    .status {
+        position: sticky;
+        bottom: 8px;
+        z-index: 5;
+    }
+}
+@media (max-width: 560px) {
+    .top .label,
+    .stat-opt,
+    .status .tag,
+    .title .info {
+        display: none;
+    }
+    .top-actions {
+        gap: 8px;
+    }
+    .status {
+        padding-left: 10px;
+    }
+    #keyboard {
+        padding: 10px 8px 12px;
+    }
+    .keyboard-hit {
+        --b: 1px;
+        justify-content: flex-end;
+        padding: 0 0 1px 1px;
+        font-size: clamp(6px, 100cqw * 11 / 560, 13px);
+    }
+    .keyboard-hit small {
         display: none;
     }
 }
 </style>
 </head>
 <body>
-<header id="page-header" class="colbox">
-    <div class="rowbox">
-        <div id="tab-bar" class="rowbox" role="radiogroup" aria-label="Settings">
-            <label class="switch" title="Microdrive, floppy, and hard disk images"><input id="tab-media" type="radio" name="tab" value="media" checked>Media</label>
-            <label class="switch" title="System ROM and extension ROM slots"><input id="tab-roms" type="radio" name="tab" value="roms">ROMs</label>
-            <label class="switch" title="Machine timing, memory, sound cards, and mouse"><input id="tab-hardware" type="radio" name="tab" value="hardware">Hardware</label>
-            <label class="switch" title="Display filter, layout, and onscreen keyboard"><input id="tab-display" type="radio" name="tab" value="display">Display</label>
+<svg class="icon-defs" width="0" height="0">
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="4.5" width="4" height="15"/><rect x="14" y="4.5" width="4" height="15"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 24 24"><path d="M3 4v6h6"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L3 10"/></symbol>
+    <symbol id="i-vol" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="m23 9-6 6M17 9l6 6"/></symbol>
+    <symbol id="i-max" viewBox="0 0 24 24"><path d="M8 3H3v5M21 8V3h-5M16 21h5v-5M3 16v5h5"/></symbol>
+    <symbol id="i-kbd" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12"/><path d="M6 10h1M10 10h1M14 10h1M18 10h1M7 14h10"/></symbol>
+    <symbol id="i-gh" viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.9a3.4 3.4 0 0 0-.9-2.6c3.1-.4 6.4-1.5 6.4-7A5.4 5.4 0 0 0 20 4.8 5 5 0 0 0 19.9 1S18.7.6 16 2.5a13.4 13.4 0 0 0-7 0C6.3.6 5.1 1 5.1 1A5 5 0 0 0 5 4.8a5.4 5.4 0 0 0-1.5 3.8c0 5.4 3.3 6.6 6.4 7A3.4 3.4 0 0 0 9 18.1V22"/></symbol>
+    <symbol id="i-media" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12"/><rect x="7" y="9" width="10" height="4"/></symbol>
+    <symbol id="i-cart" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12"/><circle cx="8.5" cy="12" r="2"/><circle cx="15.5" cy="12" r="2"/><path d="M10.5 12h3"/></symbol>
+    <symbol id="i-hdd" viewBox="0 0 24 24"><path d="M22 12H2"/><path d="M5.5 5 2 12v8h20v-8l-3.5-7z"/><path d="M6 16h1M10 16h1"/></symbol>
+    <symbol id="i-flp" viewBox="0 0 24 24"><path d="M3 3h13l5 5v13H3z"/><path d="M17 21v-8H7v8M7 3v5h8"/></symbol>
+    <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="3" width="12" height="18"/><path d="M3 7h3M3 11h3M3 15h3M18 7h3M18 11h3M18 15h3"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14"/><path d="M8 21h8M12 17v4"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v6H3v-6"/><path d="m17 8-5-5-5 5M12 3v12"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v6H3v-6"/><path d="m7 10 5 5 5-5M12 15V3"/></symbol>
+    <symbol id="i-eject" viewBox="0 0 24 24"><path d="M12 5 20 15H4z"/><path d="M4 19h16"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3 2 21h20z"/><path d="M12 10v4M12 17v1"/></symbol>
+</svg>
+<div class="app">
+    <header class="top">
+        <div class="brand">
+            <span class="logo">QL</span>
+            <span class="brand-name">QLRun</span>
+            <span class="brand-sub">Sinclair QL in the browser</span>
         </div>
-        <label class="switch" title="Stop the emulated machine; clear to continue from the same point"><input id="paused" type="checkbox">Paused</label>
-        <button id="reset">Reset</button>
-        <div class="media-info"><span id="init-info">Initializing...</span> <span id="qsound-info"></span> <span id="startup-file-info"></span></div>
-        <div id="sound-info" class="media-info" title="Emulated frames per second (about 50.1 PAL / 60.1 NTSC is real time), then audio overrun discarded and underrun filled with silence over the last second"></div>
-        <a href="https://github.com/josef-jelinek/QLRun">GitHub repo</a>
-    </div>
-    <div id="tab-panels">
-        <section id="panel-media" class="tab-panel colbox" aria-labelledby="tab-media">
-            <div class="rowbox media-row">
-                <div class="media-group">
-                    <label class="switch" title="Run eight times faster while either Microdrive is reading"><input id="turbo" type="checkbox" checked>Turbo</label>
-                    <strong>MDV1</strong>
-                    <button id="new-mdv1">New</button>
-                    <button id="load-mdv1">Load</button>
-                    <input id="file-mdv1" type="file" accept=".mdv" style="display: none">
-                    <button id="download-mdv1" disabled>Save</button>
-                    <button id="eject-mdv1" disabled>Eject</button>
-                    <div id="mdv1-info" class="media-info mdv-info" title="Microdrive 1 idle">No cartridge.</div>
-                </div>
-                <div class="media-group media-group-right">
-                    <div id="hdd-info" class="media-info">No hard disk.</div>
-                    <button id="new-hdd-4" title="Insert an empty formatted 4 MiB QLWA hard disk">New 4MB</button>
-                    <button id="new-hdd-16" title="Insert an empty formatted QLWA hard disk of 32764 sectors, just under 16 MiB: the largest whose free space QDOS reports exactly">New 16MB</button>
-                    <button id="load-hdd">Load</button>
-                    <input id="file-hdd" type="file" accept=".win" style="display: none">
-                    <button id="download-hdd" disabled>Save</button>
-                    <button id="eject-hdd" disabled>Eject</button>
-                    <strong>WIN1</strong>
-                </div>
+        <nav class="chips">
+            <label class="chip" for="tab-hardware" title="Video standard"><span class="dot"></span><b id="chip-video-main">PAL</b><span id="chip-video-sub">50 Hz</span></label>
+            <label class="chip" for="tab-hardware" title="Memory"><b id="chip-ram-main">128K</b><span>RAM</span></label>
+            <label class="chip" for="tab-hardware" title="Sound card"><b id="chip-sound-main">QSound</b></label>
+            <label class="chip opt" for="tab-roms" title="System ROM"><b id="chip-rom-main">js.rom</b><span id="chip-rom-sub">auto</span></label>
+            <label id="chip-mouse" class="chip opt" for="tab-hardware" title="Mouse" hidden><b id="chip-mouse-main">PE</b><span>mouse</span></label>
+        </nav>
+        <div class="top-actions">
+            <div class="btnwin">
+                <label id="pause-button" class="li" title="Stop the emulated machine; select again to continue from the same point"><input id="paused" type="checkbox"><svg class="i when-running"><use href="#i-pause"></use></svg><svg class="i when-paused"><use href="#i-play"></use></svg><span class="label when-running">Pause</span><span class="label when-paused">Resume</span></label>
+                <button id="reset" class="li" title="Restart the 68008 from the ROM reset vector; inserted media stay"><svg class="i"><use href="#i-reset"></use></svg><span class="label">Reset</span></button>
             </div>
-            <div class="rowbox media-row">
-                <div class="media-group">
-                    <span class="switch turbo-spacer" aria-hidden="true">Turbo</span>
-                    <strong>MDV2</strong>
-                    <button id="new-mdv2">New</button>
-                    <button id="load-mdv2">Load</button>
-                    <input id="file-mdv2" type="file" accept=".mdv" style="display: none">
-                    <button id="download-mdv2" disabled>Save</button>
-                    <button id="eject-mdv2" disabled>Eject</button>
-                    <div id="mdv2-info" class="media-info mdv-info" title="Microdrive 2 idle">No cartridge.</div>
-                </div>
-                <div class="media-group media-group-right">
-                    <div id="fdd-info" class="media-info">No floppy.</div>
-                    <button id="new-fdd-dd" title="Insert an empty formatted 720 KiB double-density (QL5A) floppy">New DD</button>
-                    <button id="new-fdd-hd" title="Insert an empty formatted 1440 KiB high-density (QL5B) floppy">New HD</button>
-                    <button id="load-fdd">Load</button>
-                    <input id="file-fdd" type="file" accept=".img" style="display: none">
-                    <button id="download-fdd" disabled>Save</button>
-                    <button id="eject-fdd" disabled>Eject</button>
-                    <strong>FLP1</strong>
-                </div>
+            <div class="btnwin">
+                <label id="mute-quick" class="li icon" for="muted" title="Mute the beeper and sound card"><svg class="i when-sound"><use href="#i-vol"></use></svg><svg class="i when-muted"><use href="#i-mute"></use></svg></label>
+                <label id="keyboard-quick" class="li icon" for="keyboard-toggle" title="Onscreen keyboard"><svg class="i"><use href="#i-kbd"></use></svg></label>
+                <button id="fullscreen-quick" class="li icon" title="Fullscreen (F11)"><svg class="i"><use href="#i-max"></use></svg></button>
+            </div>
+        </div>
+    </header>
+
+    <main class="stage">
+        <section id="monitor" class="win">
+            <div class="title">
+                <span class="name">#1 SCREEN</span>
+                <span id="screen-info" class="info">MODE 4 · PAL · 128K</span>
+                <span class="fill"></span>
+                <label id="crt-ctrl" class="ctrl" for="crt" title="CRT display filter">(=)</label>
+                <label id="stretch-ctrl" class="ctrl" for="stretch" title="Fill the available display area">&lt;-&gt;</label>
+                <button id="fullscreen-ctrl" class="ctrl" title="Fullscreen (F11)">[ ]</button>
+            </div>
+            <div id="screen-slot">
+                <canvas id="screen" width="512" height="256"></canvas>
+                <label class="li sel pause-pill" for="paused" title="Continue from the same point"><svg class="i"><use href="#i-play"></use></svg>Resume</label>
+            </div>
+            <div id="mouse-hint" class="screen-hint" hidden></div>
+        </section>
+        <section id="keyboard-panel" class="win" hidden>
+            <div id="keyboard-split" class="title" title="Drag to resize the keyboard">
+                <span class="name">KEYBOARD</span>
+                <span class="info">drag to resize</span>
+                <span class="fill"></span>
+            </div>
+            <div id="keyboard">
+                <div class="keyboard-face"></div>
             </div>
         </section>
-        <section id="panel-roms" class="tab-panel colbox" aria-labelledby="tab-roms">
-            <div class="rowbox media-row">
-                <div class="media-group">
-                    <button id="load-rom" title="Replace the 48 KiB system ROM">Load ROM</button>
-                    <input id="file-rom" type="file" accept=".rom,.bin" style="display: none">
-                    <div id="rom-info" class="media-info">No system ROM file.</div>
+    </main>
+
+    <aside class="win red side">
+        <div class="title"><span class="name">SETTINGS</span><span class="fill"></span></div>
+        <div class="tabs">
+            <label class="tab" title="Microdrive, hard disk, and floppy images"><input id="tab-media" type="radio" name="tab" value="media" checked><svg class="i"><use href="#i-media"></use></svg>Media</label>
+            <label class="tab" title="System ROM and extension ROM slots"><input id="tab-roms" type="radio" name="tab" value="roms"><svg class="i"><use href="#i-chip"></use></svg>ROMs</label>
+            <label class="tab" title="Machine timing, memory, sound cards, and mouse"><input id="tab-hardware" type="radio" name="tab" value="hardware"><svg class="i"><use href="#i-cpu"></use></svg>Hardware</label>
+            <label class="tab" title="Display filter, layout, and onscreen keyboard"><input id="tab-display" type="radio" name="tab" value="display"><svg class="i"><use href="#i-monitor"></use></svg>Display</label>
+        </div>
+        <div id="tab-panels">
+
+            <section id="panel-media" class="panel">
+                <div class="section-h">
+                    <span>Microdrives</span>
+                    <span class="aside"><svg class="i"><use href="#i-zap"></use></svg>Turbo <label class="toggle" title="Run eight times faster while either Microdrive is reading"><input id="turbo" type="checkbox" checked><span>OFF</span><span>ON</span></label></span>
                 </div>
-                <div class="media-group media-group-right">
-                    <div id="rom-io1-info" class="media-info">No ROM.</div>
-                    <button id="load-rom-io1" title="I/O ROM 1 at 0x10000">Load IO1 ROM</button>
-                    <input id="file-rom-io1" type="file" accept=".rom,.bin" style="display: none">
-                    <button id="eject-rom-io1" disabled>Eject</button>
+                <div class="stack">
+                    <article id="mdv1-card" class="card drive empty">
+                        <div class="drive-head">
+                            <div class="drive-ico"><svg class="i"><use href="#i-cart"></use></svg></div>
+                            <div class="drive-title">
+                                <div class="drive-id">MDV1_<span id="mdv1-modified" class="badge" title="Changed since loading or the last Save; Save keeps the changes" hidden>modified</span></div>
+                                <div id="mdv1-info" class="drive-name">No cartridge.</div>
+                            </div>
+                            <i id="mdv1-led" class="led" title="MDV1 idle"></i>
+                        </div>
+                        <div id="mdv1-meter" class="meter" hidden>
+                            <div class="meter-bar"><i id="mdv1-meter-bar"></i></div>
+                            <div class="meter-text"><span id="mdv1-size"></span><span id="mdv1-free"></span></div>
+                        </div>
+                        <div class="drop-hint">Drop a .mdv or .zip file here, load one, or insert a blank cartridge.</div>
+                        <div class="drive-actions">
+                            <button id="load-mdv1" class="li sm" title="Load a .mdv Microdrive image"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                            <input id="file-mdv1" type="file" accept=".mdv" hidden>
+                            <button id="new-mdv1" class="li sm" title="Insert a blank cartridge; FORMAT it in QDOS before use"><svg class="i"><use href="#i-plus"></use></svg>New</button>
+                            <span class="grow"></span>
+                            <button id="download-mdv1" class="li sm icon" title="Save the cartridge image" disabled><svg class="i"><use href="#i-download"></use></svg></button>
+                            <button id="eject-mdv1" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                        </div>
+                    </article>
+                    <article id="mdv2-card" class="card drive empty">
+                        <div class="drive-head">
+                            <div class="drive-ico"><svg class="i"><use href="#i-cart"></use></svg></div>
+                            <div class="drive-title">
+                                <div class="drive-id">MDV2_<span id="mdv2-modified" class="badge" title="Changed since loading or the last Save; Save keeps the changes" hidden>modified</span></div>
+                                <div id="mdv2-info" class="drive-name">No cartridge.</div>
+                            </div>
+                            <i id="mdv2-led" class="led" title="MDV2 idle"></i>
+                        </div>
+                        <div id="mdv2-meter" class="meter" hidden>
+                            <div class="meter-bar"><i id="mdv2-meter-bar"></i></div>
+                            <div class="meter-text"><span id="mdv2-size"></span><span id="mdv2-free"></span></div>
+                        </div>
+                        <div class="drop-hint">Drop a .mdv or .zip file here while MDV1 is full, load one, or insert a blank cartridge.</div>
+                        <div class="drive-actions">
+                            <button id="load-mdv2" class="li sm" title="Load a .mdv Microdrive image"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                            <input id="file-mdv2" type="file" accept=".mdv" hidden>
+                            <button id="new-mdv2" class="li sm" title="Insert a blank cartridge; FORMAT it in QDOS before use"><svg class="i"><use href="#i-plus"></use></svg>New</button>
+                            <span class="grow"></span>
+                            <button id="download-mdv2" class="li sm icon" title="Save the cartridge image" disabled><svg class="i"><use href="#i-download"></use></svg></button>
+                            <button id="eject-mdv2" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                        </div>
+                    </article>
                 </div>
+
+                <div class="section-h"><span>Hard disk</span><span class="aside">WIN1_</span></div>
+                <article id="hdd-card" class="card drive empty">
+                    <div class="drive-head">
+                        <div class="drive-ico"><svg class="i"><use href="#i-hdd"></use></svg></div>
+                        <div class="drive-title">
+                            <div class="drive-id">WIN1_<span id="hdd-modified" class="badge" title="Changed since loading or the last Save; Save keeps the changes" hidden>modified</span></div>
+                            <div id="hdd-info" class="drive-name">No hard disk.</div>
+                        </div>
+                        <i id="hdd-led" class="led" title="WIN1 idle"></i>
+                    </div>
+                    <div id="hdd-meter" class="meter" hidden>
+                        <div class="meter-bar"><i id="hdd-meter-bar"></i></div>
+                        <div class="meter-text"><span id="hdd-size"></span><span id="hdd-free"></span></div>
+                    </div>
+                    <div class="drop-hint">Drop a .win file here, load one, or insert an empty formatted hard disk.</div>
+                    <div class="drive-actions">
+                        <button id="load-hdd" class="li sm" title="Load a .win QLWA hard disk image"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                        <input id="file-hdd" type="file" accept=".win" hidden>
+                        <details id="new-hdd-menu" class="menu">
+                            <summary class="li sm"><svg class="i"><use href="#i-plus"></use></svg>New<svg class="i"><use href="#i-chev"></use></svg></summary>
+                            <div class="menu-list">
+                                <button id="new-hdd-4" title="Insert an empty formatted 4 MiB QLWA hard disk">4 MB<span>Empty formatted QLWA, 8192 sectors</span></button>
+                                <button id="new-hdd-16" title="Insert an empty formatted QLWA hard disk of 32764 sectors, just under 16 MiB: the largest whose free space QDOS reports exactly">16 MB<span>32764 sectors, the largest QDOS reports exactly</span></button>
+                            </div>
+                        </details>
+                        <span class="grow"></span>
+                        <button id="download-hdd" class="li sm icon" title="Save the hard disk image" disabled><svg class="i"><use href="#i-download"></use></svg></button>
+                        <button id="eject-hdd" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                    </div>
+                </article>
+
+                <div class="section-h"><span>Floppy</span><span class="aside">FLP1_</span></div>
+                <article id="fdd-card" class="card drive empty">
+                    <div class="drive-head">
+                        <div class="drive-ico"><svg class="i"><use href="#i-flp"></use></svg></div>
+                        <div class="drive-title">
+                            <div class="drive-id">FLP1_<span id="fdd-modified" class="badge" title="Changed since loading or the last Save; Save keeps the changes" hidden>modified</span></div>
+                            <div id="fdd-info" class="drive-name">No floppy.</div>
+                        </div>
+                        <i id="fdd-led" class="led" title="FLP1 idle"></i>
+                    </div>
+                    <div id="fdd-meter" class="meter" hidden>
+                        <div class="meter-bar"><i id="fdd-meter-bar"></i></div>
+                        <div class="meter-text"><span id="fdd-size"></span><span id="fdd-free"></span></div>
+                    </div>
+                    <div class="drop-hint">Drop an .img file here, load one, or insert an empty formatted floppy.</div>
+                    <div class="drive-actions">
+                        <button id="load-fdd" class="li sm" title="Load an .img QL5A or QL5B floppy image"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                        <input id="file-fdd" type="file" accept=".img" hidden>
+                        <details id="new-fdd-menu" class="menu">
+                            <summary class="li sm"><svg class="i"><use href="#i-plus"></use></svg>New<svg class="i"><use href="#i-chev"></use></svg></summary>
+                            <div class="menu-list">
+                                <button id="new-fdd-dd" title="Insert an empty formatted 720 KiB double-density (QL5A) floppy">DD 720 KB<span>Double density, QL5A</span></button>
+                                <button id="new-fdd-hd" title="Insert an empty formatted 1440 KiB high-density (QL5B) floppy">HD 1.44 MB<span>High density, QL5B</span></button>
+                            </div>
+                        </details>
+                        <span class="grow"></span>
+                        <button id="download-fdd" class="li sm icon" title="Save the floppy image" disabled><svg class="i"><use href="#i-download"></use></svg></button>
+                        <button id="eject-fdd" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                    </div>
+                </article>
+                <div class="drop-hint">Drop .mdv, .zip, .win, .img, .rom, or .bin files anywhere on the page.</div>
+            </section>
+
+            <section id="panel-roms" class="panel">
+                <div class="section-h"><span>Address map</span><span class="aside">$00000–$17FFF</span></div>
+                <div class="memmap">
+                    <div class="full"><b>$00000</b>SYSTEM 48K</div>
+                    <div id="map-cart"><b>$0C000</b>CART</div>
+                    <div id="map-io1"><b>$10000</b>IO1</div>
+                    <div id="map-io2"><b>$14000</b>IO2</div>
+                </div>
+                <div class="stack">
+                    <article class="card rom">
+                        <div class="drive-ico"><svg class="i"><use href="#i-chip"></use></svg></div>
+                        <div class="drive-title">
+                            <div class="drive-id">SYSTEM ROM<span id="rom-auto-badge" class="badge neutral" title="Follows the PAL or NTSC choice">auto</span></div>
+                            <div id="rom-info" class="drive-name">No ROM.</div>
+                            <div class="addr">$00000 · 48K</div>
+                        </div>
+                        <div class="rom-actions">
+                            <button id="load-rom" class="li sm" title="Replace the 48 KiB system ROM"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                            <input id="file-rom" type="file" accept=".rom,.bin" hidden>
+                            <button id="rom-minerva" class="li sm" title="Use the bundled Minerva 1.98 ROM instead of js.rom or jsu.rom">Minerva</button>
+                            <button id="rom-auto" class="li sm" title="Return to the automatic js.rom or jsu.rom that follows PAL or NTSC" disabled>Auto</button>
+                        </div>
+                    </article>
+                    <article id="rom-cart-card" class="card rom empty">
+                        <div class="drive-ico"><svg class="i"><use href="#i-chip"></use></svg></div>
+                        <div class="drive-title">
+                            <div class="drive-id">CARTRIDGE ROM</div>
+                            <div id="rom-cart-info" class="drive-name">No ROM.</div>
+                            <div class="addr">$0C000 · 16K</div>
+                        </div>
+                        <div class="rom-actions">
+                            <button id="load-rom-cart" class="li sm" title="Cartridge ROM at 0x0C000"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                            <input id="file-rom-cart" type="file" accept=".rom,.bin" hidden>
+                            <button id="rom-toolkit2" class="li sm" title="Use the bundled Toolkit II v2.36 in the cartridge slot">Toolkit II</button>
+                            <button id="eject-rom-cart" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                        </div>
+                    </article>
+                    <article id="rom-io1-card" class="card rom empty">
+                        <div class="drive-ico"><svg class="i"><use href="#i-chip"></use></svg></div>
+                        <div class="drive-title">
+                            <div class="drive-id">I/O ROM 1</div>
+                            <div id="rom-io1-info" class="drive-name">No ROM.</div>
+                            <div class="addr">$10000 · 16K</div>
+                        </div>
+                        <button id="load-rom-io1" class="li sm" title="I/O ROM 1 at 0x10000"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                        <input id="file-rom-io1" type="file" accept=".rom,.bin" hidden>
+                        <button id="eject-rom-io1" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                    </article>
+                    <article id="rom-io2-card" class="card rom empty">
+                        <div class="drive-ico"><svg class="i"><use href="#i-chip"></use></svg></div>
+                        <div class="drive-title">
+                            <div class="drive-id">I/O ROM 2</div>
+                            <div id="rom-io2-info" class="drive-name">No ROM.</div>
+                            <div class="addr">$14000 · 16K</div>
+                        </div>
+                        <button id="load-rom-io2" class="li sm" title="I/O ROM 2 at 0x14000"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                        <input id="file-rom-io2" type="file" accept=".rom,.bin" hidden>
+                        <button id="eject-rom-io2" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                    </article>
+                </div>
+            </section>
+
+            <section id="panel-hardware" class="panel">
+                <div class="section-h"><span>Machine</span><span class="aside"><span class="resets">*</span>resets the QL</span></div>
+                <div class="card rows">
+                    <div class="row col">
+                        <div class="row-label"><strong>Video standard<span class="resets">*</span></strong></div>
+                        <div class="seg">
+                            <label title="UK/European 50 Hz timing and js.rom by default"><input id="pal" type="radio" name="video" checked>PAL<small>50 Hz</small></label>
+                            <label title="US NTSC machine timing and jsu.rom by default"><input id="ntsc" type="radio" name="video">NTSC<small>50/60 Hz</small></label>
+                        </div>
+                        <p id="video-desc" class="desc"></p>
+                    </div>
+                    <div class="row col">
+                        <div class="row-label"><strong>Memory<span class="resets">*</span></strong></div>
+                        <div class="seg">
+                            <label title="The stock 128 KiB"><input id="ram-128" type="radio" name="ram" checked>128K</label>
+                            <label title="With the 256 KiB expansion"><input id="ram-384" type="radio" name="ram">384K</label>
+                            <label title="With the 512 KiB expansion"><input id="ram-640" type="radio" name="ram">640K</label>
+                            <label title="With both expansions; reaches $C0000, where a sound card sits"><input id="ram-896" type="radio" name="ram">896K</label>
+                        </div>
+                        <div id="ram-note" class="note" hidden><svg class="i"><use href="#i-warn"></use></svg><span>896K reaches $C0000, where the sound card sits, so the sound card was removed.</span></div>
+                    </div>
+                </div>
+
+                <div class="section-h"><span>Sound</span><span id="qsound-rom-state" class="aside">ROM loading</span></div>
+                <div class="card rows">
+                    <div class="row col">
+                        <div class="row-label"><strong>Sound card<span class="resets">*</span></strong></div>
+                        <div class="seg">
+                            <label title="No sound card; only the IPC beeper"><input id="qsound-off" type="radio" name="qsound">None</label>
+                            <label title="Original AY-3-8910 QSound card"><input id="qsound" type="radio" name="qsound" checked disabled>QSound</label>
+                            <label title="YM2203-compatible QSound2 card"><input id="qsound2" type="radio" name="qsound" disabled>QSound2</label>
+                        </div>
+                        <p id="sound-desc" class="desc"></p>
+                        <div id="sound-note" class="note" hidden><svg class="i"><use href="#i-warn"></use></svg><span>A sound card needs $C0000, so memory was reduced to 640K.</span></div>
+                    </div>
+                    <div class="row">
+                        <div class="row-label"><strong>Stereo</strong><p>Spread the PSG channels A, B, and C across the stereo image.</p></div>
+                        <label class="toggle" title="Spread the sound card's PSG channels across the stereo image"><input id="stereo" type="checkbox"><span>OFF</span><span>ON</span></label>
+                    </div>
+                    <div class="row">
+                        <div class="row-label"><strong>Mute</strong><p>Silence the beeper and sound card; speed is unchanged.</p></div>
+                        <label class="toggle" title="Silence the beeper and sound card output; emulation speed is unchanged"><input id="muted" type="checkbox"><span>OFF</span><span>ON</span></label>
+                    </div>
+                </div>
+
+                <div class="section-h"><span>Mouse</span></div>
+                <div class="card rows">
+                    <div class="row col">
+                        <div class="row-label"><strong>Pointer device<span class="resets">*</span></strong></div>
+                        <div class="seg">
+                            <label title="No mouse"><input id="mouse-off" type="radio" name="mouse" checked>None</label>
+                            <label title="QIMSI PS/2 mouse; click the screen to capture it, Esc releases it"><input id="mouse-qimsi" type="radio" name="mouse">QIMSI</label>
+                            <label title="Host pointer in a loaded Pointer Environment, with no capture"><input id="mouse-pe" type="radio" name="mouse">PE</label>
+                        </div>
+                        <p id="mouse-desc" class="desc"></p>
+                    </div>
+                    <div class="row">
+                        <div class="row-label"><strong>Host cursor</strong><p>Keep the host cursor visible over the screen in PE mode.</p></div>
+                        <label class="toggle" title="Show the host cursor over the screen while the PE pointer device is selected; when off, only the QL pointer is visible there"><input id="mouse-cursor" type="checkbox"><span>OFF</span><span>ON</span></label>
+                    </div>
+                </div>
+            </section>
+
+            <section id="panel-display" class="panel">
+                <div class="section-h"><span>Picture</span></div>
+                <div class="card rows">
+                    <div class="row">
+                        <div class="row-label"><strong>CRT filter</strong><p>Rounded pixels and scanlines, scaled continuously.</p></div>
+                        <label class="toggle" title="CRT display filter"><input id="crt" type="checkbox" checked><span>OFF</span><span>ON</span></label>
+                    </div>
+                    <div class="row">
+                        <div class="row-label"><strong>Stretch</strong><p>Fill the available area instead of keeping the shape.</p></div>
+                        <label class="toggle" title="Fill the available display area"><input id="stretch" type="checkbox"><span>OFF</span><span>ON</span></label>
+                    </div>
+                </div>
+                <div class="section-h"><span>Layout</span></div>
+                <div class="card rows">
+                    <div class="row">
+                        <div class="row-label"><strong>Onscreen keyboard</strong><p>A QL keyboard under the screen; drag its title to resize.</p></div>
+                        <label class="toggle" title="Onscreen keyboard"><input id="keyboard-toggle" type="checkbox"><span>OFF</span><span>ON</span></label>
+                    </div>
+                    <div class="row">
+                        <div class="row-label"><strong>Fullscreen</strong><p>The screen only. <kbd>F11</kbd></p></div>
+                        <button id="fullscreen-toggle" class="li sm act" title="Fullscreen (F11)"><svg class="i"><use href="#i-max"></use></svg>Enter</button>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </aside>
+
+    <footer class="win status">
+        <span class="tag"><span>#0</span></span>
+        <div class="messages"><span id="init-info">Initializing...</span><span id="qsound-info"></span><span id="audio-info"></span><span id="startup-file-info"></span><span id="drop-info"></span></div>
+        <div class="status-right">
+            <div class="leds" title="Drive activity">
+                <span><i id="led-mdv1" class="led" title="MDV1 idle"></i>MDV1</span>
+                <span><i id="led-mdv2" class="led" title="MDV2 idle"></i>MDV2</span>
+                <span><i id="led-win1" class="led" title="WIN1 idle"></i>WIN1</span>
+                <span><i id="led-flp1" class="led" title="FLP1 idle"></i>FLP1</span>
             </div>
-            <div class="rowbox media-row">
-                <div class="media-group">
-                    <button id="load-rom-cart" title="Cartridge ROM at 0x0C000">Load cart ROM</button>
-                    <input id="file-rom-cart" type="file" accept=".rom,.bin" style="display: none">
-                    <button id="eject-rom-cart" disabled>Eject</button>
-                    <div id="rom-cart-info" class="media-info">No ROM.</div>
-                </div>
-                <div class="media-group media-group-right">
-                    <div id="rom-io2-info" class="media-info">No ROM.</div>
-                    <button id="load-rom-io2" title="I/O ROM 2 at 0x14000">Load IO2 ROM</button>
-                    <input id="file-rom-io2" type="file" accept=".rom,.bin" style="display: none">
-                    <button id="eject-rom-io2" disabled>Eject</button>
-                </div>
+            <div id="stats-info" title="Emulated frames per second (about 50.1 on PAL, or 50.4 or 60.1 on NTSC, is real time), then audio overrun discarded and underrun filled with silence over the last second, in ms">
+                <span>FPS <b id="fps">-</b></span>
+                <span class="stat-opt">CUT <b id="cut">-</b></span>
+                <span class="stat-opt">GAP <b id="gap">-</b></span>
             </div>
-        </section>
-        <section id="panel-hardware" class="tab-panel colbox" aria-labelledby="tab-hardware">
-            <div class="rowbox media-row">
-                <div class="media-group">
-                    <label class="switch" title="US NTSC machine timing and jsu.rom by default"><input id="ntsc" type="checkbox">NTSC</label>
-                </div>
-                <div class="media-group media-group-right">
-                    <label class="switch" title="Original AY-3-8910 QSound card"><input id="qsound" type="checkbox" checked disabled>QSound</label>
-                    <label class="switch" title="YM2203-compatible QSound2 card"><input id="qsound2" type="checkbox" disabled>QSound2</label>
-                    <label class="switch" title="Spread QSound PSG channels across the stereo image"><input id="stereo" type="checkbox">Stereo</label>
-                    <label class="switch" title="Silence the beeper and sound card output; emulation speed is unchanged"><input id="muted" type="checkbox">Muted</label>
-                </div>
+            <a href="https://github.com/josef-jelinek/QLRun" title="GitHub repository"><svg class="i"><use href="#i-gh"></use></svg></a>
+        </div>
+    </footer>
+</div>
+<div id="drop">
+    <div class="win">
+        <div class="title"><span class="name">DROP TO INSERT</span><span class="fill"></span></div>
+        <div class="drop-body">
+            Files go to the matching drive or ROM.
+            <div class="drop-routes">
+                <div><b>.mdv</b> → MDV1, MDV2 if full</div>
+                <div><b>.zip</b> → its first .mdv</div>
+                <div><b>.win</b> → WIN1</div>
+                <div><b>.img</b> → FLP1</div>
+                <div><b>.rom .bin</b> → system ROM</div>
             </div>
-            <div class="rowbox media-row">
-                <div class="media-group">
-                    <label class="switch" title="Add 256 KiB of RAM"><input id="ram-256" type="checkbox">+256K</label>
-                    <label class="switch" title="Add 512 KiB of RAM"><input id="ram-512" type="checkbox">+512K</label>
-                </div>
-                <div class="media-group media-group-right">
-                    <label class="switch" title="QIMSI PS/2 mouse; click the screen to capture it, Esc releases it"><input id="mouse-qimsi" type="checkbox">QIMSI Mouse</label>
-                    <label class="switch" title="Host pointer in a loaded Pointer Environment, with no capture"><input id="mouse-pe" type="checkbox">PE Mouse</label>
-                    <label class="switch" title="Show the host cursor over the screen while PE Mouse is on; when off, only the QL pointer is visible there"><input id="mouse-cursor" type="checkbox">Cursor</label>
-                </div>
-            </div>
-        </section>
-        <section id="panel-display" class="tab-panel colbox" aria-labelledby="tab-display">
-            <div class="rowbox">
-                <label class="switch" title="CRT display filter"><input id="crt" type="checkbox" checked>CRT</label>
-                <label class="switch" title="Fill the available display area"><input id="stretch" type="checkbox">Stretch</label>
-                <label class="switch" title="Onscreen keyboard"><input id="keyboard-toggle" type="checkbox">Keyboard</label>
-                <button id="fullscreen-toggle" title="Fullscreen (F11)">Fullscreen</button>
-            </div>
-        </section>
+        </div>
     </div>
-</header>
-<main id="workspace">
-    <div id="screen-slot">
-        <canvas id="screen" width="512" height="256"></canvas>
-    </div>
-    <div id="keyboard-split" style="display: none"></div>
-    <div id="keyboard" style="display: none">
-        <div class="keyboard-face"></div>
-    </div>
-</main>
+</div>
 <script type="module" src="main.js"></script>
 </body>
 </html>
