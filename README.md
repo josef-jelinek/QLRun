@@ -263,7 +263,10 @@ Choices marked `*` reset the machine when changed.
   and integer scaling. It applies with the CRT filter on or off and in both
   fullscreen and windowed modes.
 - Onscreen keyboard - show or hide the QL keyboard under the screen. Drag the
-  keyboard window's title bar to resize it.
+  keyboard window's title bar to resize it. Below 900 px, where the windows
+  stack, it switches to a compact ten-column layout with larger keys, attached
+  under the screen window without a title bar: ESC and F1 to F5 above the
+  digits, and SHIFT, TAB, CAPS, ENTER, and the bottom row under the letters.
 - Fullscreen - show only the emulator screen (also F11). If the browser refuses
   fullscreen, the page shows only the screen until F11 is pressed again.
 

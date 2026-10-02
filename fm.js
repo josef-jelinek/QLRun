@@ -22,6 +22,11 @@ const phaseCycle = sineSteps * phaseFraction;
 const modulationScale = 1 << 28;
 const powerResolution = 256;
 const powerTableLength = 13 * 2 * powerResolution;
+/**
+ * Operator outputs are the chip's 14-bit signed values divided by this, so a
+ * full-scale operator is just under 1.
+ */
+const operatorScale = 8192;
 const envelopeQuiet = 832;
 const envelopeMax = 1023;
 const envelopeSsgEnd = 512;
@@ -78,12 +83,12 @@ for (let x = 0; x < powerResolution; x += 1) {
         n >>= 1;
     }
     n <<= 2;
-    powerTable[x * 2] = n / 8192;
-    powerTable[x * 2 + 1] = -n / 8192;
+    powerTable[x * 2] = n / operatorScale;
+    powerTable[x * 2 + 1] = -n / operatorScale;
     for (let shift = 1; shift < 13; shift += 1) {
         const at = x * 2 + shift * 2 * powerResolution;
-        powerTable[at] = (n >> shift) / 8192;
-        powerTable[at + 1] = -(n >> shift) / 8192;
+        powerTable[at] = (n >> shift) / operatorScale;
+        powerTable[at + 1] = -(n >> shift) / operatorScale;
     }
 }
 for (let i = 0; i < sineSteps; i += 1) {
@@ -425,7 +430,16 @@ function nativeSample(state) {
     if (csmKeyOff && !state.csmKeyOff) {
         releaseCsmOperators(state);
     }
-    return sample / channelCount;
+    // The chip clips the channel sum to 16 bits and sends it to the YM3014 DAC
+    // with a 10-bit signed mantissa, so a magnitude wider than 9 bits loses its
+    // low bits, rounding down.
+    const level = Math.min(Math.max(sample * operatorScale, -32768), 32767);
+    let magnitude = level;
+    if (level < 0) {
+        magnitude = ~level;
+    }
+    const lostBits = Math.max(32 - Math.clz32(magnitude) - 9, 0);
+    return ((level >> lostBits) << lostBits) / operatorScale / channelCount;
 }
 
 /**

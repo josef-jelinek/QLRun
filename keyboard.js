@@ -169,6 +169,11 @@ const keyArtW = 560;
 const keyArtH = 180;
 const keyArtMargin = 8;
 const mainBlockX = 48;
+// The compact board for stacked page layouts keeps the 1U width and gap in
+// ten columns, and its seven rows have keys 32 high for touch.
+const compactArtW = 350;
+const compactArtH = 276;
+const compactKeyH = 32;
 const minPointerHoldMs = 50;
 const maxQueuedKeys = 50;
 
@@ -255,7 +260,24 @@ const overlayRows = [
     ],
 ];
 
+/**
+ * The compact board's rows as QL codes, with a single SHIFT. Each key takes
+ * its label and legend from the QL layout.
+ *
+ * @type {number[][]}
+ */
+const compactRows = [
+    [keyEscape, keyF1, keyF2, keyF3, keyF4, keyF5, keyMinus, keyEqual, keyPound, keyBackslash],
+    [key1, key2, key3, key4, key5, key6, key7, key8, key9, key0],
+    [letterQ, letterW, letterE, letterR, letterT, letterY, letterU, letterI, letterO, letterP],
+    [letterA, letterS, letterD, letterF, letterG, letterH, letterJ, letterK, letterL, keySemicolon],
+    [letterZ, letterX, letterC, letterV, letterB, letterN, letterM, keyComma, keyPeriod, keySlash],
+    [keyShift, keyTab, keyCapsLock, keyLBracket, keyRBracket, keyQuote, keyEnter],
+    [keyCtrl, keyLeft, keyRight, keySpace, keyUp, keyDown, keyAlt],
+];
+
 const overlayKeys = layoutOverlayKeys();
+const compactKeys = layoutCompactKeys();
 
 /**
  * Host key codes to QL matrix codes: every overlay key, plus host-only editing
@@ -332,23 +354,31 @@ export function init(el, keys) {
         },
         true,
     );
-    const face = el.querySelector(".keyboard-face");
+    // The stylesheet shows the QL face, or the compact one on stacked pages.
+    const face = el.querySelector(".keyboard-face.wide");
     if (face !== null) {
         for (let i = 0; i < overlayKeys.length; i += 1) {
-            face.appendChild(makeHit(kbd, overlayKeys[i]));
+            face.appendChild(makeHit(kbd, overlayKeys[i], keyArtW, keyArtH));
+        }
+    }
+    const compactFace = el.querySelector(".keyboard-face.compact");
+    if (compactFace !== null) {
+        for (let i = 0; i < compactKeys.length; i += 1) {
+            compactFace.appendChild(makeHit(kbd, compactKeys[i], compactArtW, compactArtH));
         }
     }
     return kbd;
 }
 
 /**
- * Rendered height of the keyboard face in CSS pixels.
+ * Rendered height of the QL layout face in CSS pixels. The compact face has
+ * no title bar to drag, so it keeps the size the stylesheet gives it.
  *
  * @param {HTMLElement} el
  * @returns {number}
  */
 export function faceHeight(el) {
-    const face = el.querySelector(".keyboard-face");
+    const face = el.querySelector(".keyboard-face.wide");
     if (!(face instanceof HTMLElement)) {
         return 0;
     }
@@ -356,15 +386,15 @@ export function faceHeight(el) {
 }
 
 /**
- * Size the keyboard face to a height, between 45 CSS pixels and `maxHeight`.
- * The stylesheet still keeps it within the available width.
+ * Size the QL layout face to a height, between 45 CSS pixels and
+ * `maxHeight`. The stylesheet still keeps it within the available width.
  *
  * @param {HTMLElement} el
  * @param {number} height
  * @param {number} maxHeight
  */
 export function setFaceHeight(el, height, maxHeight) {
-    const face = el.querySelector(".keyboard-face");
+    const face = el.querySelector(".keyboard-face.wide");
     if (!(face instanceof HTMLElement)) {
         return;
     }
@@ -426,24 +456,27 @@ export function handleBlur(kbd) {
 }
 
 /**
- * Create one onscreen key, placed in percent of the board, with its legends.
- * A left click holds the key until release, and a pointer in contact holds a
- * key it enters: a mouse with a button down, a touch, or a pen.
+ * Create one onscreen key, placed in percent of its `artW` × `artH` board,
+ * with its legends. A left click holds the key until release, and a pointer
+ * in contact holds a key it enters: a mouse with a button down, a touch, or
+ * a pen.
  *
  * @param {Keyboard} kbd
  * @param {OverlayKeySpec} spec
+ * @param {number} artW
+ * @param {number} artH
  * @returns {HTMLElement}
  */
-function makeHit(kbd, spec) {
+function makeHit(kbd, spec, artW, artH) {
     const hit = document.createElement("div");
     hit.className = "keyboard-hit";
     if (spec.className !== "") {
         hit.classList.add(spec.className);
     }
-    hit.style.left = (spec.x * 100 / keyArtW) + "%";
-    hit.style.top = (spec.y * 100 / keyArtH) + "%";
-    hit.style.width = (spec.w * 100 / keyArtW) + "%";
-    hit.style.height = (spec.h * 100 / keyArtH) + "%";
+    hit.style.left = (spec.x * 100 / artW) + "%";
+    hit.style.top = (spec.y * 100 / artH) + "%";
+    hit.style.width = (spec.w * 100 / artW) + "%";
+    hit.style.height = (spec.h * 100 / artH) + "%";
     const legend = document.createElement("small");
     legend.textContent = spec.legend;
     const label = document.createElement("span");
@@ -813,6 +846,56 @@ function layoutOverlayKeys() {
                 legend = key.legend;
             }
             specs.push({label: key.label, code: key.code, codes: key.codes, x, y, w, h: keyUnit, legend, className});
+            x += w + keyGap;
+        }
+    }
+    return specs;
+}
+
+/**
+ * Place the compact rows on their board, left to right, each key labelled as
+ * the QL layout key of the same code. ENTER is a plain key here, without the
+ * L shape.
+ *
+ * @returns {OverlayKeySpec[]}
+ */
+function layoutCompactKeys() {
+    /** @type {OverlayKeySpec[]} */
+    const specs = [];
+    for (let row = 0; row < compactRows.length; row += 1) {
+        const y = keyArtMargin + row * (compactKeyH + keyGap);
+        let x = keyArtMargin;
+        for (const code of compactRows[row]) {
+            let units = 1;
+            switch (code) {
+            case keyShift:
+            case keyEnter:
+                units = 2;
+                break;
+            case keyTab:
+            case keyCapsLock:
+            case keyCtrl:
+            case keyAlt:
+                units = 1.5;
+                break;
+            case keySpace:
+                units = 3;
+                break;
+            default:
+                break;
+            }
+            const w = keySpan(units);
+            for (const key of overlayKeys) {
+                if (key.code !== code) {
+                    continue;
+                }
+                let className = "";
+                if (key.className === "fn") {
+                    className = "fn";
+                }
+                specs.push({label: key.label, code, codes: key.codes, x, y, w, h: compactKeyH, legend: key.legend, className});
+                break;
+            }
             x += w + keyGap;
         }
     }

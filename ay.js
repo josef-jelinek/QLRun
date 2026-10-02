@@ -1,31 +1,25 @@
+/**
+ * AY-3-8910 DAC levels measured on a real chip by Introspec, as published in
+ * ayumi, normalized to the top level. The small step from 7 to 8 between two
+ * large ones is part of the chip's curve.
+ */
 const ayVolume = Float64Array.of(
-    0.0000,
-    0.0137,
-    0.0205,
-    0.0291,
-    0.0423,
-    0.0618,
-    0.0847,
-    0.1369,
-    0.1691,
-    0.2647,
-    0.3527,
-    0.4499,
-    0.5704,
-    0.6873,
-    0.8482,
-    1.0000,
+    0.0000, 0.0100, 0.0145, 0.0211,
+    0.0307, 0.0455, 0.0645, 0.1074,
+    0.1266, 0.2050, 0.2922, 0.3728,
+    0.4925, 0.6353, 0.8056, 1.0000,
 );
 
+/**
+ * YM2149 DAC levels measured on a real chip by Introspec, as published in
+ * ayumi, normalized to the top level. They rise in linear runs of four rather
+ * than in even decibel steps, and the bottom two levels are both silent.
+ */
 const ymVolume = Float64Array.of(
-    0x00 / 0xFF, 0x01 / 0xFF, 0x01 / 0xFF, 0x02 / 0xFF,
-    0x02 / 0xFF, 0x03 / 0xFF, 0x03 / 0xFF, 0x04 / 0xFF,
-    0x05 / 0xFF, 0x06 / 0xFF, 0x07 / 0xFF, 0x09 / 0xFF,
-    0x0B / 0xFF, 0x0D / 0xFF, 0x0F / 0xFF, 0x12 / 0xFF,
-    0x16 / 0xFF, 0x1A / 0xFF, 0x1F / 0xFF, 0x25 / 0xFF,
-    0x2D / 0xFF, 0x35 / 0xFF, 0x3F / 0xFF, 0x4C / 0xFF,
-    0x5A / 0xFF, 0x6A / 0xFF, 0x7F / 0xFF, 0x97 / 0xFF,
-    0xB4 / 0xFF, 0xD6 / 0xFF, 0xFF / 0xFF, 0xFF / 0xFF,
+    0.0000, 0.0000, 0.0047, 0.0077, 0.0110, 0.0140, 0.0170, 0.0200,
+    0.0244, 0.0297, 0.0351, 0.0404, 0.0485, 0.0583, 0.0681, 0.0778,
+    0.0925, 0.1111, 0.1297, 0.1485, 0.1767, 0.2116, 0.2464, 0.2811,
+    0.3337, 0.4004, 0.4674, 0.5344, 0.6352, 0.7580, 0.8799, 1.0000,
 );
 
 const regNoise = 6;
@@ -314,8 +308,10 @@ function refreshLevels(state) {
         let amp = ampReg & 0x0F;
         if ((ampReg & ampEnvMode) !== 0) {
             amp = state.env.level;
-        } else if (state.ymStyle && amp > 0) {
-            amp *= 2;
+        } else if (state.ymStyle) {
+            // A fixed amplitude N drives DAC level 2N + 1, so 0 shares the
+            // silence of level 1 and 15 meets the envelope's top level 31.
+            amp = amp * 2 + 1;
         }
         if (state.ymStyle) {
             state.out[channel] = ymVolume[amp];

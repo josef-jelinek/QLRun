@@ -424,6 +424,13 @@ body.keyboard-splitting {
     -webkit-user-drag: none;
     -webkit-tap-highlight-color: transparent;
 }
+/* The compact board of stacked layouts has ten 1U columns and seven rows of
+   keys 32 high, so it is 350×276. Its width stops at about 44 px a column. */
+.keyboard-face.compact {
+    display: none;
+    width: min(100%, 440px);
+    aspect-ratio: 350 / 276;
+}
 .keyboard-hit {
     --b: 2px;
     position: absolute;
@@ -436,6 +443,10 @@ body.keyboard-splitting {
     background: var(--k);
     font-size: clamp(7px, 100cqw * 9.5 / 560, 13px);
     line-height: 1;
+}
+.compact .keyboard-hit {
+    padding: 2px 0 2px 2px;
+    font-size: clamp(7px, 100cqw * 10 / 350, 14px);
 }
 .keyboard-hit small {
     min-height: 1em;
@@ -1090,6 +1101,24 @@ body.screen-only #screen-slot {
     #tab-panels {
         overflow: visible;
     }
+    /* The compact keyboard hangs under the screen window, without a title
+       bar, so the screen's bottom border divides them. */
+    .stage {
+        gap: 0;
+    }
+    #keyboard-panel {
+        border-top: 0;
+    }
+    #keyboard {
+        padding: 0;
+    }
+    #keyboard-split,
+    .keyboard-face.wide {
+        display: none;
+    }
+    .keyboard-face.compact {
+        display: block;
+    }
     .chips,
     .leds {
         display: none;
@@ -1112,18 +1141,6 @@ body.screen-only #screen-slot {
     }
     .status {
         padding-left: 10px;
-    }
-    #keyboard {
-        padding: 10px 8px 12px;
-    }
-    .keyboard-hit {
-        --b: 1px;
-        justify-content: flex-end;
-        padding: 0 0 1px 1px;
-        font-size: clamp(6px, 100cqw * 11 / 560, 13px);
-    }
-    .keyboard-hit small {
-        display: none;
     }
 }
 </style>
@@ -1203,7 +1220,8 @@ body.screen-only #screen-slot {
                 <span class="fill"></span>
             </div>
             <div id="keyboard">
-                <div class="keyboard-face"></div>
+                <div class="keyboard-face wide"></div>
+                <div class="keyboard-face compact"></div>
             </div>
         </section>
     </main>
