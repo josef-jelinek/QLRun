@@ -175,7 +175,8 @@ const compactArtW = 350;
 const compactArtH = 276;
 const compactKeyH = 32;
 const minPointerHoldMs = 50;
-const maxQueuedKeys = 50;
+// The IPC's type-ahead queue holds seven keys.
+const maxQueuedKeys = 7;
 
 /** @type {OverlayRowKey[]} */
 const functionKeys = [

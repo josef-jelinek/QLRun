@@ -508,11 +508,14 @@ export function create(keys) {
 
 /**
  * Reset the hardware and CPU while preserving loaded ROM and cartridges.
+ * Keys a program left unread, for example one polling KEYROW, are dropped
+ * so they do not reach the next boot; a guest RESET instruction keeps them.
  *
  * @param {Machine} m
  */
 export function reset(m) {
     m.cpuBus.resetHardware();
+    m.keys.queue.length = 0;
     m.displayBlank = false;
     m.displayMode8 = false;
     m.displaySecondScreen = false;
