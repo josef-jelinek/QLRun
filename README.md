@@ -311,6 +311,18 @@ reports when the last key is still held, which QDOS repeats after its
 `SV_ARDEL` delay (0.6 s) at its `SV_ARFRQ` rate; the browser's own key repeat
 is not used.
 
+Gamepads drive the two QL joystick sockets, which are wired in parallel with
+keys: joystick 1 closes the cursor keys and Space, joystick 2 F1 to F5 (up F4,
+down F2, left F1, right F3, fire F5). Pads are read through the browser Gamepad
+API once per animation frame; the first two connected pads become joysticks 1
+and 2 whichever slots they occupy. A direction is on when the matching d-pad
+button is down or the left stick is pushed past halfway, and any face or
+shoulder button is fire. A browser only reports a pad once it has been used, so
+press one of its buttons first if nothing responds. Like the keys they share,
+the contacts show on the onscreen keyboard and are read from the matrix, as
+`KEYROW` does, without typing characters. The Hardware tab names the pad on
+each joystick.
+
 ## Sound
 
 The ZX8302 IPC beeper and the selected card are mixed in the browser. The
@@ -389,6 +401,7 @@ on the QL.
 - `qimsi.js` - QIMSI mouse registers and the PS/2 mouse behind them.
 - `pe.js` - host pointer written into the QL Pointer Environment.
 - `keyboard.js` - host keyboard mapping and the overlay.
+- `joystick.js` - host gamepads read as the two QL joysticks.
 - `zip.js` - ZIP listing and entry extraction.
 - `media.js` - Microdrive, floppy, hard disk, ROM, ZIP, and junk file-name rules.
 - `serial.js` - Web Serial host ports, with callbacks around their Promises.

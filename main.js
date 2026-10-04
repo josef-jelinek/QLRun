@@ -1,6 +1,7 @@
 import * as boot from "./boot.js";
 import * as disk from "./disk.js";
 import * as io from "./io.js";
+import * as joystick from "./joystick.js";
 import * as keyboard from "./keyboard.js";
 import * as load from "./load.js";
 import * as machine from "./machine.js";
@@ -261,6 +262,8 @@ const ui = {
         {value: 4, input: /** @type {HTMLInputElement} */ (document.getElementById("mspeed-4"))},
     ],
     mouseCursor:      /** @type {HTMLInputElement} */  (document.getElementById("mouse-cursor")),
+    joy1Info:         /** @type {HTMLElement} */       (document.getElementById("joy1-info")),
+    joy2Info:         /** @type {HTMLElement} */       (document.getElementById("joy2-info")),
     turbo:            /** @type {HTMLInputElement} */  (document.getElementById("turbo")),
     stretch:          /** @type {HTMLInputElement} */  (document.getElementById("stretch")),
     fullscreenToggle: /** @type {HTMLButtonElement} */ (document.getElementById("fullscreen-toggle")),
@@ -287,6 +290,9 @@ const configuredRamKb = optionFromParam(ui.ram, query.get("ram") ?? "", machine.
 machine.setRamKb(ql, configuredRamKb);
 checkOption(ui.ram, configuredRamKb);
 const kbd = keyboard.init(ui.keyboard, keys);
+const stickContacts = new Uint8Array(2);
+const stickPadIds = ["", ""];
+const shownPadIds = ["", ""];
 
 /** @type {import("./screen.js").Gfx | null} */
 let gfx = null;
@@ -1939,6 +1945,9 @@ function onFrame(now) {
         // replayed later.
         carryMs = Math.min(carryMs, frameMs);
     }
+    joystick.poll(stickContacts, stickPadIds);
+    keyboard.setSticks(kbd, stickContacts);
+    refreshSticks();
     syncFrameTiming();
     if (ran < maxFramesPerRefresh) {
         fillSoundQueue();
@@ -1954,6 +1963,25 @@ function onFrame(now) {
     }
     if (gfx !== null) {
         screen.draw(gfx, ql.pixels, ql.frameNtsc, ql.frameVersion);
+    }
+}
+
+/** Name the gamepad on each joystick, or show that there is none. */
+function refreshSticks() {
+    const labels = [ui.joy1Info, ui.joy2Info];
+    for (let i = 0; i < 2; i += 1) {
+        const id = stickPadIds[i];
+        if (id === shownPadIds[i]) {
+            continue;
+        }
+        shownPadIds[i] = id;
+        if (id === "") {
+            labels[i].textContent = "No gamepad";
+            labels[i].title = "";
+        } else {
+            labels[i].textContent = joystick.label(id);
+            labels[i].title = id;
+        }
     }
 }
 

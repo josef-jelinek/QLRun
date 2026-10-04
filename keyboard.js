@@ -1,3 +1,5 @@
+import * as joystick from "./joystick.js";
+
 /**
  * One key of an onscreen keyboard row, `units` 1U keys wide. `legend` is the
  * shifted character printed above the label.
@@ -69,7 +71,8 @@
 
 /**
  * Onscreen keyboard state: the host keys and pointers holding QL keys, the
- * rendered keys, and the pulses that keep quick taps pressed.
+ * rendered keys, the pulses that keep quick taps pressed, and the closed
+ * joystick contacts of the two sticks.
  *
  * @typedef {{
  *   keys: KeyState,
@@ -78,6 +81,7 @@
  *   overlayKeys: OverlayKey[],
  *   pulses: KeyPulse[],
  *   pulseRaf: number,
+ *   sticks: Uint8Array,
  * }} Keyboard
  */
 
@@ -157,6 +161,29 @@ const keyQuote = 0x2F;
 const keyPound = 0x2D;
 const keyMinus = 0x15;
 const keyEqual = 0x25;
+
+/**
+ * The keys each joystick socket closes, which are wired in parallel with them:
+ * stick 1 with the cursor keys and SPACE, stick 2 with F1-F5.
+ *
+ * @type {{contact: number, code: number}[][]}
+ */
+const stickKeys = [
+    [
+        {contact: joystick.up, code: keyUp},
+        {contact: joystick.down, code: keyDown},
+        {contact: joystick.left, code: keyLeft},
+        {contact: joystick.right, code: keyRight},
+        {contact: joystick.fire, code: keySpace},
+    ],
+    [
+        {contact: joystick.up, code: keyF4},
+        {contact: joystick.down, code: keyF2},
+        {contact: joystick.left, code: keyF1},
+        {contact: joystick.right, code: keyF3},
+        {contact: joystick.fire, code: keyF5},
+    ],
+];
 
 // Onscreen keyboard in board units: 1U keys are 28 square with a 6 gap both
 // ways, F1-F5 stand in their own column, and the main block starts at x 48.
@@ -330,6 +357,7 @@ export function init(el, keys) {
         overlayKeys: [],
         pulses: [],
         pulseRaf: 0,
+        sticks: new Uint8Array(2),
     };
     el.oncontextmenu = function (e) {
         e.preventDefault();
@@ -434,6 +462,23 @@ export function handleKeyUp(kbd, e) {
     }
     e.preventDefault();
     releaseHost(kbd, e.code);
+    syncKeys(kbd);
+}
+
+/**
+ * Close the joystick contacts the polled gamepads hold, one byte of
+ * `joystick` contact bits per stick. The matrix is only rebuilt when a
+ * contact changed.
+ *
+ * @param {Keyboard} kbd
+ * @param {Uint8Array} contacts
+ */
+export function setSticks(kbd, contacts) {
+    if (kbd.sticks[0] === contacts[0] && kbd.sticks[1] === contacts[1]) {
+        return;
+    }
+    kbd.sticks[0] = contacts[0];
+    kbd.sticks[1] = contacts[1];
     syncKeys(kbd);
 }
 
@@ -688,6 +733,13 @@ function syncKeys(kbd) {
     }
     for (let i = 0; i < kbd.pointerHeld.length; i += 1) {
         addPressed(pressed, kbd.pointerHeld[i].code);
+    }
+    for (let s = 0; s < stickKeys.length; s += 1) {
+        for (const k of stickKeys[s]) {
+            if ((kbd.sticks[s] & k.contact) !== 0) {
+                addPressed(pressed, k.code);
+            }
+        }
     }
     paintOverlay(kbd, pressed);
     for (let i = 0; i < kbd.pulses.length; i += 1) {
