@@ -1,5 +1,5 @@
 #version 300 es
-precision mediump float;
+precision highp float;
 
 uniform highp usampler2D u_tex;
 uniform bool u_crt;
@@ -10,19 +10,8 @@ out vec4 o_color;
 
 // Sinclair QL eight-colour palette. Index bit 0 is blue, bit 1 red, and bit 2
 // is green, matching the ZX8301 mode-4/mode-8 decode.
-const uvec3 color_palette[8] = uvec3[8](
-    uvec3(0x00u, 0x00u, 0x00u), // black
-    uvec3(0x00u, 0x00u, 0xFFu), // blue
-    uvec3(0xFFu, 0x00u, 0x00u), // red
-    uvec3(0xFFu, 0x00u, 0xFFu), // magenta
-    uvec3(0x00u, 0xFFu, 0x00u), // green
-    uvec3(0x00u, 0xFFu, 0xFFu), // cyan
-    uvec3(0xFFu, 0xFFu, 0x00u), // yellow
-    uvec3(0xFFu, 0xFFu, 0xFFu)  // white
-);
-
 vec3 palette_color(uint color_index) {
-    return vec3(color_palette[int(color_index & 7u)]) / 255.0;
+    return vec3(uvec3(color_index >> 1u, color_index >> 2u, color_index) & 1u);
 }
 
 float gaussian_weight(float offset, float inv_sigma_squared) {
@@ -45,9 +34,8 @@ void main() {
     ivec2 tex_size = textureSize(u_tex, 0);
     vec2 source_uv = v_uv;
     if (u_ntsc) {
-        // The flipped texture's lower quarter contains QL rows 192-255,
-        // which the 192-line NTSC TV raster does not scan.
-        source_uv.y = 0.25 + source_uv.y * 0.75;
+        // The 192-line NTSC TV raster does not scan QL rows 192-255.
+        source_uv.y *= 0.75;
     }
     vec2 source = source_uv * vec2(tex_size);
     ivec2 m_texel = clamp(ivec2(floor(source)), ivec2(0), tex_size - 1);

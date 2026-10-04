@@ -593,12 +593,16 @@ function holdPointer(kbd, id, code) {
 }
 
 /**
- * Queue a newly pressed character key for the IPC read-keys command.
+ * Queue a newly pressed character key for the IPC read-keys command. A full
+ * queue ignores the key, as the IPC does; the matrix still shows it held.
  *
  * @param {KeyState} keys
  * @param {number} code
  */
 function queueKey(keys, code) {
+    if (keys.queue.length >= maxQueuedKeys) {
+        return;
+    }
     let modifiers = 0;
     if (keys.shift) {
         modifiers |= keyModShift;
@@ -610,9 +614,6 @@ function queueKey(keys, code) {
         modifiers |= keyModAlt;
     }
     keys.queue.push({modifiers, code});
-    if (keys.queue.length > maxQueuedKeys) {
-        keys.queue.shift();
-    }
 }
 
 /**
@@ -675,9 +676,7 @@ function watchPulses(kbd) {
  */
 function syncKeys(kbd) {
     const keys = kbd.keys;
-    for (let i = 0; i < 8; i += 1) {
-        keys.rows[i] = 0;
-    }
+    keys.rows.fill(0);
     keys.shift = false;
     keys.ctrl = false;
     keys.alt = false;

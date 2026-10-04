@@ -1,7 +1,7 @@
 import * as io from "./io.js";
 
 const maxShaderSize = 65536;
-export const qsoundRomUrl = "roms/Qsound_V1.94.rom";
+export const qsoundRomName = "Qsound_V1.94";
 
 /**
  * Load the display vertex and fragment shader sources.
@@ -37,7 +37,7 @@ export function loadShaders(onDone) {
                     done = true;
                     aborts[0]?.();
                     aborts[1]?.();
-                    onDone("Failed to load \"" + url + "\".", null);
+                    onDone(err ?? "Could not load \"" + url + "\": Empty read.", null);
                     return;
                 }
                 shaders[slot] = text;
@@ -50,32 +50,20 @@ export function loadShaders(onDone) {
 }
 
 /**
- * Fetch a ROM image. It may be shorter than `maxBytes` and is padded with
- * zeros by the machine; it must not be empty or larger. Returns the abort
- * operation, or null when `onDone` has already run.
+ * Fetch the bundled ROM image `roms/<name>.rom`, as named by the page or its
+ * URL. It may be shorter than `maxBytes` and is padded with zeros by the
+ * machine; it must not be empty or larger. Returns the abort operation, or
+ * null when `onDone` has already run.
  *
- * @param {string} url
+ * @param {string} name
  * @param {number} maxBytes
  * @param {function(string | null, ArrayBuffer | null): void} onDone
  * @returns {(function(): void) | null} abort
  */
-export function loadRom(url, maxBytes, onDone) {
-    return io.httpGet(
-        url,
-        "arraybuffer",
-        maxBytes,
-        function (err, buf) {
-            if (err !== null) {
-                onDone(err, null);
-                return;
-            }
-            if (!(buf instanceof ArrayBuffer) || buf.byteLength === 0 || buf.byteLength > maxBytes) {
-                const length = buf?.byteLength ?? 0;
-                const detail = "Expected 1 to " + maxBytes + ", got " + length + " bytes.";
-                onDone("Could not load \"" + url + "\": " + detail, null);
-                return;
-            }
-            onDone(null, buf);
-        },
-    );
+export function loadRom(name, maxBytes, onDone) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.]*$/.test(name)) {
+        onDone("Invalid ROM name: " + name + ".", null);
+        return null;
+    }
+    return io.httpGet("roms/" + name + ".rom", "arraybuffer", maxBytes, onDone);
 }

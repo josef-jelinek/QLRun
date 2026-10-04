@@ -178,6 +178,7 @@ export function resize(gfx) {
         bufferWidth = Math.max(Math.round(width * crtPixelRatio), 1);
         bufferHeight = Math.max(Math.round(height * crtPixelRatio), 1);
     } else if (!gfx.stretchOn) {
+        // The unfiltered screen is square, frameW device pixels a side at 1x.
         const fitX = Math.floor(Math.floor(slotW * pixelRatio) / frameW);
         const fitY = Math.floor(Math.floor(slotH * pixelRatio) / frameW);
         bufferWidth = frameW * Math.max(1, Math.min(fitX, fitY));
@@ -239,7 +240,6 @@ function createGfx(canvas, vertGLSL, fragGLSL) {
     if (ntscLoc === null) {
         return null;
     }
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
     gl.useProgram(program);
     gl.uniform1i(texLoc, 0);
     gl.uniform1i(crtLoc, 0);

@@ -52,6 +52,9 @@ for (let i = 0; i < 256; i += 1) {
 }
 
 /**
+ * One file in the central directory. `readable` marks an entry stored, or
+ * deflated where this browser can inflate it, and not encrypted.
+ *
  * @typedef {{
  *   name: string,
  *   size: number,
@@ -59,6 +62,7 @@ for (let i = 0; i < 256; i += 1) {
  *   compSize: number,
  *   crc: number,
  *   encrypted: boolean,
+ *   readable: boolean,
  *   offset: number,
  * }} ZipEntry
  *
@@ -70,7 +74,7 @@ for (let i = 0; i < 256; i += 1) {
  * that only name a directory. Anything unsupported is reported as an error
  * string rather than thrown, so a caller can treat the file as something else.
  *
- * @param {ArrayBuffer | Uint8Array} bytes
+ * @param {ArrayBuffer} bytes
  * @returns {ZipList}
  */
 export function list(bytes) {
@@ -127,7 +131,9 @@ export function list(bytes) {
         const nameAt = i + centralHeaderSize;
         const name = decodeName(u8.subarray(nameAt, nameAt + nameLen), utf8);
         if (!name.endsWith("/")) {
-            entries.push({name, size, method, compSize, crc, encrypted, offset});
+            const inflatable = method === 8 && typeof DecompressionStream !== "undefined";
+            const readable = !encrypted && (method === 0 || inflatable);
+            entries.push({name, size, method, compSize, crc, encrypted, readable, offset});
         }
         i = next;
     }
@@ -153,9 +159,9 @@ export function list(bytes) {
  * Nothing larger than entry.size is ever held, but that size comes from the
  * archive, so a caller reading an untrusted file should check it beforehand.
  *
- * @param {ArrayBuffer | Uint8Array} bytes
+ * @param {ArrayBuffer} bytes
  * @param {ZipEntry} entry
- * @param {import("./io.js").OnDone} onDone
+ * @param {function(string | null, ArrayBuffer | null): void} onDone
  */
 export function readEntry(bytes, entry, onDone) {
     const u8 = new Uint8Array(bytes);
@@ -201,7 +207,7 @@ export function readEntry(bytes, entry, onDone) {
         onDone(inflateError(entry.name, ex), null);
         return;
     }
-    readInflated(entry, stream.getReader(), [], 0, onDone);
+    readInflated(entry, stream.getReader(), new Uint8Array(entry.size), 0, onDone);
 }
 
 /**
@@ -266,29 +272,24 @@ function decodeName(raw, utf8) {
 }
 
 /**
- * Collect the inflated stream one chunk at a time, stopping as soon as the
- * output passes the size the directory promised. Buffering the whole stream
- * first would let a small archive that understates its entry size inflate to
- * any amount of memory before the length is ever checked. Recursing through the
- * read callback is the loop; each step resumes in a later microtask.
+ * Inflate the stream into `buf`, sized as the directory promised, one chunk at
+ * a time, stopping as soon as the output passes that size. Buffering the whole
+ * stream first would let a small archive that understates its entry size
+ * inflate to any amount of memory before the length is ever checked. Recursing
+ * through the read callback is the loop; each step resumes in a later
+ * microtask.
  *
  * @param {ZipEntry} entry
  * @param {ReadableStreamDefaultReader<Uint8Array>} reader
- * @param {Uint8Array[]} chunks
+ * @param {Uint8Array<ArrayBuffer>} buf
  * @param {number} total
- * @param {import("./io.js").OnDone} onDone
+ * @param {function(string | null, ArrayBuffer | null): void} onDone
  */
-function readInflated(entry, reader, chunks, total, onDone) {
+function readInflated(entry, reader, buf, total, onDone) {
     reader.read().then(
         function (res) {
             if (res.done) {
-                const buf = new Uint8Array(total);
-                let at = 0;
-                for (const chunk of chunks) {
-                    buf.set(chunk, at);
-                    at += chunk.length;
-                }
-                const err = entryFail(entry, buf);
+                const err = entryFail(entry, buf.subarray(0, total));
                 if (err !== null) {
                     onDone(err, null);
                     return;
@@ -300,13 +301,13 @@ function readInflated(entry, reader, chunks, total, onDone) {
                 // The stream is being abandoned, so a cancel that fails has
                 // nothing left to affect and is swallowed rather than left to
                 // surface as an unhandled rejection.
-                reader.cancel().catch(function () {});
+                reader.cancel().then(function () {}, function () {});
                 const err = "ZIP entry " + entry.name + " inflates past " + entry.size + " bytes.";
                 onDone(err, null);
                 return;
             }
-            chunks.push(res.value);
-            readInflated(entry, reader, chunks, total + res.value.length, onDone);
+            buf.set(res.value, total);
+            readInflated(entry, reader, buf, total + res.value.length, onDone);
         },
         function (ex) {
             onDone(inflateError(entry.name, ex), null);
@@ -325,7 +326,7 @@ function readInflated(entry, reader, chunks, total, onDone) {
 function inflateError(name, ex) {
     let err = "Could not inflate " + name;
     if (ex instanceof Error && ex.message !== "") {
-        err += ": " + ex.message;
+        err += ": " + ex.message.replace(/\.$/, "");
     }
     return err + ".";
 }

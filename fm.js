@@ -17,7 +17,8 @@ const channel3FnumLowBase = 0xA8;
 const channel3FnumHighBase = 0xAC;
 const algorithmBase = 0xB0;
 const sineSteps = 1024;
-const phaseFraction = 1 << 16;
+const phaseBits = 16;
+const phaseFraction = 1 << phaseBits;
 const phaseCycle = sineSteps * phaseFraction;
 const modulationScale = 1 << 28;
 const powerResolution = 256;
@@ -103,10 +104,14 @@ for (let i = 0; i < sineSteps; i += 1) {
 
 /**
  * Native-rate YM2203 FM operator. Envelope volume is attenuation from 0 to
- * 1023; phase is a 10.16 fixed-point index into the 1024-step sine table.
+ * 1023; phase is a 10.16 fixed-point index into the 1024-step sine table, and
+ * `phaseStep` its step per sample, kept up to date while `stepsDirty` is clear.
+ * The last two outputs are kept for a channel's first operator, which feeds
+ * back on itself.
  *
  * @typedef {{
  *   phase: number,
+ *   phaseStep: number,
  *   volume: number,
  *   lastOutput: number,
  *   previousOutput: number,
@@ -126,6 +131,7 @@ for (let i = 0; i < sineSteps; i += 1) {
  *   channel3Block: Uint8Array,
  *   channelMemory: Float64Array,
  *   operators: Operator[],
+ *   stepsDirty: boolean,
  *   prescalerSelect: number,
  *   prescaler: number,
  *   resampleAccumulator: number,
@@ -159,6 +165,7 @@ export function create() {
         channel3Block: new Uint8Array(channelCount),
         channelMemory: new Float64Array(channelCount),
         operators,
+        stepsDirty: true,
         prescalerSelect: 2,
         prescaler: defaultPrescaler,
         resampleAccumulator: 0,
@@ -186,6 +193,7 @@ export function reset(state) {
     state.channel3Fnum.fill(0);
     state.channel3Block.fill(0);
     state.channelMemory.fill(0);
+    state.stepsDirty = true;
     state.prescalerSelect = 2;
     state.prescaler = defaultPrescaler;
     state.resampleAccumulator = 0;
@@ -201,6 +209,7 @@ export function reset(state) {
     state.csmKeyOff = false;
     for (const op of state.operators) {
         op.phase = 0;
+        op.phaseStep = 0;
         op.volume = envelopeMax;
         op.lastOutput = 0;
         op.previousOutput = 0;
@@ -279,6 +288,7 @@ export function writeReg(state, reg, value) {
     const data = value & 0xFF;
     const previousMode = state.registers[timerModeRegister];
     state.registers[addr] = data;
+    state.stepsDirty = true;
     switch (addr) {
     case 0x24:
         state.timerA = (state.timerA & 3) | (data << 2);
@@ -340,6 +350,7 @@ export function takeSample(state, sampleRate) {
 function createOperator() {
     return {
         phase: 0,
+        phaseStep: 0,
         volume: envelopeMax,
         lastOutput: 0,
         previousOutput: 0,
@@ -414,6 +425,14 @@ function keyOperators(state, value) {
  * @returns {number}
  */
 function nativeSample(state) {
+    if (state.stepsDirty) {
+        state.stepsDirty = false;
+        for (let channel = 0; channel < channelCount; channel += 1) {
+            for (let opIndex = 0; opIndex < operatorCount; opIndex += 1) {
+                operator(state, channel, opIndex).phaseStep = operatorPhaseStep(state, channel, opIndex);
+            }
+        }
+    }
     updateSsgEnvelopes(state);
     let sample = 0;
     for (let channel = 0; channel < channelCount; channel += 1) {
@@ -454,6 +473,9 @@ function nativeSample(state) {
 function channelSample(state, channel) {
     const algorithm = state.registers[algorithmBase + channel] & 7;
     const op0 = operatorOutput(state, channel, 0, feedbackSample(state, channel));
+    const first = operator(state, channel, 0);
+    first.previousOutput = first.lastOutput;
+    first.lastOutput = op0;
     let op1 = 0;
     let op2 = 0;
     let op3 = 0;
@@ -521,7 +543,7 @@ function channelSample(state, channel) {
 
 /**
  * One operator's output from its phase plus `modulation`, its envelope, and
- * its total level, keeping the last two outputs for feedback.
+ * its total level.
  *
  * @param {State} state
  * @param {number} channel
@@ -536,15 +558,14 @@ function operatorOutput(state, channel, opIndex, modulation) {
         const level = operatorReg(state, channel, opIndex, totalLevelBase) & 0x7F;
         const attenuation = outputAttenuation(state, channel, opIndex) + level * 8;
         if (attenuation < envelopeQuiet) {
-            const phase = Math.floor((op.phase + modulation) / phaseFraction);
+            // Modulation adds to the whole steps only, as on the chip.
+            const phase = ((op.phase & ~(phaseFraction - 1)) + modulation) >> phaseBits;
             const powerIndex = attenuation * 8 + sineAttenuation[phase & (sineSteps - 1)];
             if (powerIndex < powerTableLength) {
                 output = powerTable[powerIndex];
             }
         }
     }
-    op.previousOutput = op.lastOutput;
-    op.lastOutput = output;
     return output;
 }
 
@@ -555,7 +576,7 @@ function operatorOutput(state, channel, opIndex, modulation) {
 function advancePhases(state, channel) {
     for (let opIndex = 0; opIndex < operatorCount; opIndex += 1) {
         const op = operator(state, channel, opIndex);
-        op.phase += operatorPhaseStep(state, channel, opIndex);
+        op.phase += op.phaseStep;
         if (op.phase >= phaseCycle) {
             op.phase %= phaseCycle;
         }
@@ -723,15 +744,11 @@ function rateIncrement(rate, counter) {
     }
     const effective = rate - 32;
     const shift = Math.max(11 - (effective >> 2), 0);
+    // Rates 48 and up step through the faster rows, four to a group, up to
+    // the fixed top row.
     let group = effective & 3;
-    if (effective >= 60) {
-        group = 16;
-    } else if (effective >= 56) {
-        group = 12 + (effective & 3);
-    } else if (effective >= 52) {
-        group = 8 + (effective & 3);
-    } else if (effective >= 48) {
-        group = 4 + (effective & 3);
+    if (effective >= 48) {
+        group = Math.min(effective - 44, 16);
     }
     if ((counter & ((1 << shift) - 1)) !== 0) {
         return 0;
