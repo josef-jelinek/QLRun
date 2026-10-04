@@ -247,8 +247,9 @@ function advanceTo(state, t, collect) {
         }
         state.t = next;
         if (state.t === state.nextTickT) {
-            tick(state);
-            refreshLevels(state);
+            if (tick(state)) {
+                refreshLevels(state);
+            }
             state.nextTickT += state.tickT;
         }
     }
@@ -257,41 +258,57 @@ function advanceTo(state, t, collect) {
 /**
  * One PSG clock after the input divider: the tones step on every tick, the
  * noise on every other one, and the envelope on every other one too, except on
- * a YM2149, where it steps on every tick.
+ * a YM2149, where it steps on every tick. Reports whether a tone or the noise
+ * the mixer passes, or the envelope level, changed.
  *
  * @param {State} state
+ * @returns {boolean}
  */
 function tick(state) {
+    let changed = false;
+    const mixer = state.regs[regMixer];
     const clock16 = !state.clockDividerPhase;
     state.clockDividerPhase = !state.clockDividerPhase;
+    // The counters count up to the current period, so a period written takes
+    // effect at once; a zero period counts as one.
     for (let channel = 0; channel < 3; channel += 1) {
-        if (state.toneCounter[channel] === 0) {
+        const period = ((state.regs[channel * 2 + 1] & 0x0F) << 8) | state.regs[channel * 2];
+        state.toneCounter[channel] += 1;
+        if (state.toneCounter[channel] >= Math.max(period, 1)) {
+            state.toneCounter[channel] = 0;
             state.toneLevel[channel] ^= 1;
-            // A zero period counts as one.
-            const period = ((state.regs[channel * 2 + 1] & 0x0F) << 8) | state.regs[channel * 2];
-            state.toneCounter[channel] = Math.max(period, 1) - 1;
-        } else {
-            state.toneCounter[channel] -= 1;
+            // A tone the mixer leaves out cannot change the output.
+            if ((mixer & (1 << channel)) === 0) {
+                changed = true;
+            }
         }
     }
     if (clock16) {
-        if (state.noiseCounter === 0) {
-            state.noiseCounter = Math.max(state.regs[regNoise] & 0x1F, 1) - 1;
+        state.noiseCounter += 1;
+        if (state.noiseCounter >= Math.max(state.regs[regNoise] & 0x1F, 1)) {
+            state.noiseCounter = 0;
             const feedback = (state.noiseLfsr ^ (state.noiseLfsr >> 3)) & 1;
             state.noiseLfsr = (state.noiseLfsr >> 1) | (feedback << 16);
-            state.noiseLevel = state.noiseLfsr & 1;
-        } else {
-            state.noiseCounter -= 1;
+            if (state.noiseLevel !== (state.noiseLfsr & 1)) {
+                state.noiseLevel = state.noiseLfsr & 1;
+                if ((mixer & 0x38) !== 0x38) {
+                    changed = true;
+                }
+            }
         }
     }
     if (clock16 || state.ymStyle) {
-        if (state.env.counter === 0) {
-            state.env.counter = envelopePeriod(state) - 1;
+        state.env.counter += 1;
+        if (state.env.counter >= envelopePeriod(state)) {
+            state.env.counter = 0;
+            const level = state.env.level;
             stepEnvelope(state);
-        } else {
-            state.env.counter -= 1;
+            if (state.env.level !== level) {
+                changed = true;
+            }
         }
     }
+    return changed;
 }
 
 /** @param {State} state */
@@ -326,7 +343,7 @@ function resetEnvelope(state) {
     state.env.attack = (state.regs[regEnvShape] & 0x04) !== 0;
     state.env.step = 0;
     state.env.holding = false;
-    state.env.counter = envelopePeriod(state) - 1;
+    state.env.counter = 0;
     setEnvelopeLevel(state);
 }
 

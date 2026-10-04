@@ -8,6 +8,7 @@ import * as media from "./media.js";
 import * as pe from "./pe.js";
 import * as qimsi from "./qimsi.js";
 import * as screen from "./screen.js";
+import * as serial from "./serial.js";
 import * as sound from "./sound.js";
 
 const statsWindowMs = 1000;
@@ -44,7 +45,14 @@ const urlParamDefaults = {
     mcursor: "0",
     turbo: "1",
     stretch: "0",
+    rom: "",
 };
+
+/**
+ * One radio button of a numeric choice, such as the RAM size.
+ *
+ * @typedef {{value: number, input: HTMLInputElement}} RadioOption
+ */
 
 /**
  * One drive card: its status line, meter, activity light, and file actions.
@@ -71,8 +79,8 @@ const urlParamDefaults = {
  * the transfer counts behind its activity light. `spaceWrites` is the write
  * count the space meter shows, or -1 to redraw it; `state` and `lit` are the
  * light's activity and whether a medium is in, and `until` holds a brief
- * transfer visible. `driverReady` and `generation` apply to the hard disk and
- * floppy only.
+ * transfer visible. `generation` tells a new medium of the same name, and
+ * `driverReady` applies to the hard disk and floppy only.
  *
  * @typedef {{
  *   inserted: boolean,
@@ -87,6 +95,49 @@ const urlParamDefaults = {
  *   state: string,
  *   lit: boolean,
  * }} DriveStatus
+ */
+
+/**
+ * One serial port card: its baud badge, port name, activity lights with the
+ * status-bar item holding one, and its Connect and Disconnect buttons.
+ *
+ * @typedef {{
+ *   card: HTMLElement,
+ *   baud: HTMLElement,
+ *   info: HTMLElement,
+ *   led: HTMLElement,
+ *   statusLed: HTMLElement,
+ *   statusItem: HTMLElement,
+ *   connect: HTMLButtonElement,
+ *   disconnect: HTMLButtonElement,
+ * }} SerialControls
+ */
+
+/**
+ * A QL serial line's host side: the open link, or the chosen `port` while it
+ * is `connecting`, with `name` for that port and `error` for the last
+ * failure. `generation` makes callbacks of a replaced connection finish
+ * silently. The rest is what the card last showed, so an unchanged card
+ * leaves the DOM alone, and the transfer counts behind its activity light;
+ * `until` holds a brief transfer visible.
+ *
+ * @typedef {{
+ *   link: import("./serial.js").Link | null,
+ *   port: SerialPort | null,
+ *   connecting: boolean,
+ *   name: string,
+ *   error: string,
+ *   generation: number,
+ *   shownBaud: number,
+ *   shownLabel: string,
+ *   shownError: boolean,
+ *   shownLinked: boolean,
+ *   txCount: number,
+ *   rxCount: number,
+ *   until: number,
+ *   state: string,
+ *   lit: boolean,
+ * }} SerialStatus
  */
 
 const ui = {
@@ -129,6 +180,12 @@ const ui = {
     newFddMenu:       /** @type {HTMLDetailsElement} */ (document.getElementById("new-fdd-menu")),
     newFddDd:         /** @type {HTMLButtonElement} */ (document.getElementById("new-fdd-dd")),
     newFddHd:         /** @type {HTMLButtonElement} */ (document.getElementById("new-fdd-hd")),
+    serialNote:       /** @type {HTMLElement} */       (document.getElementById("serial-note")),
+    serialNoteText:   /** @type {HTMLElement} */       (document.getElementById("serial-note-text")),
+    ser: [
+        serialControls("ser1"),
+        serialControls("ser2"),
+    ],
     loadRom:          /** @type {HTMLButtonElement} */ (document.getElementById("load-rom")),
     fileRom:          /** @type {HTMLInputElement} */  (document.getElementById("file-rom")),
     romInfo:          /** @type {HTMLElement} */       (document.getElementById("rom-info")),
@@ -178,10 +235,10 @@ const ui = {
     ntsc:             /** @type {HTMLInputElement} */  (document.getElementById("ntsc")),
     videoDesc:        /** @type {HTMLElement} */       (document.getElementById("video-desc")),
     ram: [
-        {kb: 128, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-128"))},
-        {kb: 384, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-384"))},
-        {kb: 640, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-640"))},
-        {kb: 896, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-896"))},
+        {value: 128, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-128"))},
+        {value: 384, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-384"))},
+        {value: 640, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-640"))},
+        {value: 896, input: /** @type {HTMLInputElement} */ (document.getElementById("ram-896"))},
     ],
     ramNote:          /** @type {HTMLElement} */       (document.getElementById("ram-note")),
     qsoundOff:        /** @type {HTMLInputElement} */  (document.getElementById("qsound-off")),
@@ -199,9 +256,9 @@ const ui = {
     mousePe:          /** @type {HTMLInputElement} */  (document.getElementById("mouse-pe")),
     mouseDesc:        /** @type {HTMLElement} */       (document.getElementById("mouse-desc")),
     mouseSpeeds: [
-        {speed: 1, input: /** @type {HTMLInputElement} */ (document.getElementById("mspeed-1"))},
-        {speed: 2, input: /** @type {HTMLInputElement} */ (document.getElementById("mspeed-2"))},
-        {speed: 4, input: /** @type {HTMLInputElement} */ (document.getElementById("mspeed-4"))},
+        {value: 1, input: /** @type {HTMLInputElement} */ (document.getElementById("mspeed-1"))},
+        {value: 2, input: /** @type {HTMLInputElement} */ (document.getElementById("mspeed-2"))},
+        {value: 4, input: /** @type {HTMLInputElement} */ (document.getElementById("mspeed-4"))},
     ],
     mouseCursor:      /** @type {HTMLInputElement} */  (document.getElementById("mouse-cursor")),
     turbo:            /** @type {HTMLInputElement} */  (document.getElementById("turbo")),
@@ -216,7 +273,7 @@ const query = new URLSearchParams(window.location.search);
 let configuredRomName = query.get("rom") ?? "";
 const configuredCartName = query.get("cart") ?? "";
 /** PS/2 counts per displayed 512-mode pixel; at 1, QIMSI's PE driver follows the host 1:1. */
-let mouseCountsPerPixel = mouseSpeedFromParam(query.get("mspeed") ?? "");
+let mouseCountsPerPixel = optionFromParam(ui.mouseSpeeds, query.get("mspeed") ?? "", 1);
 const configuredMouseModel = mouseFromParam(query.get("mouse") ?? "");
 const keys = {
     rows: new Uint8Array(8),
@@ -226,11 +283,9 @@ const keys = {
     queue: [],
 };
 const ql = machine.create(keys);
-const configuredRamKb = ramKbFromParam(query.get("ram") ?? "");
+const configuredRamKb = optionFromParam(ui.ram, query.get("ram") ?? "", machine.defaultRamKb);
 machine.setRamKb(ql, configuredRamKb);
-for (const option of ui.ram) {
-    option.input.checked = option.kb === configuredRamKb;
-}
+checkOption(ui.ram, configuredRamKb);
 const kbd = keyboard.init(ui.keyboard, keys);
 
 /** @type {import("./screen.js").Gfx | null} */
@@ -262,8 +317,8 @@ let statsCut = 0;
 let statsGap = 0;
 /** @type {DriveStatus[]} */
 const mdvStatus = [newDriveStatus(), newDriveStatus()];
-const hddStatus = newDriveStatus();
-const fddStatus = newDriveStatus();
+/** @type {SerialStatus[]} */
+const serialStatus = [newSerialStatus(), newSerialStatus()];
 /**
  * Per extension-ROM slot: the image's name, its load error, a generation that
  * makes superseded loads finish silently, and the `roms/` name of a bundled
@@ -276,7 +331,6 @@ const romSlotStates = [
 ];
 const cartridgeSlot = 0;
 let wheelSteps = 0;
-let screenOnly = false;
 let screenOnlyFallback = false;
 let shownMode8 = false;
 let dragDepth = 0;
@@ -307,9 +361,7 @@ applySwitchParam(ui.muted, "muted");
 ui.mouseQimsi.checked = configuredMouseModel === machine.mouseQimsi;
 ui.mousePe.checked = configuredMouseModel === machine.mousePe;
 ui.mouseOff.checked = configuredMouseModel === machine.mouseOff;
-for (const option of ui.mouseSpeeds) {
-    option.input.checked = option.speed === mouseCountsPerPixel;
-}
+checkOption(ui.mouseSpeeds, mouseCountsPerPixel);
 applySwitchParam(ui.mouseCursor, "mcursor");
 applySwitchParam(ui.turbo, "turbo");
 applySwitchParam(ui.stretch, "stretch");
@@ -520,10 +572,7 @@ new ResizeObserver(function () {
     }
 }).observe(ui.screenSlot);
 
-document.onfullscreenchange = function () {
-    screenOnly = document.fullscreenElement !== null || screenOnlyFallback;
-    applyVisibility();
-};
+document.onfullscreenchange = applyVisibility;
 
 document.onpointerlockchange = function () {
     if (document.pointerLockElement !== ui.screen) {
@@ -632,7 +681,7 @@ for (let drive = 0; drive < ui.mdv.length; drive += 1) {
     controls.file.onchange = function () {
         const chosen = readChosenFile(
             controls.file,
-            0,
+            load.maxMdvBytes,
             function (file, err, buf) {
                 if (err !== null || buf === null) {
                     showReadError(controls.info, err);
@@ -667,7 +716,7 @@ ui.loadRom.onclick = function () {
 ui.fileRom.onchange = function () {
     readChosenFile(
         ui.fileRom,
-        0,
+        machine.sysRomSize,
         function (file, err, buf) {
             if (err !== null || buf === null) {
                 showReadError(ui.romInfo, err);
@@ -679,19 +728,11 @@ ui.fileRom.onchange = function () {
 };
 
 ui.romMinerva.onclick = function () {
-    configuredRomName = "minerva";
-    systemRomFromFile = false;
-    updateUrlParam("rom", configuredRomName);
-    refreshSystemRom();
-    loadSystemRom();
+    selectSystemRom("minerva");
 };
 
 ui.romAuto.onclick = function () {
-    configuredRomName = "";
-    systemRomFromFile = false;
-    updateUrlParam("rom", null);
-    refreshSystemRom();
-    loadSystemRom();
+    selectSystemRom("");
 };
 
 for (let slot = 0; slot < ui.romSlots.length; slot += 1) {
@@ -749,29 +790,50 @@ if (configuredCartName !== "") {
     loadBundledCartridge(configuredCartName);
 }
 
+// New media mount without resetting the machine.
 ui.newHdd4.onclick = function () {
     ui.newHddMenu.open = false;
-    insertNewHardDisk(4 * sectorsPerMebibyte);
+    disk.insertBlankHardDisk(ql.disks.win, 4 * sectorsPerMebibyte, "win1.win");
 };
 
 ui.newHdd16.onclick = function () {
     ui.newHddMenu.open = false;
-    insertNewHardDisk(disk.maxReportedSectors);
+    disk.insertBlankHardDisk(ql.disks.win, disk.maxReportedSectors, "win1.win");
 };
 
 ui.newFddDd.onclick = function () {
     ui.newFddMenu.open = false;
-    insertNewFloppy(false);
+    disk.insertBlankFloppy(ql.disks.flp, false, "flp1.img");
 };
 
 ui.newFddHd.onclick = function () {
     ui.newFddMenu.open = false;
-    insertNewFloppy(true);
+    disk.insertBlankFloppy(ql.disks.flp, true, "flp1.img");
 };
 
 const diskDrives = [
-    {state: ql.disks.win, controls: ui.hdd, menu: ui.newHddMenu, fallbackName: "win1.win", isName: media.isWinName, extension: ".win"},
-    {state: ql.disks.flp, controls: ui.fdd, menu: ui.newFddMenu, fallbackName: "flp1.img", isName: media.isImgName, extension: ".img"},
+    {
+        state: ql.disks.win,
+        controls: ui.hdd,
+        status: newDriveStatus(),
+        menu: ui.newHddMenu,
+        driveName: "WIN1",
+        emptyLabel: "No hard disk.",
+        fallbackName: "win1.win",
+        isName: media.isWinName,
+        extension: ".win",
+    },
+    {
+        state: ql.disks.flp,
+        controls: ui.fdd,
+        status: newDriveStatus(),
+        menu: ui.newFddMenu,
+        driveName: "FLP1",
+        emptyLabel: "No floppy.",
+        fallbackName: "flp1.img",
+        isName: media.isImgName,
+        extension: ".img",
+    },
 ];
 for (const drive of diskDrives) {
     const controls = drive.controls;
@@ -803,6 +865,23 @@ for (const drive of diskDrives) {
     };
     controls.eject.onclick = function () {
         disk.eject(drive.state);
+    };
+}
+
+const serialUnavailable = serial.availability();
+if (serialUnavailable !== "") {
+    ui.serialNoteText.textContent = serialUnavailable;
+    ui.serialNote.hidden = false;
+}
+for (let line = 0; line < ui.ser.length; line += 1) {
+    const controls = ui.ser[line];
+    controls.connect.disabled = serialUnavailable !== "";
+    controls.statusItem.hidden = serialUnavailable !== "";
+    controls.connect.onclick = function () {
+        connectSerial(line);
+    };
+    controls.disconnect.onclick = function () {
+        disconnectSerial(line);
     };
 }
 
@@ -855,7 +934,7 @@ sound.init(
 );
 
 boot.loadRom(
-    boot.qsoundRomUrl,
+    boot.qsoundRomName,
     machine.qsoundRomSize,
     function (err, rom) {
         if (rom === null) {
@@ -942,6 +1021,26 @@ function driveControls(base, statusLedId) {
     };
 }
 
+/**
+ * Collect one serial port card's elements around its base id, for example
+ * `ser1-info` and `connect-ser1`, plus its light in the status bar.
+ *
+ * @param {string} base
+ * @returns {SerialControls}
+ */
+function serialControls(base) {
+    return {
+        card: /** @type {HTMLElement} */ (document.getElementById(base + "-card")),
+        baud: /** @type {HTMLElement} */ (document.getElementById(base + "-baud")),
+        info: /** @type {HTMLElement} */ (document.getElementById(base + "-info")),
+        led: /** @type {HTMLElement} */ (document.getElementById(base + "-led")),
+        statusLed: /** @type {HTMLElement} */ (document.getElementById("led-" + base)),
+        statusItem: /** @type {HTMLElement} */ (document.getElementById("led-" + base + "-item")),
+        connect: /** @type {HTMLButtonElement} */ (document.getElementById("connect-" + base)),
+        disconnect: /** @type {HTMLButtonElement} */ (document.getElementById("disconnect-" + base)),
+    };
+}
+
 /** @returns {DriveStatus} */
 function newDriveStatus() {
     return {
@@ -953,6 +1052,27 @@ function newDriveStatus() {
         readCount: 0,
         writeCount: 0,
         spaceWrites: -1,
+        until: 0,
+        state: "idle",
+        lit: false,
+    };
+}
+
+/** @returns {SerialStatus} */
+function newSerialStatus() {
+    return {
+        link: null,
+        port: null,
+        connecting: false,
+        name: "",
+        error: "",
+        generation: 0,
+        shownBaud: 0,
+        shownLabel: "",
+        shownError: false,
+        shownLinked: false,
+        txCount: 0,
+        rxCount: 0,
         until: 0,
         state: "idle",
         lit: false,
@@ -1004,7 +1124,7 @@ function readChosenFile(input, maxBytes, onFile) {
     // first. Clearing lets the same file be chosen again.
     const file = files[0];
     input.value = "";
-    readLocalFile(
+    io.readFile(
         file,
         maxBytes,
         function (err, buf) {
@@ -1032,8 +1152,12 @@ function loadDroppedFile(file) {
     let maxBytes = 0;
     if (zip) {
         maxBytes = load.maxZipBytes;
+    } else if (media.isMdvName(name)) {
+        maxBytes = load.maxMdvBytes;
+    } else if (media.isRomName(name)) {
+        maxBytes = machine.sysRomSize;
     }
-    readLocalFile(
+    io.readFile(
         file,
         maxBytes,
         function (err, buf) {
@@ -1064,25 +1188,6 @@ function loadDroppedFile(file) {
             }
         },
     );
-}
-
-/**
- * Read a local file from a picker or a drop, with the same size checks.
- *
- * @param {File} file
- * @param {number} maxBytes
- * @param {function(string | null, ArrayBuffer | null): void} onDone
- */
-function readLocalFile(file, maxBytes, onDone) {
-    if (file.size === 0 || (maxBytes > 0 && file.size > maxBytes)) {
-        let err = "Empty read.";
-        if (maxBytes > 0) {
-            err = "Expected 1 to " + maxBytes + ", got " + file.size + " bytes.";
-        }
-        onDone(err, null);
-        return;
-    }
-    io.readFile(file, onDone);
 }
 
 /**
@@ -1247,21 +1352,6 @@ function applySwitchParam(input, name) {
 }
 
 /**
- * Accept a supported whole-KiB RAM size and otherwise use the stock size.
- *
- * @param {string} value
- * @returns {number}
- */
-function ramKbFromParam(value) {
-    for (const option of ui.ram) {
-        if (String(option.kb) === value) {
-            return option.kb;
-        }
-    }
-    return machine.defaultRamKb;
-}
-
-/**
  * Accept a supported mouse model and otherwise leave the mouse disconnected.
  *
  * @param {string} value
@@ -1278,21 +1368,6 @@ function mouseFromParam(value) {
     }
 }
 
-/**
- * Accept a supported count rate per displayed 512-mode pixel, defaulting to 1.
- *
- * @param {string} value
- * @returns {number}
- */
-function mouseSpeedFromParam(value) {
-    for (const option of ui.mouseSpeeds) {
-        if (String(option.speed) === value) {
-            return option.speed;
-        }
-    }
-    return 1;
-}
-
 /** Switch PAL/NTSC timing, reset, and follow it with the automatic ROM. */
 function selectVideoStandard() {
     updateUrlParam("ntsc", ui.ntsc.checked);
@@ -1307,8 +1382,23 @@ function selectVideoStandard() {
 }
 
 /**
+ * Choose a bundled system ROM by name, or "" for the one that follows the
+ * video standard, keep it in the URL, and load it.
+ *
+ * @param {string} name
+ */
+function selectSystemRom(name) {
+    configuredRomName = name;
+    systemRomFromFile = false;
+    updateUrlParam("rom", name);
+    refreshSystemRom();
+    loadSystemRom();
+}
+
+/**
  * Fetch and install the `?rom=` or automatic system ROM: at startup once the
- * sound card is set up, after Auto, and when the video standard changes it.
+ * sound card is set up, on a system ROM choice, and when the video standard
+ * changes it.
  */
 function loadSystemRom() {
     cancelSystemRomLoad();
@@ -1321,11 +1411,7 @@ function loadSystemRom() {
         }
     }
     const name = romName + ".rom";
-    if (!/^[A-Za-z0-9]+$/.test(romName)) {
-        onRom("Invalid ROM name.", null);
-        return;
-    }
-    abortLoadRom = boot.loadRom("roms/" + name, machine.sysRomSize, onRom);
+    abortLoadRom = boot.loadRom(romName, machine.sysRomSize, onRom);
 
     /**
      * @param {string | null} err
@@ -1387,7 +1473,9 @@ function refreshSystemRom() {
     const automatic = configuredRomName === "" && !systemRomFromFile;
     ui.romAutoBadge.hidden = !automatic;
     ui.romAuto.disabled = automatic;
-    ui.romMinerva.disabled = configuredRomName === "minerva" && !systemRomFromFile;
+    // Minerva can be chosen again until it is installed, so a failed load can
+    // be retried.
+    ui.romMinerva.disabled = systemRomName === "minerva.rom" && !systemRomFromFile;
     let name = systemRomName;
     if (name === "") {
         name = "no ROM";
@@ -1431,14 +1519,15 @@ function selectSoundCard() {
 
 /**
  * Connect the chosen mouse model and restart. QIMSI plugs into the ROM port,
- * so choosing it ejects a cartridge ROM, and the note says so.
+ * so choosing it ejects a cartridge ROM, and the note says so, or cancels one
+ * still loading.
  */
 function selectMouse() {
     ui.mouseNote.hidden = true;
     ui.cartNote.hidden = true;
-    if (selectedMouseModel() === machine.mouseQimsi && romSlotStates[cartridgeSlot].name !== "") {
+    if (selectedMouseModel() === machine.mouseQimsi) {
+        ui.mouseNote.hidden = romSlotStates[cartridgeSlot].name === "";
         ejectRomSlot(cartridgeSlot);
-        ui.mouseNote.hidden = false;
     }
     applyMouseModel();
     resetSystem();
@@ -1456,13 +1545,8 @@ function loadBundledCartridge(name) {
     state.generation += 1;
     const generation = state.generation;
     const fileName = name + ".rom";
-    if (!/^[A-Za-z0-9]+$/.test(name)) {
-        state.error = "Invalid cartridge ROM name.";
-        refreshRomSlotStatus(cartridgeSlot);
-        return;
-    }
     boot.loadRom(
-        "roms/" + fileName,
+        name,
         machine.romCartridgeSize,
         function (err, rom) {
             if (state.generation !== generation) {
@@ -1543,13 +1627,8 @@ function refreshRomSlotStatus(slot) {
     if (slot === cartridgeSlot) {
         ui.romToolkit2.disabled = state.bundled === "tk2";
     }
-    if (state.name === "") {
-        controls.card.classList.add("empty");
-        controls.map.classList.remove("full");
-    } else {
-        controls.card.classList.remove("empty");
-        controls.map.classList.add("full");
-    }
+    controls.card.classList.toggle("empty", state.name === "");
+    controls.map.classList.toggle("full", state.name !== "");
     if (state.error !== "") {
         showError(controls.info, state.error);
         return;
@@ -1577,7 +1656,7 @@ function applyMouseModel() {
  * restart.
  */
 function selectMouseSpeed() {
-    mouseCountsPerPixel = selectedMouseSpeed();
+    mouseCountsPerPixel = checkedOption(ui.mouseSpeeds, 1);
     updateUrlParam("mspeed", mouseCountsPerPixel);
 }
 
@@ -1651,16 +1730,6 @@ function mouseParam(model) {
 }
 
 /** @returns {number} */
-function selectedMouseSpeed() {
-    for (const option of ui.mouseSpeeds) {
-        if (option.input.checked) {
-            return option.speed;
-        }
-    }
-    return 1;
-}
-
-/** @returns {number} */
 function selectedMouseModel() {
     if (ui.mousePe.checked) {
         return machine.mousePe;
@@ -1678,9 +1747,7 @@ function fitRamBesideSoundCard() {
     if (selectedQsoundModel() === machine.qsoundOff || selectedRamKb() !== fullRamKb) {
         return;
     }
-    for (const option of ui.ram) {
-        option.input.checked = option.kb === ramBesideSoundCardKb;
-    }
+    checkOption(ui.ram, ramBesideSoundCardKb);
     applyRamSize();
     ui.soundNote.hidden = false;
 }
@@ -1786,26 +1853,13 @@ function insertMdvFile(drive, name, buf) {
  * or refused, the page shows only the screen instead.
  */
 function toggleCanvasFullscreen() {
-    if (document.fullscreenElement !== null || screenOnlyFallback) {
-        screenOnlyFallback = false;
-        if (document.fullscreenElement !== null && document.exitFullscreen !== undefined) {
-            document.exitFullscreen().then(
-                function () {},
-                function () {
-                    screenOnly = false;
-                    applyVisibility();
-                },
-            );
-            return;
-        }
-        screenOnly = false;
-        applyVisibility();
+    // Browsers without the Fullscreen API leave `fullscreenElement` undefined.
+    if (document.fullscreenElement instanceof Element) {
+        document.exitFullscreen().then(function () {}, function () {});
         return;
     }
-
-    if (ui.screenSlot.requestFullscreen === undefined) {
-        screenOnlyFallback = true;
-        screenOnly = true;
+    if (screenOnlyFallback || ui.screenSlot.requestFullscreen === undefined) {
+        screenOnlyFallback = !screenOnlyFallback;
         applyVisibility();
         return;
     }
@@ -1813,22 +1867,19 @@ function toggleCanvasFullscreen() {
         function () {},
         function () {
             screenOnlyFallback = true;
-            screenOnly = true;
             applyVisibility();
         },
     );
 }
 
 /**
- * Show only the screen in screen-only mode, and the keyboard window while it
- * is switched on. The screen slot's ResizeObserver refits the canvas.
+ * Show only the screen while fullscreen or in its fallback, and the keyboard
+ * window while it is switched on. The screen slot's ResizeObserver refits the
+ * canvas.
  */
 function applyVisibility() {
-    if (screenOnly) {
-        document.body.classList.add("screen-only");
-    } else {
-        document.body.classList.remove("screen-only");
-    }
+    const screenOnly = document.fullscreenElement instanceof Element || screenOnlyFallback;
+    document.body.classList.toggle("screen-only", screenOnly);
     ui.keyboardPanel.hidden = screenOnly || !ui.keyboardToggle.checked;
 }
 
@@ -1893,8 +1944,10 @@ function onFrame(now) {
         fillSoundQueue();
     }
     refreshMdvCards(now);
-    refreshDiskCard(ql.disks.win, hddStatus, ui.hdd, now, "No hard disk.", "WIN1");
-    refreshDiskCard(ql.disks.flp, fddStatus, ui.fdd, now, "No floppy.", "FLP1");
+    for (const drive of diskDrives) {
+        refreshDiskCard(drive.state, drive.status, drive.controls, now, drive.emptyLabel, drive.driveName);
+    }
+    refreshSerialCards(now);
     refreshStats(now);
     if (ql.displayMode8 !== shownMode8) {
         refreshScreenInfo();
@@ -1920,12 +1973,7 @@ function refreshScreenInfo() {
 
 /** @returns {number} */
 function selectedRamKb() {
-    for (const option of ui.ram) {
-        if (option.input.checked) {
-            return option.kb;
-        }
-    }
-    return machine.defaultRamKb;
+    return checkedOption(ui.ram, machine.defaultRamKb);
 }
 
 /** Follow the current PAL or US ZX8301 field rate, and show it on the video chip. */
@@ -2002,12 +2050,14 @@ function refreshMdvCards(now) {
         if (
             info.inserted !== status.inserted ||
             info.name !== status.name ||
-            info.modified !== status.modified
+            info.modified !== status.modified ||
+            info.generation !== status.generation
         ) {
             showDrive(controls, info.inserted, info.name, info.modified, "No cartridge.");
             status.inserted = info.inserted;
             status.name = info.name;
             status.modified = info.modified;
+            status.generation = info.generation;
             status.spaceWrites = -1;
         }
         if (status.spaceWrites !== info.writeCount && activity !== "write") {
@@ -2020,37 +2070,102 @@ function refreshMdvCards(now) {
             status.spaceWrites = info.writeCount;
         }
         status.writeCount = info.writeCount;
-        showActivity(controls, status, activity, info.inserted, "MDV" + (drive + 1));
+        showActivity(controls, status, activity, info.inserted, driveActivityTitle("MDV" + (drive + 1), activity));
     }
 }
 
 /**
- * Mount an empty formatted floppy in FLP1 without resetting the machine.
+ * Let the user choose a host port for a QL serial line and open it at the
+ * QL's current rate, replacing the line's port. The other line's port is
+ * refused, as a port opens only once.
  *
- * @param {boolean} highDensity
+ * @param {number} line
  */
-function insertNewFloppy(highDensity) {
-    disk.insertBlankFloppy(ql.disks.flp, highDensity, "flp1.img");
+function connectSerial(line) {
+    const status = serialStatus[line];
+    serial.request(function (err, port) {
+        if (err !== null) {
+            status.error = err;
+            return;
+        }
+        if (port === null) {
+            return;
+        }
+        for (let other = 0; other < serialStatus.length; other += 1) {
+            if (other !== line && serialStatus[other].port === port) {
+                status.error = "That port is already on SER" + (other + 1) + ".";
+                return;
+            }
+        }
+        disconnectSerial(line);
+        const generation = status.generation;
+        status.port = port;
+        status.name = serial.portName(port);
+        status.connecting = true;
+        serial.open(
+            port,
+            machine.serialInfo(ql, line).baud,
+            function (bytes) {
+                if (status.generation !== generation || status.link === null) {
+                    return;
+                }
+                machine.receiveSerialBytes(ql, line, bytes);
+                serial.setReady(status.link, machine.serialInfo(ql, line).ready);
+            },
+            function (closeErr) {
+                if (status.generation !== generation) {
+                    return;
+                }
+                dropSerialLink(line);
+                status.error = closeErr;
+            },
+            function (openErr, link) {
+                if (status.generation !== generation) {
+                    if (link !== null) {
+                        serial.close(link, function () {});
+                    }
+                    return;
+                }
+                status.connecting = false;
+                if (openErr !== null || link === null) {
+                    dropSerialLink(line);
+                    status.error = openErr ?? "Could not open the serial port.";
+                    return;
+                }
+                status.link = link;
+                serial.setReady(link, machine.serialInfo(ql, line).ready);
+            },
+        );
+    });
 }
 
 /**
- * Mount an empty formatted hard disk in WIN1 without resetting the machine.
+ * Close a QL serial line's host port, or abandon one still opening.
  *
- * @param {number} sectors
+ * @param {number} line
  */
-function insertNewHardDisk(sectors) {
-    disk.insertBlankHardDisk(ql.disks.win, sectors, "win1.win");
+function disconnectSerial(line) {
+    const link = serialStatus[line].link;
+    dropSerialLink(line);
+    if (link !== null) {
+        serial.close(link, function () {});
+    }
 }
 
 /**
- * Set error text and apply its error presentation.
+ * Forget a QL serial line's host port, so its callbacks finish silently, and
+ * leave the QL seeing a line that holds nothing back, as with no cable.
  *
- * @param {HTMLElement} el
- * @param {string} text
+ * @param {number} line
  */
-function showError(el, text) {
-    el.textContent = text;
-    el.classList.add("error");
+function dropSerialLink(line) {
+    const status = serialStatus[line];
+    status.generation += 1;
+    status.link = null;
+    status.port = null;
+    status.connecting = false;
+    status.error = "";
+    machine.setSerialRemoteReady(ql, line, true);
 }
 
 /**
@@ -2101,7 +2216,63 @@ function refreshDiskCard(state, status, controls, now, emptyLabel, driveName) {
         showSpace(controls, info.freeSectors, info.totalSectors);
         status.spaceWrites = info.writeCount;
     }
-    showActivity(controls, status, activity, info.inserted, driveName);
+    showActivity(controls, status, activity, info.inserted, driveActivityTitle(driveName, activity));
+}
+
+/**
+ * Keep both serial port cards aligned with their host ports and the QL's
+ * rate, holding brief transfers visible on the activity lights.
+ *
+ * @param {number} now
+ */
+function refreshSerialCards(now) {
+    for (let line = 0; line < ui.ser.length; line += 1) {
+        const controls = ui.ser[line];
+        const status = serialStatus[line];
+        const info = machine.serialInfo(ql, line);
+        const linked = status.link !== null;
+        let activity = status.state;
+        if (!linked) {
+            activity = "idle";
+        } else if (info.txCount !== status.txCount) {
+            activity = "write";
+            status.until = now + activityHoldMs;
+        } else if (info.rxCount !== status.rxCount) {
+            activity = "read";
+            status.until = now + activityHoldMs;
+        } else if (now >= status.until) {
+            activity = "idle";
+        }
+        status.txCount = info.txCount;
+        status.rxCount = info.rxCount;
+        if (info.baud !== status.shownBaud) {
+            controls.baud.textContent = String(info.baud);
+            status.shownBaud = info.baud;
+        }
+        let label = "Not connected.";
+        if (status.connecting) {
+            label = status.name + " (opening)";
+        } else if (linked) {
+            label = status.name;
+        }
+        const isError = status.error !== "";
+        if (isError) {
+            label = status.error;
+        }
+        if (label !== status.shownLabel || isError !== status.shownError || linked !== status.shownLinked) {
+            if (isError) {
+                showError(controls.info, label);
+            } else {
+                showInfo(controls.info, label);
+            }
+            controls.card.classList.toggle("empty", !linked);
+            controls.disconnect.disabled = !linked && !status.connecting;
+            status.shownLabel = label;
+            status.shownError = isError;
+            status.shownLinked = linked;
+        }
+        showActivity(controls, status, activity, linked, serialActivityTitle("SER" + (line + 1), activity, linked));
+    }
 }
 
 /**
@@ -2117,14 +2288,23 @@ function showDrive(controls, inserted, name, modified, emptyLabel) {
     let label = emptyLabel;
     if (inserted) {
         label = name;
-        controls.card.classList.remove("empty");
-    } else {
-        controls.card.classList.add("empty");
     }
+    controls.card.classList.toggle("empty", !inserted);
     showInfo(controls.info, label);
     controls.modified.hidden = !(inserted && modified);
     controls.download.disabled = !inserted;
     controls.eject.disabled = !inserted;
+}
+
+/**
+ * Set error text and apply its error presentation.
+ *
+ * @param {HTMLElement} el
+ * @param {string} text
+ */
+function showError(el, text) {
+    el.textContent = text;
+    el.classList.add("error");
 }
 
 /**
@@ -2163,44 +2343,69 @@ function showSpace(controls, free, total) {
 }
 
 /**
- * Light a drive's card and status-bar activity lights for its state:
- * `idle`, `motor`, `read`, or `write`.
+ * Light a card's and the status bar's activity lights for a state, `idle`,
+ * `motor`, `read`, or `write`, solid while a medium is in or a port is
+ * connected.
  *
- * @param {DriveControls} controls
- * @param {DriveStatus} status
+ * @param {{led: HTMLElement, statusLed: HTMLElement}} controls
+ * @param {{state: string, lit: boolean}} status
  * @param {string} state
- * @param {boolean} inserted
- * @param {string} driveName
+ * @param {boolean} lit
+ * @param {string} title
  */
-function showActivity(controls, status, state, inserted, driveName) {
-    if (state === status.state && inserted === status.lit) {
+function showActivity(controls, status, state, lit, title) {
+    if (state === status.state && lit === status.lit) {
         return;
     }
     status.state = state;
-    status.lit = inserted;
-    let title = driveName + " idle";
-    switch (state) {
-    case "motor":
-        title = driveName + " motor running";
-        break;
-    case "read":
-        title = driveName + " reading";
-        break;
-    case "write":
-        title = driveName + " writing";
-        break;
-    default:
-        break;
-    }
+    status.lit = lit;
     for (const led of [controls.led, controls.statusLed]) {
         led.classList.remove("on", "motor", "read", "write");
-        if (inserted) {
+        if (lit) {
             led.classList.add("on");
         }
         if (state !== "idle") {
             led.classList.add(state);
         }
         led.title = title;
+    }
+}
+
+/**
+ * @param {string} driveName
+ * @param {string} state
+ * @returns {string}
+ */
+function driveActivityTitle(driveName, state) {
+    switch (state) {
+    case "motor":
+        return driveName + " motor running";
+    case "read":
+        return driveName + " reading";
+    case "write":
+        return driveName + " writing";
+    default:
+        return driveName + " idle";
+    }
+}
+
+/**
+ * @param {string} portName
+ * @param {string} state
+ * @param {boolean} linked
+ * @returns {string}
+ */
+function serialActivityTitle(portName, state, linked) {
+    switch (state) {
+    case "read":
+        return portName + " receiving";
+    case "write":
+        return portName + " sending";
+    default:
+        if (linked) {
+            return portName + " connected";
+        }
+        return portName + " not connected";
     }
 }
 
@@ -2252,4 +2457,72 @@ function stepMachine(visible) {
         sound.push(sfx, chunk);
     }
     chunk.n = 0;
+    serviceSerial();
+}
+
+/**
+ * Pass what each QL serial line sent to its host port, or drop it when none
+ * is connected, and keep the port's rate and handshake lines with the QL's.
+ * This runs with every field, hidden Turbo and audio-driven ones included.
+ */
+function serviceSerial() {
+    for (let line = 0; line < serialStatus.length; line += 1) {
+        const bytes = machine.takeSerialBytes(ql, line);
+        const link = serialStatus[line].link;
+        if (link === null) {
+            continue;
+        }
+        serial.write(link, bytes);
+        const info = machine.serialInfo(ql, line);
+        serial.setRate(link, info.baud);
+        serial.setReady(link, info.ready);
+        serial.pollSignals(link, function (clearToSend) {
+            if (serialStatus[line].link === link) {
+                machine.setSerialRemoteReady(ql, line, clearToSend);
+            }
+        });
+    }
+}
+
+/**
+ * The value of the radio option a URL parameter names, or `fallback`.
+ *
+ * @param {RadioOption[]} options
+ * @param {string} text
+ * @param {number} fallback
+ * @returns {number}
+ */
+function optionFromParam(options, text, fallback) {
+    for (const option of options) {
+        if (String(option.value) === text) {
+            return option.value;
+        }
+    }
+    return fallback;
+}
+
+/**
+ * The value of the checked radio option, or `fallback`.
+ *
+ * @param {RadioOption[]} options
+ * @param {number} fallback
+ * @returns {number}
+ */
+function checkedOption(options, fallback) {
+    for (const option of options) {
+        if (option.input.checked) {
+            return option.value;
+        }
+    }
+    return fallback;
+}
+
+/**
+ * @param {RadioOption[]} options
+ * @param {number} value
+ */
+function checkOption(options, value) {
+    for (const option of options) {
+        option.input.checked = option.value === value;
+    }
 }

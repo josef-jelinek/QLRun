@@ -9,7 +9,8 @@
 /**
  * Fetch a bounded HTTP resource and return a callback-driven abort operation,
  * or null when the request could not start and `onDone` has already run.
- * Aborting reports "Canceled." through `onDone`.
+ * Aborting reports "Canceled." through `onDone`. An array buffer must hold 1
+ * to `maxBytes` bytes.
  *
  * @param {string} url
  * @param {XMLHttpRequestResponseType} responseType
@@ -21,8 +22,6 @@ export function httpGet(url, responseType, maxBytes, onDone) {
     const errLead = "Could not load \"" + url + "\"";
     /** @type {XMLHttpRequest | null} */
     let xhr = new XMLHttpRequest();
-    xhr.open("GET", url);
-    xhr.responseType = responseType;
 
     xhr.onprogress = function (e) {
         const tooLarge = (Number.isFinite(e.total) && e.total > maxBytes) || (Number.isFinite(e.loaded) && e.loaded > maxBytes);
@@ -46,6 +45,10 @@ export function httpGet(url, responseType, maxBytes, onDone) {
             onDone(errLead + " (HTTP " + status + ").", null);
             return;
         }
+        if (responseType === "arraybuffer") {
+            checkBytes(errLead, response, maxBytes, onDone);
+            return;
+        }
         onDone(null, response);
     };
 
@@ -66,14 +69,13 @@ export function httpGet(url, responseType, maxBytes, onDone) {
     };
 
     try {
+        // A malformed URL throws from open().
+        xhr.open("GET", url);
+        xhr.responseType = responseType;
         xhr.send();
     } catch (ex) {
         xhr = null;
-        if (ex instanceof Error) {
-            onDone(errLead + ": " + ex.message, null);
-        } else {
-            onDone(errLead + ".", null);
-        }
+        onDone(errorText(errLead, ex), null);
         return null; // synchronous onDone, no abort
     }
 
@@ -85,29 +87,32 @@ export function httpGet(url, responseType, maxBytes, onDone) {
 }
 
 /**
- * Read a local browser file as an array buffer.
+ * Read a local browser file as an array buffer of 1 to `maxBytes` bytes, or
+ * of any nonzero size when `maxBytes` is 0. A file of the wrong size is not
+ * read at all.
  *
  * @param {File} file
+ * @param {number} maxBytes
  * @param {OnDone} onDone
  */
-export function readFile(file, onDone) {
+export function readFile(file, maxBytes, onDone) {
     const errLead = "Could not load \"" + file.name + "\"";
+    let limit = maxBytes;
+    if (limit <= 0) {
+        limit = Infinity;
+    }
+    if (file.size === 0 || file.size > limit) {
+        onDone(errLead + ": " + sizeError(limit, file.size), null);
+        return;
+    }
     const reader = new FileReader();
 
     reader.onload = function () {
-        if (!(reader.result instanceof ArrayBuffer)) {
-            onDone(errLead + ": Empty read.", null);
-            return;
-        }
-        onDone(null, reader.result);
+        checkBytes(errLead, reader.result, limit, onDone);
     };
 
     reader.onerror = function () {
-        if (reader.error !== null && reader.error.message !== "") {
-            onDone(errLead + ": " + reader.error.message, null);
-        } else {
-            onDone(errLead + ".", null);
-        }
+        onDone(errorText(errLead, reader.error), null);
     };
 
     reader.onabort = function () {
@@ -117,10 +122,54 @@ export function readFile(file, onDone) {
     try {
         reader.readAsArrayBuffer(file);
     } catch (ex) {
-        if (ex instanceof Error) {
-            onDone(errLead + ": " + ex.message, null);
-        } else {
-            onDone(errLead + ".", null);
-        }
+        onDone(errorText(errLead, ex), null);
     }
+}
+
+/**
+ * Pass on an array buffer of 1 to `maxBytes` bytes, or report what came.
+ *
+ * @param {string} errLead
+ * @param {*} result
+ * @param {number} maxBytes
+ * @param {OnDone} onDone
+ */
+function checkBytes(errLead, result, maxBytes, onDone) {
+    if (!(result instanceof ArrayBuffer)) {
+        onDone(errLead + ": Empty read.", null);
+        return;
+    }
+    if (result.byteLength === 0 || result.byteLength > maxBytes) {
+        onDone(errLead + ": " + sizeError(maxBytes, result.byteLength), null);
+        return;
+    }
+    onDone(null, result);
+}
+
+/**
+ * @param {number} maxBytes
+ * @param {number} size
+ * @returns {string}
+ */
+function sizeError(maxBytes, size) {
+    if (maxBytes === Infinity) {
+        return "Empty read.";
+    }
+    return "Expected 1 to " + maxBytes + ", got " + size + " bytes.";
+}
+
+/**
+ * An error message from its lead and whatever was thrown or reported, which
+ * may be an Error, a DOMException, or anything else; one full stop ends it.
+ *
+ * @param {string} lead
+ * @param {*} ex
+ * @returns {string}
+ */
+function errorText(lead, ex) {
+    let err = lead;
+    if (typeof ex?.message === "string" && ex.message !== "") {
+        err += ": " + ex.message.replace(/\.$/, "");
+    }
+    return err + ".";
 }

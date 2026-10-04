@@ -2,13 +2,14 @@
 
 Try it live: <https://josef-jelinek.github.io/QLRun/>
 
-QLRun is a browser emulator for the Sinclair QL. It loads a JS or JSU system
-ROM, or the bundled Minerva ROM, from `roms/` when those files are available,
-paints the ZX8301 display, talks to the ZX8302 IPC for keyboard, beeper, and
-Microdrive, and emulates the original AY-3-8910 QSound card and the
-YM2203-compatible QSound2. It also mounts writable QLWA `.win` hard disk images
-as `WIN1_` and writable QL5A/QL5B `.img` floppy images as `FLP1_`, and can
-connect the host mouse as the PS/2 mouse of a QIMSI ROM-port interface.
+QLRun is a browser emulator for the Sinclair QL. It loads the bundled JS or
+JSU system ROM, or the bundled Minerva ROM, from `roms/`, paints the ZX8301
+display, talks to the ZX8302 IPC for keyboard, beeper, and Microdrive, and
+emulates the original AY-3-8910 QSound card and the YM2203-compatible QSound2.
+It also mounts writable QLWA `.win` hard disk images as `WIN1_` and writable
+QL5A/QL5B `.img` floppy images as `FLP1_`, connects the host mouse as the PS/2
+mouse of a QIMSI ROM-port interface or as the Pointer Environment pointer, and
+connects SER1 and SER2 to host serial ports through Web Serial.
 
 No build, package manager, or external library is required. The page uses
 plain JavaScript. `tsconfig.json` is only for optional static checking during
@@ -38,7 +39,7 @@ Then visit `http://127.0.0.1:8000/` (or the port you chose).
 The machine initializes 128 KiB of RAM by default and starts without a ROM, then
 tries `roms/<name>.rom` (up to 48 KiB). The default `<name>` is `js`, or `jsu`
 when `?ntsc=1` selects US timing; an explicit `?rom=` overrides that choice, for
-example `?rom=minerva` for the bundled Minerva 1.98. If a ROM fetch fails, the
+example `?rom=minerva` for the bundled Minerva 1.98a1. If a ROM fetch fails, the
 system ROM's **Load** on the ROMs tab still accepts a raw `.rom` or `.bin` file.
 Three optional 16 KiB extension-ROM slots are available: the cartridge window at
 `0x0C000`, I/O ROM 1 at `0x10000`, and I/O ROM 2 at `0x14000`. `?cart=<name>`
@@ -116,7 +117,8 @@ parameter. Below 900 px the settings stack under the screen.
   Fullscreen controls that mirror those settings; CRT filter and Stretch light
   green when on.
 - The status bar shows messages on the left, then each drive's activity light,
-  the frame rate, and the last second's audio cut and gap in ms.
+  SER1 and SER2 activity lights where the browser has Web Serial, the frame
+  rate, and the last second's audio cut and gap in ms.
 
 Files dropped anywhere on the page go where their names say: `.mdv` into MDV1,
 or MDV2 while MDV1 holds a cartridge; the first `.mdv` in a `.zip` likewise;
@@ -180,7 +182,7 @@ The address map at the top marks the extension slots that hold an image.
 - System ROM - Load replaces the 48 KiB system ROM and resets. The `auto` badge
   shows the automatic `js.rom` or `jsu.rom` that follows the video standard;
   after a local or `?rom=` ROM, Auto returns to it. Minerva switches to the
-  bundled Minerva 1.98 ROM, `minerva.rom`, which stays selected when the video
+  bundled Minerva 1.98a1 ROM, `minerva.rom`, which stays selected when the video
   standard changes. Its dual-screen start (F3 or F4) moves the system
   variables above the second screen; `WIN1_`, `FLP1_`, and the PE pointer
   follow them.
@@ -251,6 +253,28 @@ Choices marked `*` reset the machine when changed.
   is off by default, so only the QL pointer is visible over the screen; the
   host cursor still shows elsewhere on the page. QIMSI hides the host cursor
   through its pointer capture instead.
+- Serial ports - SER1 and SER2 each have a card whose Connect button attaches a
+  host serial port through the Web Serial API, available in Chromium-based
+  browsers such as Chrome, Edge, and Opera, on pages served over `https://` or
+  from `localhost`. Elsewhere the cards stay disabled under a note saying why.
+  A port can serve one QL port at a time and is chosen again after the page
+  reloads; Disconnect, or unplugging it, frees the QL port.
+  - Output goes through the ZX8302 transmitter at the QL's rate, eleven bits a
+    byte with two stop bits, and input through the IPC, which takes a byte per
+    ten bit times into its 23-byte buffer for QDOS to read. The host port runs
+    with 8 data bits, 2 stop bits, and no parity, as QDOS adds any parity
+    itself, and is reopened whenever `BAUD` changes the rate; Minerva's split
+    per-port rates are timed, but the host port follows `BAUD`. The card's
+    badge shows the rate.
+  - The device's CTS line drives the QL's handshake input, DTR on SER1 and CTS
+    on SER2, so a device without it holds QL output back; `OPEN` the port as
+    `ser1i` or `ser2i` to ignore the handshake. The QL raises the host's RTS
+    and DTR while its port is open and its input is keeping up, and drops them
+    while more than 256 received bytes wait, which the browser and emulator
+    then hold. Bytes that arrive while the QL port is closed are dropped.
+  - With nothing connected, output is discarded and the handshake reads as
+    ready. The JS ROM sends a NUL on SER1 as it starts. Reset closes
+    the QL ports and drops their bytes; a connected host port stays connected.
 
 #### Display
 
@@ -268,7 +292,8 @@ Choices marked `*` reset the machine when changed.
   under the screen window without a title bar: ESC and F1 to F5 above the
   digits, and SHIFT, TAB, CAPS, ENTER, and the bottom row under the letters.
 - Fullscreen - show only the emulator screen (also F11). If the browser refuses
-  fullscreen, the page shows only the screen until F11 is pressed again.
+  fullscreen or has none, as on an iPhone, the page shows only the screen and
+  its title bar until F11 or the bar's `[ ]` is pressed again.
 
 F1 to F5 reach the emulated machine; F1 and F2 select monitor or TV mode on the
 JS and Minerva start screens, and Minerva's F3 and F4 their dual-screen
@@ -281,7 +306,10 @@ punctuation match the keycaps, and Backquote is the £ key. Shift, Ctrl, and
 Alt are the QL modifiers. Backspace is Ctrl+Left and Delete is Ctrl+Right;
 Home and End are Left and Right, and Page Up and Page Down are Up and Down.
 The keypad types its digits, `.`, `/`, `-`, `+`, and `*`, and its Enter is
-ENTER.
+ENTER. As on a QL, the IPC queues up to seven keys and ignores more, and it
+reports when the last key is still held, which QDOS repeats after its
+`SV_ARDEL` delay (0.6 s) at its `SV_ARFRQ` rate; the browser's own key repeat
+is not used.
 
 ## Sound
 
@@ -353,7 +381,7 @@ on the QL.
 - `boot.js` - shader and default ROM fetch.
 - `load.js` - MDV or ZIP fetch for `index.html?url=`, and ZIP member extraction for drops.
 - `io.js` - HTTP GET and local file reads.
-- `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, QSound/QSound2, QIMSI window, and frame run.
+- `machine.js` - CPU ownership, memory map, ZX8301/ZX8302, Microdrive, serial ports, QSound/QSound2, QIMSI window, and frame run.
 - `cpu.js` - MC68008 state and execution core.
 - `disk.js` - writable QLWA hard disk and QL5A/QL5B floppy images with their QDOS `WIN1_` and `FLP1_` host drivers.
 - `ay.js` - AY-3-8910/YM2149 PSG synthesis used by the sound cards.
@@ -363,14 +391,18 @@ on the QL.
 - `keyboard.js` - host keyboard mapping and the overlay.
 - `zip.js` - ZIP listing and entry extraction.
 - `media.js` - Microdrive, floppy, hard disk, ROM, ZIP, and junk file-name rules.
+- `serial.js` - Web Serial host ports, with callbacks around their Promises.
 - `sound.js` - Web Audio host and worklet loader.
 - `sound.worklet.js` - mixes beeper and sound-card planes on the audio thread.
 - `audioworklet.d.ts` - check-only declarations for the AudioWorklet globals.
+- `webserial.d.ts` - check-only declarations for the Web Serial API.
 - `screen.js` - WebGL2 display renderer.
 - `screen.vert.glsl` / `screen.frag.glsl` - display shaders.
 - `server.go` - optional local static file server (`go run server.go`).
 - `tsconfig.json` - check-only TypeScript config (`noEmit`).
 - `roms/` - default machine ROM files.
+- `roms/js.rom` / `roms/jsu.rom` - Sinclair JS and US JSU system ROMs, the
+  automatic choice for the PAL and NTSC machines.
 - `roms/minerva.rom` - bundled Minerva 1.98a1 system ROM.
 - `roms/Minerva_NOTICE.txt` / `roms/Minerva_GPL-2.0.txt` - Minerva ROM
   provenance, notice, and license.
@@ -383,7 +415,12 @@ on the QL.
 - `examples/castle.mdv` / `examples/xenon.mdv` - example Microdrive images that
   play music converted from VGM rips.
 
-ROM images in `roms/` are not owned by this project. `Qsound_V1.94.rom` is the
+ROM images in `roms/` are not owned by this project. `js.rom` and `jsu.rom` are
+the 48 KiB JS and JSU images (SHA-256
+`fc6a683e44570d7e4a144580729e25ff4b3bd293a9eff5313cfdae11520d5efc` and
+`e0077f96c1883a13772cc0a3e3222c854203e7ed76aa618879c0bed32ebc7b8d`) from
+<https://sinclairql.net/djw/qlrom/index.html>; Paul Holmgren granted the use
+of the JSU ROM in QLRun. `Qsound_V1.94.rom` is the
 8 KiB image identified in `Qsound_NOTICE.txt` (SHA-256
 `d6caabb6c96e32a4c5c6dfd443b7c2b30835755b9519b04b61ee52e5f17b8082`) and
 is distributed with its upstream CERN-OHL-S-2.0 notice and license.

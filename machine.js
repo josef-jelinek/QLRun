@@ -15,6 +15,11 @@ export const mouseOff = 0;
 export const mouseQimsi = 1;
 export const mousePe = 2;
 export const defaultRamKb = 128;
+export const palClockHz = 7500000;
+export const ntscClockHz = 7552445;
+/** CPU clocks in a ZX8301 PAL field, and in a US-ROM NTSC one. */
+export const palClocksPerFrame = 149760;
+export const ntscClocksPerFrame = 125760;
 
 const romSlotCount = 3;
 const frameW = 512;
@@ -30,6 +35,7 @@ const secondScreenBase = screenBase + screenBytes;
 const qdosUnixEpochDelta = 283996800;
 
 const qdosClockBaseAddr = cpu.internalIoBase;
+const transmitControlAddr = qdosClockBaseAddr + 2;
 const ipcWriteAddr = qdosClockBaseAddr + 3;
 const ipcReadAddr = qdosClockBaseAddr + 0x20;
 const interruptStatusAddr = ipcReadAddr + 1;
@@ -43,6 +49,10 @@ const displayControlScreenBit = 0x80;
 const interruptClearMask = 0x1F;
 const interruptEnableMask = 0xE0;
 const interruptGapEnableBit = 0x20;
+const interruptTransmitEnableBit = 0x80;
+const interruptTransmitBit = 0x04;
+const interruptFrameBit = 0x08;
+const interruptBaudClockBit = 0x80;
 const ipcReadMarker = 0xA50000;
 const ipcReadSetMarker = 0xA58000;
 const ipcReadDoneMarker = 0xA5;
@@ -55,13 +65,22 @@ const ipcWireReadKeysCommand = 0x08;
 const ipcWireKeyboardRowCommand = 0x09;
 const ipcWireSoundCommand = 0x0A;
 const ipcWireKillSoundCommand = 0x0B;
-const ipcWireNoResponseCommand = 0x0D;
+const ipcWireOpenSer1Command = 0x02;
+const ipcWireOpenSer2Command = 0x03;
+const ipcWireCloseSer1Command = 0x04;
+const ipcWireCloseSer2Command = 0x05;
+const ipcWireReadSer1Command = 0x06;
+const ipcWireReadSer2Command = 0x07;
+const ipcWireBaudCommand = 0x0D;
 const ipcWireSoundNibbleCount = 16;
 const ipcWireKeyboardRowResponseBits = 8;
 const ipcWireStatusResponseBits = 8;
 const ipcWireDefaultResponseBits = 4;
 const ipcWireReadKeysCountBits = 4;
+const ipcKeyHeldBit = 0x08;
+const ipcWireReadSerialCountBits = 8;
 const maxIpcQueuedKeys = 7;
+const ipcResponseBytes = 24;
 const audioCap = 8192;
 const qlaySectorSize = 686;
 const microdriveUnitCount = 2;
@@ -102,6 +121,30 @@ const qlayBadFileId = 0xFF;
 const qlayFreeFileId = 0xFD;
 const qlayMapFileId = 0xF8;
 const qlayMapEntries = 255;
+const transmitMicrodriveModeBit = 0x10;
+const transmitSer2Bit = 0x08;
+const transmitBaudMask = 0x07;
+const transmitControlReset = transmitMicrodriveModeBit;
+/** ZX8302 and IPC baud codes 0-7 in bits per second. */
+const serialBaudRates = Uint16Array.of(19200, 9600, 4800, 2400, 1200, 600, 300, 75);
+const serialDefaultBaudCode = 1;
+const serialLineCount = 2;
+/** `$18020` bits that hold off transmission: DTR on SER1 and CTS on SER2. */
+const serialHandshakeBits = Uint8Array.of(0x10, 0x20);
+/** IPC status bits for received bytes waiting on SER1 and SER2. */
+const ipcSerialDataBits = Uint8Array.of(0x10, 0x20);
+/** Start, 8 data, and 2 stop bits from the ZX8302. */
+const serialTransmitFrameBits = 11;
+/** Start, 8 data, and 1 stop bit into the IPC. */
+const serialReceiveFrameBits = 10;
+const ipcSerialBufferBytes = 23;
+/** The IPC stops listening on a port once its buffer holds this many bytes. */
+const ipcSerialArmLimit = 20;
+const serialOutputBytes = 4096;
+const serialInputBytes = 65536;
+/** Host bytes waiting for the IPC above which the QL holds the remote off. */
+const serialReadyLimit = 256;
+const noSerialBytes = new Uint8Array(0);
 const soundIpcTickHz = 22917;
 const soundPitchFractionScale = 10;
 const soundPitchBaseUnits = 106;
@@ -121,7 +164,6 @@ const qsoundAddressSelect = 0x05;
 const qsoundDataWrite = 0x04;
 const qsoundSelectMask = 0x05;
 const qsoundAyTickCycles = 80;
-const qsound2SsgTickHz = 125000;
 const qsoundRegisterMasks = Uint8Array.of(
     0xFF, 0x0F, 0xFF, 0x0F, 0xFF, 0x0F, 0x1F, 0xFF,
     0x1F, 0x1F, 0x1F, 0xFF, 0xFF, 0x0F, 0xFF, 0xFF,
@@ -164,9 +206,11 @@ for (let ink = 0; ink < 16; ink += 1) {
  * FORMAT of it ends. `formatting` is set while a FORMAT writes or verifies it,
  * matching `mdv.formattingUnit`, and `formatVerifying` and `formatVerified`
  * follow that format's verify pass and catalog. The counts grow with each
- * track byte, so a rise shows activity.
+ * track byte, so a rise shows activity. `generation` counts the cartridges
+ * that have been in the drive.
  *
  * @typedef {{
+ *   generation: number,
  *   image: Uint8Array,
  *   byteOffset: number,
  *   inserted: boolean,
@@ -182,13 +226,44 @@ for (let ink = 0; ink < 16; ink += 1) {
  */
 
 /**
+ * One RS-232 line. `out` holds the bytes the ZX8302 sent since the host last
+ * took them. `input` is a ring of host bytes from `inputHead` that the IPC has
+ * not yet taken into `ipc`, its own buffer for the 68008. `open` follows the
+ * IPC open and close commands, and `remoteReady` the host's handshake into
+ * DTR on SER1 or CTS on SER2. `nextRxAt` is the earliest cycle the IPC can
+ * take its next byte. The counts grow with each byte, so a rise shows activity.
+ *
+ * @typedef {{
+ *   out: Uint8Array,
+ *   outN: number,
+ *   input: Uint8Array,
+ *   inputHead: number,
+ *   inputN: number,
+ *   ipc: Uint8Array,
+ *   ipcN: number,
+ *   open: boolean,
+ *   remoteReady: boolean,
+ *   nextRxAt: number,
+ *   txCount: number,
+ *   rxCount: number,
+ * }} SerialLine
+ */
+
+/**
  * `interruptMask` holds the ZX8302 interrupt enables, bits 7..5 of the last
  * write to its interrupt register. In `mdv`, `formattingUnit` is the drive a
  * FORMAT is laying out, or -1, and `formatWriteOffset` where its next record
  * goes. `burstStart` and `burstBytes` describe the write burst in progress,
  * and `silentPairs` counts the byte pairs the head has spent on erased tape.
  * `latchedAt` is when the CPU read the first track of the pair in
- * `latchedTracks`.
+ * `latchedTracks`. In `serial`, `control` is the last ZX8302 transmit control
+ * write, and `txHold` the byte waiting to move into the transmit shifter, or
+ * -1, latched with its line and baud code; it moves at `txFreeAt`, and the
+ * frame ahead of it ends at `txShiftEnd`. `baudCode` is the IPC's receive rate.
+ * `frameVersion` advances whenever `pixels` changes, and `blankFrameVersion`
+ * is the version of the blank screen shown without a ROM. `ipcLastKey` is the
+ * code of the last key the IPC handed out, or -1; the IPC reports it held
+ * while it stays down, and QDOS repeats it.
  *
  * @typedef {{
  *   mem: Uint8Array,
@@ -196,6 +271,7 @@ for (let ink = 0; ink < 16; ink += 1) {
  *   cpuBus: import("./cpu.js").CpuBus,
  *   pixels: Uint8Array,
  *   frameVersion: number,
+ *   blankFrameVersion: number,
  *   frameNtsc: boolean,
  *   video: {
  *     pixels: Uint8Array,
@@ -237,6 +313,8 @@ for (let ink = 0; ink < 16; ink += 1) {
  *   ipcSoundNibblePos: number,
  *   ipcSoundDecoded: Uint8Array,
  *   ipcKeyboardRowPending: boolean,
+ *   ipcBaudPending: boolean,
+ *   ipcLastKey: number,
  *   ipcResponse: Uint8Array,
  *   ipcResponseBits: number,
  *   ipcResponseSent: number,
@@ -301,6 +379,16 @@ for (let ink = 0; ink < 16; ink += 1) {
  *     cycleAnchor: number,
  *     pairCycles: number,
  *   },
+ *   serial: {
+ *     control: number,
+ *     txHold: number,
+ *     txHoldLine: number,
+ *     txHoldCode: number,
+ *     txFreeAt: number,
+ *     txShiftEnd: number,
+ *     baudCode: number,
+ *     lines: SerialLine[],
+ *   },
  * }} Machine
  */
 
@@ -318,6 +406,24 @@ export function create(keys) {
     for (let i = 0; i < microdriveUnitCount; i += 1) {
         cartridges.push(emptyCartridge());
     }
+    /** @type {SerialLine[]} */
+    const serialLines = [];
+    for (let i = 0; i < serialLineCount; i += 1) {
+        serialLines.push({
+            out: new Uint8Array(serialOutputBytes),
+            outN: 0,
+            input: new Uint8Array(serialInputBytes),
+            inputHead: 0,
+            inputN: 0,
+            ipc: new Uint8Array(ipcSerialBufferBytes),
+            ipcN: 0,
+            open: false,
+            remoteReady: true,
+            nextRxAt: 0,
+            txCount: 0,
+            rxCount: 0,
+        });
+    }
     /** @type {Machine} */
     const m = {
         mem,
@@ -329,9 +435,6 @@ export function create(keys) {
             qimsiEnd: 0,
             qsoundBase: 0,
             qsoundEnd: 0,
-            isEClocked: function (addr) {
-                return qsoundContains(m, addr);
-            },
             beginHwAccess: function (addr, write, data) {
                 beginQsoundAccess(m, addr, write, data);
             },
@@ -373,9 +476,13 @@ export function create(keys) {
                 if (m.mdv.selectedMask !== 0) {
                     microdriveAdvanceActive(m);
                 }
+                if (m.cpu.cycleCount >= m.serial.txFreeAt) {
+                    serialAdvance(m);
+                }
             },
             resetHardware: function () {
                 resetIpc(m);
+                resetSerialTransmitter(m);
                 m.mdv.selectedMask = 0;
                 m.mdv.control = microdriveSelectClockBit | microdriveReadWriteBit;
                 microdriveCancelTransfer(m);
@@ -387,6 +494,7 @@ export function create(keys) {
         },
         pixels: new Uint8Array(frameW * frameH),
         frameVersion: 0,
+        blankFrameVersion: -1,
         frameNtsc: false,
         video: {
             pixels: new Uint8Array(frameW * frameH),
@@ -434,7 +542,9 @@ export function create(keys) {
         ipcSoundNibblePos: 0,
         ipcSoundDecoded: new Uint8Array(8),
         ipcKeyboardRowPending: false,
-        ipcResponse: new Uint8Array(16),
+        ipcBaudPending: false,
+        ipcLastKey: -1,
+        ipcResponse: new Uint8Array(ipcResponseBytes),
         ipcResponseBits: 0,
         ipcResponseSent: 0,
         beep: {
@@ -498,6 +608,16 @@ export function create(keys) {
             cycleAnchor: 0,
             pairCycles: 0,
         },
+        serial: {
+            control: transmitControlReset,
+            txHold: -1,
+            txHoldLine: 0,
+            txHoldCode: serialDefaultBaudCode,
+            txFreeAt: Infinity,
+            txShiftEnd: 0,
+            baudCode: serialDefaultBaudCode,
+            lines: serialLines,
+        },
         romLoaded: false,
     };
     setNtsc(m, false);
@@ -510,12 +630,23 @@ export function create(keys) {
  * Reset the hardware and CPU while preserving loaded ROM and cartridges.
  * Keys a program left unread, for example one polling KEYROW, are dropped
  * so they do not reach the next boot; a guest RESET instruction keeps them.
+ * The IPC's serial ports close and drop their bytes the same way, and the
+ * host's handshake lines stay as they are.
  *
  * @param {Machine} m
  */
 export function reset(m) {
     m.cpuBus.resetHardware();
     m.keys.queue.length = 0;
+    m.serial.baudCode = serialDefaultBaudCode;
+    for (const line of m.serial.lines) {
+        line.outN = 0;
+        line.inputHead = 0;
+        line.inputN = 0;
+        line.ipcN = 0;
+        line.open = false;
+        line.nextRxAt = 0;
+    }
     m.displayBlank = false;
     m.displayMode8 = false;
     m.displaySecondScreen = false;
@@ -722,9 +853,9 @@ export function clocksPerFrame(m) {
         return video.fieldEnd - video.fieldStart;
     }
     if (m.ntscMachine && m.displayNtsc) {
-        return cpu.zx8301NtscClocksPerFrame;
+        return ntscClocksPerFrame;
     }
-    return cpu.zx8301PalClocksPerFrame;
+    return palClocksPerFrame;
 }
 
 /**
@@ -735,8 +866,11 @@ export function clocksPerFrame(m) {
 export function runFrame(m) {
     if (!m.romLoaded) {
         resetVideo(m);
-        m.pixels.fill(0);
-        m.frameVersion += 1;
+        if (m.blankFrameVersion !== m.frameVersion) {
+            m.pixels.fill(0);
+            m.frameVersion += 1;
+            m.blankFrameVersion = m.frameVersion;
+        }
         return;
     }
     if (m.mouseModel === mousePe) {
@@ -759,7 +893,8 @@ export function runFrame(m) {
     cpu.executeCycleBudget(m.cpu, m.cpuBus, fieldEnd - m.cpu.cycleBudget);
     renderVideoTo(m, m.cpu.cycleCount);
     renderAudioTo(m, m.cpu.cycleCount);
-    m.theInt |= cpu.frameInterruptStatusBit;
+    serialAdvance(m);
+    m.theInt |= interruptFrameBit;
     cpu.frameInterrupt(m.cpu, m.cpuBus);
     renderVideoTo(m, m.cpu.cycleCount);
     video.fieldHead += 1;
@@ -840,8 +975,7 @@ export function insertMdv(m, drive, bytes, name) {
     cart.image = new Uint8Array(src);
     cart.inserted = true;
     cart.name = name;
-    m.mdv.cartridges[drive] = cart;
-    microdriveCancelTransfer(m);
+    microdriveChangeCartridge(m, drive, cart);
     return null;
 }
 
@@ -875,8 +1009,7 @@ export function ejectMdv(m, drive) {
     if (drive < 0 || drive >= microdriveUnitCount) {
         return;
     }
-    m.mdv.cartridges[drive] = emptyCartridge();
-    microdriveCancelTransfer(m);
+    microdriveChangeCartridge(m, drive, emptyCartridge());
 }
 
 /**
@@ -902,6 +1035,7 @@ export function takeMdvReading(m) {
  * @returns {{
  *   inserted: boolean,
  *   name: string,
+ *   generation: number,
  *   motorOn: boolean,
  *   writing: boolean,
  *   modified: boolean,
@@ -916,6 +1050,7 @@ export function mdvInfo(m, drive) {
     return {
         inserted: cart.inserted,
         name: cart.name,
+        generation: cart.generation,
         motorOn,
         writing,
         modified: cart.modified,
@@ -956,9 +1091,86 @@ export function mdvSpace(m, drive) {
     return {free, good};
 }
 
+/**
+ * Take a copy of the bytes the QL sent on a serial line since the last call.
+ * With none, the same empty array comes back each time.
+ *
+ * @param {Machine} m
+ * @param {number} line
+ * @returns {Uint8Array}
+ */
+export function takeSerialBytes(m, line) {
+    const l = m.serial.lines[line];
+    if (l.outN === 0) {
+        return noSerialBytes;
+    }
+    const bytes = l.out.slice(0, l.outN);
+    l.outN = 0;
+    return bytes;
+}
+
+/**
+ * Queue bytes from the host for the IPC to receive on a serial line. A port
+ * the QL has not opened drops them, as the IPC is not listening, and so does
+ * a full queue.
+ *
+ * @param {Machine} m
+ * @param {number} line
+ * @param {Uint8Array} bytes
+ */
+export function receiveSerialBytes(m, line, bytes) {
+    const l = m.serial.lines[line];
+    if (!l.open) {
+        return;
+    }
+    const count = Math.min(bytes.length, serialInputBytes - l.inputN);
+    for (let i = 0; i < count; i += 1) {
+        l.input[(l.inputHead + l.inputN) % serialInputBytes] = bytes[i];
+        l.inputN += 1;
+    }
+}
+
+/**
+ * Set whether the device on a serial line accepts data, which the QL reads on
+ * DTR for SER1 and CTS for SER2. A line with nothing attached stays ready.
+ *
+ * @param {Machine} m
+ * @param {number} line
+ * @param {boolean} ready
+ */
+export function setSerialRemoteReady(m, line, ready) {
+    m.serial.lines[line].remoteReady = ready;
+}
+
+/**
+ * Report a serial line's IPC rate and whether the QL can take more data, for
+ * the host port's speed and handshake.
+ *
+ * @param {Machine} m
+ * @param {number} line
+ * @returns {{
+ *   baud: number,
+ *   open: boolean,
+ *   ready: boolean,
+ *   txCount: number,
+ *   rxCount: number,
+ * }}
+ */
+export function serialInfo(m, line) {
+    const l = m.serial.lines[line];
+    return {
+        baud: serialBaudRates[m.serial.baudCode],
+        open: l.open,
+        ready: l.open && l.inputN < serialReadyLimit,
+        txCount: l.txCount,
+        rxCount: l.rxCount,
+    };
+}
+
 /** @returns {MicrodriveCartridge} */
 function emptyCartridge() {
     return {
+        generation: 0,
         image: new Uint8Array(0),
         byteOffset: 0,
         inserted: false,
@@ -973,7 +1185,12 @@ function emptyCartridge() {
     };
 }
 
-/** @param {Machine} m */
+/**
+ * Fill RAM with power-on noise, decoding the display up to now first so the
+ * noise shows only from this point of the field.
+ *
+ * @param {Machine} m
+ */
 function fillRam(m) {
     renderVideoTo(m, m.cpu.cycleCount);
     let seed = (Math.floor(Math.random() * 0xFFFFFFFF) ^ Date.now()) >>> 0;
@@ -996,6 +1213,8 @@ function resetIpc(m) {
     m.ipcSoundNibblesLeft = 0;
     m.ipcSoundNibblePos = 0;
     m.ipcKeyboardRowPending = false;
+    m.ipcBaudPending = false;
+    m.ipcLastKey = -1;
 }
 
 /**
@@ -1019,6 +1238,9 @@ function writeHwByte(m, addr, d) {
         m.displayMode8 = (d & displayControlMode8) !== 0;
         m.displaySecondScreen = (d & displayControlScreenBit) !== 0;
         break;
+    case transmitControlAddr:
+        m.serial.control = d;
+        break;
     case ipcReadAddr:
         microdriveControlWrite(m, d);
         break;
@@ -1029,12 +1251,18 @@ function writeHwByte(m, addr, d) {
         if (m.mdv.selectedMask !== 0) {
             microdriveAdvanceActive(m);
         }
+        serialAdvance(m);
         m.theInt = m.theInt & ~(d & interruptClearMask);
         m.interruptMask = d & interruptEnableMask;
         break;
     case microdriveTrack1Addr:
-    case microdriveTrack2Addr:
-        microdriveWriteTrackByte(m, addr, d);
+        // The transmit data register serves the serial ports unless the
+        // transmit control selects Microdrive or network mode.
+        if ((m.serial.control & transmitMicrodriveModeBit) === 0) {
+            serialTransmitByte(m, d);
+            break;
+        }
+        microdriveWriteTrackByte(m, d);
         break;
     }
 }
@@ -1043,7 +1271,7 @@ function writeHwByte(m, addr, d) {
  * One ZX8302 write to the IPC link. While a response is being sent, each
  * write clocks out its next bit for the following read. Otherwise the write
  * shifts in a command bit, and each complete nibble is a command, a keyboard
- * row argument, or the next sound parameter nibble.
+ * row or baud rate argument, or the next sound parameter nibble.
  *
  * @param {Machine} m
  * @param {number} d
@@ -1087,9 +1315,16 @@ function ipcWrite(m, d) {
         }
         return;
     }
+    if (m.ipcBaudPending) {
+        m.ipcBaudPending = false;
+        serialAdvance(m);
+        m.serial.baudCode = command & transmitBaudMask;
+        return;
+    }
+    // Commands come only after the last reply has gone out.
+    m.ipcResponse.fill(0);
     if (m.ipcKeyboardRowPending) {
         m.ipcKeyboardRowPending = false;
-        m.ipcResponse.fill(0);
         // The nibble names the row, and only rows 0-7 exist.
         if (command < 8) {
             m.ipcResponse[0] = m.keys.rows[command];
@@ -1099,20 +1334,28 @@ function ipcWrite(m, d) {
     }
     switch (command) {
     case ipcWireStatusCommand:
-        // Bit 0 reports waiting keys and bit 1 a playing beep.
+        // Bit 0 reports waiting keys or a key still held, bit 1 a playing
+        // beep, and bits 4 and 5 bytes received on SER1 and SER2.
         let status = 0;
-        if (m.keys.queue.length > 0) {
+        if (m.keys.queue.length > 0 || ipcKeyHeld(m)) {
             status |= 1;
         }
+        // A beep ends while its audio is rendered.
+        renderAudioTo(m, m.cpu.cycleCount);
         if (m.beep.active) {
             status |= 2;
         }
-        m.ipcResponse.fill(0);
+        serialAdvance(m);
+        for (let line = 0; line < serialLineCount; line += 1) {
+            if (m.serial.lines[line].ipcN > 0) {
+                status |= ipcSerialDataBits[line];
+            }
+        }
         m.ipcResponse[0] = status;
         ipcBeginResponse(m, ipcWireStatusResponseBits);
         break;
     case ipcWireReadKeysCommand:
-        ipcBeginResponse(m, ipcSerialReadKeys(m, m.ipcResponse));
+        ipcBeginResponse(m, ipcReadKeys(m));
         break;
     case ipcWireKeyboardRowCommand:
         m.ipcKeyboardRowPending = true;
@@ -1125,10 +1368,26 @@ function ipcWrite(m, d) {
         renderAudioTo(m, m.cpu.cycleCount);
         stopBeep(m);
         break;
-    case ipcWireNoResponseCommand:
+    case ipcWireOpenSer1Command:
+    case ipcWireOpenSer2Command:
+        serialAdvance(m);
+        m.serial.lines[command - ipcWireOpenSer1Command].open = true;
+        break;
+    case ipcWireCloseSer1Command:
+    case ipcWireCloseSer2Command:
+        const closed = m.serial.lines[command - ipcWireCloseSer1Command];
+        closed.open = false;
+        closed.inputN = 0;
+        closed.ipcN = 0;
+        break;
+    case ipcWireReadSer1Command:
+    case ipcWireReadSer2Command:
+        ipcBeginResponse(m, ipcReadSerial(m, command - ipcWireReadSer1Command));
+        break;
+    case ipcWireBaudCommand:
+        m.ipcBaudPending = true;
         break;
     default:
-        m.ipcResponse.fill(0);
         ipcBeginResponse(m, ipcWireDefaultResponseBits);
         break;
     }
@@ -1147,24 +1406,67 @@ function ipcBeginResponse(m, bits) {
 }
 
 /**
- * Answer the IPC read-keys command: a 4-bit count, then 4 modifier and 8 code
- * bits for each of up to seven queued keys, which leave the queue. Returns the
- * response length in bits.
+ * Answer the IPC read-keys command in the cleared `ipcResponse`: a 3-bit
+ * count with bit 3 set while the last key handed out is still held, then 4
+ * modifier and 8 code bits for each of up to seven queued keys, which leave
+ * the queue. Returns the response length in bits.
  *
  * @param {Machine} m
- * @param {Uint8Array} buffer
  * @returns {number}
  */
-function ipcSerialReadKeys(m, buffer) {
+function ipcReadKeys(m) {
     const count = Math.min(m.keys.queue.length, maxIpcQueuedKeys);
-    buffer.fill(0);
-    let bitPos = ipcAppendBits(buffer, 0, count, ipcWireReadKeysCountBits);
+    if (count > 0) {
+        m.ipcLastKey = m.keys.queue[count - 1].code;
+    }
+    let header = count;
+    if (ipcKeyHeld(m)) {
+        header |= ipcKeyHeldBit;
+    }
+    const buffer = m.ipcResponse;
+    let bitPos = ipcAppendBits(buffer, 0, header, ipcWireReadKeysCountBits);
     for (let i = 0; i < count; i += 1) {
         const key = m.keys.queue[i];
         bitPos = ipcAppendBits(buffer, bitPos, key.modifiers, 4);
         bitPos = ipcAppendBits(buffer, bitPos, key.code, 8);
     }
     m.keys.queue.splice(0, count);
+    return bitPos;
+}
+
+/**
+ * Whether the last key the IPC handed out is still down in the matrix.
+ *
+ * @param {Machine} m
+ * @returns {boolean}
+ */
+function ipcKeyHeld(m) {
+    const code = m.ipcLastKey;
+    if (code < 0) {
+        return false;
+    }
+    return (m.keys.rows[7 - Math.floor(code / 8)] & (1 << (code % 8))) !== 0;
+}
+
+/**
+ * Answer the IPC read command for a serial line in the cleared `ipcResponse`:
+ * a count byte, then every byte the IPC holds for that line, oldest first.
+ * Returns the response length in bits.
+ *
+ * @param {Machine} m
+ * @param {number} line
+ * @returns {number}
+ */
+function ipcReadSerial(m, line) {
+    serialAdvance(m);
+    const l = m.serial.lines[line];
+    const buffer = m.ipcResponse;
+    let bitPos = ipcAppendBits(buffer, 0, l.ipcN, ipcWireReadSerialCountBits);
+    for (let i = 0; i < l.ipcN; i += 1) {
+        bitPos = ipcAppendBits(buffer, bitPos, l.ipc[i], 8);
+    }
+    l.rxCount += l.ipcN;
+    l.ipcN = 0;
     return bitPos;
 }
 
@@ -1220,12 +1522,20 @@ function readHwByte(m, addr) {
         if (microdriveReportsStatus(m)) {
             byte |= microdriveStatusBits(m);
         }
-        return byte;
+        return byte | serialStatusBits(m);
     case interruptStatusAddr:
         if (m.mdv.selectedMask !== 0) {
             microdriveAdvanceActive(m);
         }
-        return m.theInt & 0xFF;
+        serialAdvance(m);
+        // Bit 7 reads the transmit baud clock, a square wave at the bit rate,
+        // high for the second half of each bit.
+        let interrupts = m.theInt & 0xFF;
+        const bitCycles = serialBitCycles(m, m.serial.control & transmitBaudMask);
+        if (Math.floor(2 * m.cpu.cycleCount / bitCycles) % 2 === 1) {
+            interrupts |= interruptBaudClockBit;
+        }
+        return interrupts;
     case microdriveTrack1Addr:
     case microdriveTrack2Addr:
         return microdriveReadTrackByte(m, addr);
@@ -1353,14 +1663,19 @@ function compactFieldQueue(video) {
 function beginVideoField(m) {
     const video = m.video;
     video.ntsc = m.ntscMachine && m.displayNtsc;
-    let clocks = cpu.zx8301PalClocksPerFrame;
+    let clocks = palClocksPerFrame;
     if (video.ntsc) {
-        clocks = cpu.zx8301NtscClocksPerFrame;
+        clocks = ntscClocksPerFrame;
     }
     video.fieldEnd = video.fieldStart + clocks;
 }
 
-/** @param {Machine} m */
+/**
+ * Decode the whole screen into the shown pixels at once, as a reset shows it
+ * before the first field.
+ *
+ * @param {Machine} m
+ */
 function decodeScreen(m) {
     for (let y = 0; y < frameH; y += 1) {
         decodeScreenSpan(m, m.pixels, y * frameW, (y + 1) * frameW);
@@ -1510,7 +1825,12 @@ function stopBeep(m) {
     m.beep.cyclePoint = 0;
 }
 
-/** @param {Machine} m */
+/**
+ * Start the output sample windows and the PSG's level collection afresh at
+ * the current cycle, leaving the chips' state alone.
+ *
+ * @param {Machine} m
+ */
 function resetAudioClock(m) {
     const now = m.cpu.cycleCount;
     ay.seek(m.qsound.ay, now);
@@ -1535,13 +1855,14 @@ function resetQsound(m) {
     qsound.pia.fill(0);
     qsound.dataDirectionA = 0;
     qsound.dataDirectionB = 0;
-    // Original QSound follows a fixed E-clock divider; QSound2's PSG follows 125 kHz.
+    fm.reset(qsound.fm);
+    // Original QSound follows a fixed E-clock divider; QSound2's PSG follows
+    // the YM2203 prescaler.
     let tickCycles = qsoundAyTickCycles;
     if (qsound.model === qsound2) {
-        tickCycles = cpuClockHz(m) / qsound2SsgTickHz;
+        tickCycles = cpuClockHz(m) / fm.getSsgTickRate(qsound.fm);
     }
     ay.configure(qsound.ay, tickCycles, qsound.model === qsound2, m.cpu.cycleCount);
-    fm.reset(qsound.fm);
 }
 
 /**
@@ -1719,15 +2040,20 @@ function updateQsoundPins(m) {
 }
 
 /**
+ * Whether `addr` is in the sound card's window, which is empty with no card.
+ *
  * @param {Machine} m
  * @param {number} addr
  * @returns {boolean}
  */
 function qsoundContains(m, addr) {
-    return m.qsound.model !== qsoundOff && addr >= qsoundBase && addr < qsoundBase + qsoundBytes;
+    return addr >= m.cpuBus.qsoundBase && addr < m.cpuBus.qsoundEnd;
 }
 
 /**
+ * Whether `addr` is in the PIA's window, which spans the rest of the original
+ * card but only 4 KiB of QSound2.
+ *
  * @param {Machine} m
  * @param {number} addr
  * @returns {boolean}
@@ -1810,21 +2136,35 @@ function writeQsound2Direct(m, addr, value) {
  */
 function renderAudioTo(m, untilCycle) {
     const chunk = m.audio;
+    // Without a sound card the PSG cannot be written and stays silent;
+    // choosing a card restarts it.
+    const psg = m.qsound.model !== qsoundOff;
     while (m.sampleEndT <= untilCycle) {
         const period = m.sampleEndT - m.sampleT;
         const collect = m.soundOn && chunk.n < audioCap;
         if (collect) {
-            ay.runTo(m.qsound.ay, m.sampleEndT);
             chunk.beep[chunk.n] = renderBeepSample(m);
-            ay.takeSample(m.qsound.ay, period, chunk.a, chunk.b, chunk.c, chunk.n);
+            if (psg) {
+                ay.runTo(m.qsound.ay, m.sampleEndT);
+                ay.takeSample(m.qsound.ay, period, chunk.a, chunk.b, chunk.c, chunk.n);
+            } else {
+                chunk.a[chunk.n] = 0;
+                chunk.b[chunk.n] = 0;
+                chunk.c[chunk.n] = 0;
+            }
             chunk.fm[chunk.n] = renderFmSample(m);
             chunk.n += 1;
         } else {
-            ay.runSilent(m.qsound.ay, m.sampleEndT);
+            if (psg) {
+                ay.runSilent(m.qsound.ay, m.sampleEndT);
+            }
             renderBeepSample(m);
             renderFmSample(m);
         }
         nextSampleWindow(m);
+    }
+    if (!psg) {
+        return;
     }
     if (m.soundOn && chunk.n < audioCap) {
         ay.runTo(m.qsound.ay, untilCycle);
@@ -1834,26 +2174,18 @@ function renderAudioTo(m, untilCycle) {
     }
 }
 
-/** @param {Machine} m */
+/**
+ * Move to the next output sample's span of CPU cycles, carrying the rounding
+ * so the spans average exactly one sample period.
+ *
+ * @param {Machine} m
+ */
 function nextSampleWindow(m) {
     m.sampleT = m.sampleEndT;
     m.sampleAcc += cpuClockHz(m);
     const step = Math.floor(m.sampleAcc / m.sampleRate);
     m.sampleAcc -= step * m.sampleRate;
     m.sampleEndT += step;
-}
-
-/**
- * Return the CPU clock selected for this machine instance.
- *
- * @param {Machine} m
- * @returns {number}
- */
-export function cpuClockHz(m) {
-    if (m.ntscMachine) {
-        return cpu.qlNtscClockHz;
-    }
-    return cpu.qlPalClockHz;
 }
 
 /**
@@ -1986,6 +2318,9 @@ function updateBeepPitch(m, beep) {
 }
 
 /**
+ * Output samples in half a beeper wave at the current pitch, with its random
+ * and fuzz offsets.
+ *
  * @param {Machine} m
  * @param {Machine["beep"]} beep
  * @returns {number}
@@ -2045,6 +2380,22 @@ function microdriveReportsStatus(m) {
 }
 
 /**
+ * Put a cartridge, or an empty one for an eject, in a drive. A transfer in
+ * flight stops only when it runs on that drive.
+ *
+ * @param {Machine} m
+ * @param {number} drive
+ * @param {MicrodriveCartridge} cartridge
+ */
+function microdriveChangeCartridge(m, drive, cartridge) {
+    cartridge.generation = m.mdv.cartridges[drive].generation + 1;
+    m.mdv.cartridges[drive] = cartridge;
+    if ((m.mdv.selectedMask & (1 << drive)) !== 0 || m.mdv.formattingUnit === drive) {
+        microdriveCancelTransfer(m);
+    }
+}
+
+/**
  * Cancel the transfer in flight, a format included, and restart the tape
  * timing. The select chain is kept, so a cartridge change leaves its drive
  * selected. A cartridge whose format stops unfinished reads with the ordinary
@@ -2057,14 +2408,7 @@ function microdriveCancelTransfer(m) {
     m.mdv.latchedByteOffset = 0;
     m.mdv.latchedTracks = 0;
     m.mdv.transmitFullUntil = 0;
-    if (m.mdv.formattingUnit >= 0) {
-        const cartridge = m.mdv.cartridges[m.mdv.formattingUnit];
-        cartridge.formatting = false;
-        cartridge.formatVerifying = false;
-        cartridge.formatVerified = false;
-    }
-    m.mdv.formattingUnit = -1;
-    m.mdv.formatWriteOffset = 0;
+    microdriveEndFormat(m);
     m.mdv.burstBytes = 0;
     m.mdv.gapActive = false;
     m.mdv.silentPairs = 0;
@@ -2073,6 +2417,8 @@ function microdriveCancelTransfer(m) {
 }
 
 /**
+ * The Microdrive bits of the ZX8302 status, after moving the tape up to now.
+ *
  * @param {Machine} m
  * @returns {number}
  */
@@ -2117,20 +2463,22 @@ function microdriveControlWrite(m, data) {
         (oldControl & microdriveReadWriteBit) !== 0 &&
         (data & microdriveEraseBit) !== 0 &&
         (data & microdriveReadWriteBit) === 0;
+    // The selected drive holds the format in progress, which lays out its
+    // records until its verify pass is over.
+    const formatting = unit >= 0 && m.mdv.formattingUnit === unit;
+    const layingOut = formatting && !m.mdv.cartridges[unit].formatVerified;
     const verifyingFormat =
-        unit >= 0 &&
-        m.mdv.formattingUnit === unit &&
+        formatting &&
         (oldControl & microdriveEraseBit) !== 0 &&
         (data & (microdriveEraseBit | microdriveReadWriteBit)) === 0;
     const startingCatalog =
-        unit >= 0 &&
-        m.mdv.formattingUnit === unit &&
+        formatting &&
         m.mdv.cartridges[unit].formatVerifying &&
         (oldControl & (microdriveEraseBit | microdriveReadWriteBit)) === 0 &&
         (data & microdriveEraseBit) !== 0;
     if (unit >= 0 && enteringWrite) {
         const cartridge = m.mdv.cartridges[unit];
-        if (m.mdv.formattingUnit === unit && !cartridge.formatVerified) {
+        if (layingOut) {
             // A running format writes its records back to back.
             cartridge.byteOffset = m.mdv.formatWriteOffset;
         } else {
@@ -2147,12 +2495,7 @@ function microdriveControlWrite(m, data) {
         m.mdv.transmitFullUntil = 0;
         m.mdv.cycleAnchor = m.cpu.cycleCount;
     }
-    if (
-        unit >= 0 &&
-        leavingWrite &&
-        m.mdv.formattingUnit === unit &&
-        !m.mdv.cartridges[unit].formatVerified
-    ) {
+    if (leavingWrite && layingOut) {
         // A header record is followed at once by its block; a block by the gap,
         // and at the splice in the last slot the tape comes round to the start.
         if (m.mdv.burstBytes !== qlayBlockPreambleOffset) {
@@ -2193,11 +2536,7 @@ function microdriveControlWrite(m, data) {
                     microdriveFinalizeFormat(formatted);
                 }
                 formatted.unformatted = false;
-                formatted.formatting = false;
-                formatted.formatVerifying = false;
-                formatted.formatVerified = false;
-                m.mdv.formattingUnit = -1;
-                m.mdv.formatWriteOffset = 0;
+                microdriveEndFormat(m);
                 m.mdv.burstBytes = 0;
             }
             m.mdv.selectedMask = nextMask;
@@ -2243,14 +2582,12 @@ function microdriveFinalizeFormat(cartridge) {
  * half a byte pair.
  *
  * @param {Machine} m
- * @param {number} addr
  * @param {number} value
  */
-function microdriveWriteTrackByte(m, addr, value) {
+function microdriveWriteTrackByte(m, value) {
     microdriveAdvanceActive(m);
     const unit = microdriveActiveUnit(m);
     if (
-        addr !== microdriveTrack1Addr ||
         unit < 0 ||
         (m.mdv.control & microdriveReadWriteBit) === 0 ||
         m.cpu.cycleCount < m.mdv.transmitFullUntil
@@ -2299,12 +2636,7 @@ function microdriveWriteTrackByte(m, addr, value) {
  * @param {number} unit
  */
 function microdriveStartFormat(m, unit) {
-    if (m.mdv.formattingUnit >= 0 && m.mdv.formattingUnit !== unit) {
-        const other = m.mdv.cartridges[m.mdv.formattingUnit];
-        other.formatting = false;
-        other.formatVerifying = false;
-        other.formatVerified = false;
-    }
+    microdriveEndFormat(m);
     const cartridge = m.mdv.cartridges[unit];
     m.mdv.formattingUnit = unit;
     cartridge.formatting = true;
@@ -2317,6 +2649,23 @@ function microdriveStartFormat(m, unit) {
     }
     cartridge.byteOffset = m.mdv.burstBytes;
     m.mdv.formatWriteOffset = m.mdv.burstBytes;
+}
+
+/**
+ * Drop the format in progress, if any; its cartridge reads with the ordinary
+ * layout again.
+ *
+ * @param {Machine} m
+ */
+function microdriveEndFormat(m) {
+    if (m.mdv.formattingUnit >= 0) {
+        const cartridge = m.mdv.cartridges[m.mdv.formattingUnit];
+        cartridge.formatting = false;
+        cartridge.formatVerifying = false;
+        cartridge.formatVerified = false;
+    }
+    m.mdv.formattingUnit = -1;
+    m.mdv.formatWriteOffset = 0;
 }
 
 /**
@@ -2451,6 +2800,8 @@ function microdriveAdvanceActive(m) {
 }
 
 /**
+ * The first selected drive holding a cartridge, or -1.
+ *
  * @param {Machine} m
  * @returns {number}
  */
@@ -2572,6 +2923,119 @@ function microdriveMapSector(cartridge) {
 }
 
 /**
+ * Put the ZX8302 transmitter back in Microdrive mode with nothing to send.
+ * Deadlines go to their idle values, as the CPU cycle count may restart.
+ *
+ * @param {Machine} m
+ */
+function resetSerialTransmitter(m) {
+    m.serial.control = transmitControlReset;
+    m.serial.txHold = -1;
+    m.serial.txFreeAt = Infinity;
+    m.serial.txShiftEnd = 0;
+}
+
+/**
+ * Latch a byte written for the serial port and rate the transmit control
+ * selects. It waits in the holding register, with the transmit buffer full,
+ * until the shifter takes it: about a bit later on an idle line, or halfway
+ * through the last stop bit of the frame ahead. A second write before then
+ * replaces it.
+ *
+ * @param {Machine} m
+ * @param {number} d
+ */
+function serialTransmitByte(m, d) {
+    serialAdvance(m);
+    const s = m.serial;
+    s.txHoldLine = 0;
+    if ((s.control & transmitSer2Bit) !== 0) {
+        s.txHoldLine = 1;
+    }
+    s.txHoldCode = s.control & transmitBaudMask;
+    if (s.txHold < 0) {
+        const bitCycles = serialBitCycles(m, s.txHoldCode);
+        s.txFreeAt = Math.max(m.cpu.cycleCount + bitCycles, s.txShiftEnd - bitCycles / 2);
+    }
+    s.txHold = d;
+}
+
+/**
+ * The serial bits of the Microdrive/RS-232 status: the transmit buffer full,
+ * and DTR on SER1 or CTS on SER2 set while that device holds the QL off.
+ *
+ * @param {Machine} m
+ * @returns {number}
+ */
+function serialStatusBits(m) {
+    serialAdvance(m);
+    let bits = 0;
+    if (m.serial.txHold >= 0) {
+        bits |= microdriveStatusTransmitFullBit;
+    }
+    for (let line = 0; line < serialLineCount; line += 1) {
+        if (!m.serial.lines[line].remoteReady) {
+            bits |= serialHandshakeBits[line];
+        }
+    }
+    return bits;
+}
+
+/**
+ * Bring the serial ports up to the current cycle. A held byte whose time has
+ * come moves into the shifter and out to the host, raising the transmit
+ * interrupt when it is enabled. On each port the IPC listens to, it takes the
+ * next host byte one receive frame after the last.
+ *
+ * @param {Machine} m
+ */
+function serialAdvance(m) {
+    const s = m.serial;
+    const now = m.cpu.cycleCount;
+    if (now >= s.txFreeAt) {
+        const bitCycles = serialBitCycles(m, s.txHoldCode);
+        const sent = s.lines[s.txHoldLine];
+        if (sent.outN < serialOutputBytes) {
+            sent.out[sent.outN] = s.txHold;
+            sent.outN += 1;
+        }
+        sent.txCount += 1;
+        // The frame starts on the next rising edge of the baud clock.
+        s.txShiftEnd = s.txFreeAt + bitCycles / 2 + serialTransmitFrameBits * bitCycles;
+        s.txHold = -1;
+        s.txFreeAt = Infinity;
+        if ((m.interruptMask & interruptTransmitEnableBit) !== 0) {
+            m.theInt |= interruptTransmitBit;
+            cpu.requestInterrupt(m.cpu, cpu.qlInterruptLevel);
+        }
+    }
+    const frameCycles = serialReceiveFrameBits * serialBitCycles(m, s.baudCode);
+    for (const line of s.lines) {
+        while (line.open && line.inputN > 0 && line.ipcN < ipcSerialArmLimit && line.nextRxAt <= now) {
+            line.ipc[line.ipcN] = line.input[line.inputHead];
+            line.ipcN += 1;
+            line.inputHead = (line.inputHead + 1) % serialInputBytes;
+            line.inputN -= 1;
+            line.nextRxAt += frameCycles;
+        }
+        if (!line.open || line.inputN === 0 || line.ipcN >= ipcSerialArmLimit) {
+            line.nextRxAt = Math.max(line.nextRxAt, now + frameCycles);
+        }
+    }
+}
+
+/**
+ * CPU cycles per bit at a ZX8302 or IPC baud code.
+ *
+ * @param {Machine} m
+ * @param {number} code
+ * @returns {number}
+ */
+function serialBitCycles(m, code) {
+    return cpuClockHz(m) / serialBaudRates[code];
+}
+
+/**
  * @param {ArrayBuffer | Uint8Array} bytes
  * @returns {Uint8Array}
  */
@@ -2594,4 +3058,17 @@ function sizeError(src, maxBytes) {
         return "Expected 1 to " + maxBytes + ", got " + src.byteLength + " bytes.";
     }
     return null;
+}
+
+/**
+ * Return the CPU clock selected for this machine instance.
+ *
+ * @param {Machine} m
+ * @returns {number}
+ */
+export function cpuClockHz(m) {
+    if (m.ntscMachine) {
+        return ntscClockHz;
+    }
+    return palClockHz;
 }

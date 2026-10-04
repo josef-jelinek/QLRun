@@ -5,10 +5,6 @@ export const qdosUserRamBase = 0x20000;
 const qdosSysvarDefaultBase = 0x28000;
 /** The long at the start of the QDOS system variables. */
 export const qdosSysvarIdent = 0xD2540000;
-export const qlPalClockHz = 7500000;
-export const qlNtscClockHz = 7552445;
-export const zx8301PalClocksPerFrame = 149760;
-export const zx8301NtscClocksPerFrame = 125760;
 export const internalIoBase = 0x18000;
 const internalIoEnd = 0x1C000;
 const zx8301OnboardRamEnd = 0x40000;
@@ -38,16 +34,15 @@ const interruptLevelMask = 7;
 const nonmaskableInterruptLevel = 7;
 /** Every ZX8302 interrupt, frame and Microdrive gap alike, reaches the 68008 at this level. */
 export const qlInterruptLevel = 2;
-export const frameInterruptStatusBit = 8;
 const interruptExceptionClocks = 72;
 const exceptionFrameSize = 6;
 const exceptionFramePcOffset = 2;
 const busErrorFrameSize = 8;
 const busErrorFrameOpcodeOffset = 6;
 const autovectorBase = 24;
-const qdosByteSize = 1;
-const qdosWordSize = 2;
-const qdosLongSize = 4;
+const byteSize = 1;
+const wordSize = 2;
+const longSize = 4;
 const qdosTrap0Vector = 32;
 const qdosTrap4Vector = 36;
 const qdosTrap15Vector = 47;
@@ -65,22 +60,22 @@ const sizeFieldMask = 3;
 const invalidSizeField = 3;
 const opcodeBitCount = 16;
 const opcodeTableEntries = 65536;
-const opcodeDynamicCycles = -1;
-const opcodeHostCycleBias = 2;
+const opcodeHostCycleBias = 1;
 const opcodeClassSelectBit = 0x4000;
 const eaDestinationBit = 0x0100;
 const rewriteInvalidTarget = -1;
 const rewriteRegisterTargetBase = addrMask + 1;
-const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
+const maxLinearLongAddr = addrMask - (longSize - 1);
 
 /**
  * Machine-owned memory and hardware operations used by the CPU core.
  *
  * `guestRamTop` and the QSound window let ordinary ROM and RAM accesses stay
- * in this module. `qsoundEnd` is 0 when no card is selected. The QIMSI window
- * lies in the ROM port below `internalIoBase`, starts at an even address, and
- * has an even length; `qimsiEnd` is 0 when it is disconnected. Hardware-window
- * reads and writes still go through the callbacks.
+ * in this module. `qsoundEnd` is 0 when no card is selected, and the card's
+ * window is the one E-clocked by VPA. The QIMSI window lies in the ROM port
+ * below `internalIoBase`, starts at an even address, and has an even length;
+ * `qimsiEnd` is 0 when it is disconnected. Hardware-window reads and writes
+ * still go through the callbacks.
  *
  * @typedef {{
  *   mem: Uint8Array,
@@ -89,7 +84,6 @@ const maxLinearLongAddr = addrMask - (qdosLongSize - 1);
  *   qimsiEnd: number,
  *   qsoundBase: number,
  *   qsoundEnd: number,
- *   isEClocked: function(number): boolean,
  *   beginHwAccess: function(number, boolean, number): void,
  *   endHwAccess: function(): void,
  *   readHwByte: function(number): number,
@@ -203,7 +197,6 @@ const moveaWordBit = 0x1000;
 const negWithoutExtendBit = 0x0400;
 const bitDynamicSourceBit = 0x0100;
 const exgFormMask = 0x00F8;
-const exgDataDataForm = 0x0040;
 const exgAddressAddressForm = 0x0048;
 const exgDataAddressForm = 0x0088;
 
@@ -220,7 +213,7 @@ export function create() {
         usp: 0,
         ssp: 0,
         code: 0,
-        interruptMask: 7,
+        interruptMask: interruptLevelMask,
         trace: false,
         supervisor: true,
         xflag: false,
@@ -243,7 +236,7 @@ export function create() {
         peripheralWaitCycles: 0,
         instructionCycleOverride: -1,
         cycleBudget: 0,
-        rewriteTarget: -1,
+        rewriteTarget: rewriteInvalidTarget,
         badAddress: 0,
         badReadAccess: false,
         badCodeAddress: false,
@@ -314,34 +307,6 @@ function executeTimedLoop(c, bus) {
 }
 
 /**
- * Take a pending interrupt and set the instruction counters for the next
- * chunk; false while the CPU stays stopped.
- *
- * @param {Cpu} c
- * @param {CpuBus} bus
- * @returns {boolean}
- */
-function prepareExecuteChunk(c, bus) {
-    c.extraFlag = false;
-    processInterrupts(c, bus);
-    if (c.stopped) {
-        return false;
-    }
-    c.exception = 0;
-    c.extraFlag =
-        c.trace ||
-        c.doTrace ||
-        c.pendingInterrupt === nonmaskableInterruptLevel ||
-        c.pendingInterrupt > c.interruptMask;
-    c.nInst = 0x7FFFFFFF;
-    if (c.extraFlag) {
-        c.nInst2 = c.nInst;
-        c.nInst = 0;
-    }
-    return true;
-}
-
-/**
  * Raise the ZX8301 frame interrupt at the next CPU execution boundary.
  *
  * @param {Cpu} c
@@ -377,7 +342,7 @@ export function reset(c, bus) {
     }
     c.reg[stackRegisterIndex] = readPointerLong(bus.mem, 0) | 0;
     c.ssp = c.reg[stackRegisterIndex];
-    setPc(c, readPointerLong(bus.mem, qdosLongSize) | 0);
+    setPc(c, readPointerLong(bus.mem, longSize) | 0);
     c.code = 0;
     c.usp = 0;
     c.interruptMask = interruptLevelMask;
@@ -420,9 +385,6 @@ export function setOpcode(opcode, handler) {
     ensureOpcodeTable();
     opcodeTable[opcode] = handler;
     let hostCycles = mc68008StaticInstructionCycles(opcode);
-    if (hostCycles === opcodeDynamicCycles) {
-        hostCycles = 0;
-    }
     const opcodeClass = opcode & 0xF000;
     if (hostCycles <= 0 && (opcodeClass === 0xA000 || opcodeClass === 0xF000)) {
         hostCycles = 62;
@@ -560,9 +522,10 @@ function raiseIllegalInstruction(c, bus) {
 }
 
 /**
- * MC68008 clocks known from the opcode alone. `opcodeDynamicCycles` marks
- * instructions whose time depends on run-time state, like taken branches,
- * DBcc, register shift counts and MOVEM; 0 leaves an opcode untimed.
+ * MC68008 clocks known from the opcode alone. Bcc, DBcc, and Scc Dn get the
+ * time when they do not branch or set, which their handlers override when
+ * they do; register-count shifts, MOVEM, and MULU/MULS are timed by their
+ * handlers. 0 leaves an opcode untimed.
  *
  * @param {number} opcode
  * @returns {number}
@@ -594,9 +557,12 @@ function mc68008StaticInstructionCycles(opcode) {
             return 34;
         case branchConditionAlways:
             return 18;
-        default:
-            return opcodeDynamicCycles;
         }
+        // A taken Bcc overrides this with 18.
+        if ((opcode & 0xFF) === 0) {
+            return 20;
+        }
+        return 12;
     case 0x0000:
         if ((opcode & 0xF138) === 0x0108) {
             if ((opcode & movepLongBit) !== 0) {
@@ -614,6 +580,9 @@ function mc68008StaticInstructionCycles(opcode) {
         const dynamicBitOp = (opcode & 0x0100) !== 0 && (opcode & 0x0038) !== 0x0008;
         if (staticBitOp || dynamicBitOp) {
             const operation = (opcode >> 6) & bitOperationMask;
+            // BTST and BCLR swap their MC68008 times here, and BCHG Dn has
+            // BCLR's. The Microdrive's whole-pair reads need the ROM's BTST
+            // polls this slow.
             let baseCycles = 12;
             if (operation === bitOpClear) {
                 baseCycles = 8;
@@ -644,11 +613,13 @@ function mc68008StaticInstructionCycles(opcode) {
         return cpuCyclesForSize(standardSize, 20, 24, 40) + cpuEaReadCycles(eaMode, eaReg, standardSize);
     case 0x5000:
         if ((opcode & 0x00F8) === 0x00C8) {
-            return opcodeDynamicCycles;
+            // DBcc with a true condition; dbccOp overrides the other paths.
+            return 20;
         }
         if (sizeField === invalidSizeField) {
             if ((opcode & 0x0038) === 0) {
-                return opcodeDynamicCycles;
+                // Scc Dn false; sccOp overrides a true one with 10.
+                return 8;
             }
             return 12 + cpuEaWriteCycles(eaMode, eaReg, operandByte);
         }
@@ -663,10 +634,12 @@ function mc68008StaticInstructionCycles(opcode) {
     case 0x8000:
         if ((opcode & 0xF1F0) === 0x8100) {
             if ((opcode & 8) !== 0) {
-                return 20;
+                return 22;
             }
             return 10;
         }
+        // DIVU and DIVS take their documented maximum, unlike MULU and MULS,
+        // whose handlers count the operand bits.
         if (sizeField === invalidSizeField && (opcode & 0x0100) === 0) {
             return 144 + cpuEaReadCycles(eaMode, eaReg, operandWord);
         }
@@ -680,15 +653,6 @@ function mc68008StaticInstructionCycles(opcode) {
     case 0x9000:
     case 0xB000:
     case 0xD000:
-        if (opcodeClass === 0xB000 && (opcode & 0x0138) === 0x0108) {
-            return cpuCyclesForSize(standardSize, 16, 24, 40);
-        }
-        if (opcodeClass !== 0xB000 && (opcode & 0x0130) === 0x0100) {
-            if ((opcode & 8) !== 0) {
-                return cpuCyclesForSize(standardSize, 22, 50, 58);
-            }
-            return cpuCyclesForSize(standardSize, 8, 8, 12);
-        }
         if (sizeField === invalidSizeField) {
             let addressSize = operandWord;
             if ((opcode & addressArithmeticLongBit) !== 0) {
@@ -701,8 +665,25 @@ function mc68008StaticInstructionCycles(opcode) {
             }
             return baseCycles + cpuEaReadCycles(eaMode, eaReg, addressSize);
         }
+        if (opcodeClass === 0xB000 && (opcode & 0x0138) === 0x0108) {
+            return cpuCyclesForSize(standardSize, 16, 24, 40);
+        }
+        if (opcodeClass !== 0xB000 && (opcode & 0x0130) === 0x0100) {
+            if ((opcode & 8) !== 0) {
+                return cpuCyclesForSize(standardSize, 22, 34, 58);
+            }
+            return cpuCyclesForSize(standardSize, 8, 8, 12);
+        }
         if ((opcode & 0x0100) !== 0) {
+            if (eaMode === 0) {
+                // EOR Dn,Dn
+                return cpuCyclesForSize(standardSize, 8, 8, 12);
+            }
             return cpuCyclesForSize(standardSize, 12, 16, 24) + cpuEaReadCycles(eaMode, eaReg, standardSize);
+        }
+        if (opcodeClass === 0xB000) {
+            // CMP has no extra long clocks for a register or immediate source.
+            return cpuCyclesForSize(standardSize, 8, 8, 10) + cpuEaReadCycles(eaMode, eaReg, standardSize);
         }
         return cpuStandardEaToDnCycles(eaMode, eaReg, standardSize);
     case 0xC000:
@@ -712,7 +693,7 @@ function mc68008StaticInstructionCycles(opcode) {
         }
         if ((opcode & 0xF1F0) === 0xC100) {
             if ((opcode & 8) !== 0) {
-                return 20;
+                return 22;
             }
             return 10;
         }
@@ -728,7 +709,7 @@ function mc68008StaticInstructionCycles(opcode) {
             return 16 + cpuEaReadCycles(eaMode, eaReg, operandWord);
         }
         if ((opcode & dataRegisterShiftCountRegisterBit) !== 0) {
-            return opcodeDynamicCycles;
+            return 0;
         }
         return cpuShiftCycles(opcode, opcodeQuickValue(opcode));
     }
@@ -782,7 +763,7 @@ function mc68008StaticInstructionCycles(opcode) {
     }
     const movemGroup = opcodeFfc0 & 0xFB80;
     if (movemGroup === 0x4880) {
-        return opcodeDynamicCycles;
+        return 0;
     }
     switch (opcode & 0xF1C0) {
     case 0x4180:
@@ -974,12 +955,14 @@ export function callSubroutine(c, bus, address, instructionLimit) {
     }
     setPc(c, address | 0);
     c.extraFlag = false;
-    c.exception = 0;
     runGuestCall(c, bus, returnPc, instructionLimit);
 }
 
 /**
- * Execute a bounded nested guest call without disturbing the outer loop.
+ * Execute a bounded nested guest call without disturbing the outer loop. It
+ * runs until back at `returnPc`, through any interrupt taken on the way, and
+ * ends early after `instructionLimit` instructions or where exception
+ * processing or a STOP halts the run.
  *
  * @param {Cpu} c
  * @param {CpuBus} bus
@@ -998,26 +981,31 @@ function runGuestCall(c, bus, returnPc, instructionLimit) {
     if (!c.extraFlag) {
         c.exception = 0;
     }
-    c.nInst = instructionLimit;
+    let remaining = instructionLimit;
+    c.nInst = remaining;
     if (c.extraFlag) {
         c.nInst2 = c.nInst;
         c.nInst = 0;
     }
     for (;;) {
-        while (c.nInst > 0) {
+        while (c.nInst > 0 && remaining > 0 && c.pc !== returnPc) {
             c.nInst -= 1;
-            if (c.pc === returnPc) {
-                c.nInst = 0;
-                break;
-            }
+            remaining -= 1;
             executeTimedPcInstruction(c, bus);
         }
-        if (!c.extraFlag) {
+        // Out of instructions, an exception the last one raised is still
+        // taken, so none is left for the outer loop.
+        if (c.nInst > 0 || (remaining <= 0 && c.exception === 0)) {
             break;
         }
-        c.nInst = c.nInst2;
-        exceptionProcessing(c, bus);
-        if (c.nInst <= 0) {
+        if (c.extraFlag) {
+            c.nInst = c.nInst2;
+            exceptionProcessing(c, bus);
+        }
+        // STOP and an aborting exception clear both counters. Otherwise a spent
+        // count only ends a chunk, as after an interrupt taken or one left
+        // pending under the mask, and the call goes on.
+        if (c.nInst <= 0 && (c.nInst2 <= 0 || !prepareExecuteChunk(c, bus))) {
             break;
         }
     }
@@ -1028,6 +1016,34 @@ function runGuestCall(c, bus, returnPc, instructionLimit) {
     c.accessActive = savedAccess;
     c.peripheralWaitCycles = savedPeripheralWaitCycles;
     c.instructionCycleOverride = savedOverride;
+}
+
+/**
+ * Take a pending interrupt and set the instruction counters for the next
+ * chunk; false while the CPU stays stopped.
+ *
+ * @param {Cpu} c
+ * @param {CpuBus} bus
+ * @returns {boolean}
+ */
+function prepareExecuteChunk(c, bus) {
+    c.extraFlag = false;
+    processInterrupts(c, bus);
+    if (c.stopped) {
+        return false;
+    }
+    c.exception = 0;
+    c.extraFlag =
+        c.trace ||
+        c.doTrace ||
+        c.pendingInterrupt === nonmaskableInterruptLevel ||
+        c.pendingInterrupt > c.interruptMask;
+    c.nInst = 0x7FFFFFFF;
+    if (c.extraFlag) {
+        c.nInst2 = c.nInst;
+        c.nInst = 0;
+    }
+    return true;
 }
 
 /**
@@ -1061,7 +1077,7 @@ function exceptionProcessing(c, bus) {
             stackedPc = c.exceptionPc;
         }
         const vector = c.exception;
-        const handlerPc = readPointerLong(bus.mem, vector * qdosLongSize) | 0;
+        const handlerPc = readPointerLong(bus.mem, vector * longSize) | 0;
         pushCpuExceptionFrame(c, bus, stackedPc);
         setPc(c, handlerPc);
         if (vector === addressErrorVector) {
@@ -1080,7 +1096,7 @@ function exceptionProcessing(c, bus) {
     }
     if (c.doTrace) {
         pushCpuExceptionFrame(c, bus, c.pc);
-        setPc(c, readPointerLong(bus.mem, traceVector * qdosLongSize) | 0);
+        setPc(c, readPointerLong(bus.mem, traceVector * longSize) | 0);
         if (c.nInst === 0) {
             c.exception = traceVector;
         }
@@ -1111,7 +1127,7 @@ function executeTimedPcInstruction(c, bus) {
     c.currentInstructionPc = c.pc;
     c.accessActive = true;
     const opcode = readDecodedWord(c, bus, c.pc);
-    c.pc = cpuAddressOffset(c.pc, qdosWordSize);
+    c.pc = cpuAddressOffset(c.pc, wordSize);
     executeLoadedOpcode(c, bus, opcode, instructionCycleStart);
 }
 
@@ -1127,7 +1143,7 @@ function executeTimedPcInstruction(c, bus) {
  */
 function executeLoadedOpcode(c, bus, opcode, instructionCycleStart) {
     const baseCycles = opcodeBaseCycles[opcode];
-    c.accessActive = baseCycles >= opcodeDynamicCycles;
+    c.accessActive = baseCycles >= 0;
     c.instructionCycleOverride = -1;
     c.code = opcode;
     opcodeTable[opcode](c, bus);
@@ -1154,11 +1170,8 @@ function executeLoadedOpcode(c, bus, opcode, instructionCycleStart) {
                 break;
             }
         }
-        if (expectedCycles < opcodeDynamicCycles) {
+        if (expectedCycles < 0) {
             expectedCycles = -expectedCycles - opcodeHostCycleBias;
-        }
-        if (expectedCycles === opcodeDynamicCycles) {
-            expectedCycles = mc68008DynamicInstructionCycles(c, opcode);
         }
     }
     if (expectedCycles > 0) {
@@ -1169,52 +1182,6 @@ function executeLoadedOpcode(c, bus, opcode, instructionCycleStart) {
     c.currentInstructionPc = -1;
     bus.afterInstruction();
     processInterrupts(c, bus);
-}
-
-/**
- * MC68008 clocks for Bcc, DBcc, and Scc Dn from the flags and the DBcc counter
- * after the instruction; 0 for anything else.
- *
- * @param {Cpu} c
- * @param {number} opcode
- * @returns {number}
- */
-function mc68008DynamicInstructionCycles(c, opcode) {
-    switch (opcode & 0xF000) {
-    case 0x6000: {
-        const condition = (opcode >> 8) & conditionCodeMask;
-        if (condition === branchConditionAlways || condition === branchConditionSubroutine) {
-            return 0;
-        }
-        if (conditionIsTrue(c, condition)) {
-            return 18;
-        }
-        if ((opcode & 0xFF) === 0) {
-            return 20;
-        }
-        return 12;
-    }
-    case 0x5000:
-        const condition = (opcode >> 8) & conditionCodeMask;
-        switch (opcode & 0x00F8) {
-        case 0x00C8:
-            // DBcc: the counter reads 0xFFFF once the loop has run out.
-            if (conditionIsTrue(c, condition)) {
-                return 20;
-            }
-            if ((c.reg[opcode & 7] & 0xFFFF) === 0xFFFF) {
-                return 26;
-            }
-            return 18;
-        case 0x00C0:
-            // Scc Dn
-            if (conditionIsTrue(c, condition)) {
-                return 10;
-            }
-            return 8;
-        }
-    }
-    return 0;
 }
 
 /**
@@ -1239,7 +1206,7 @@ function processInterrupts(c, bus) {
     c.peripheralWaitCycles = 0;
     c.accessActive = true;
     pushCpuExceptionFrame(c, bus, c.pc);
-    const vectorAddr = (autovectorBase + c.pendingInterrupt) * qdosLongSize;
+    const vectorAddr = (autovectorBase + c.pendingInterrupt) * longSize;
     setPc(c, readLong(c, bus, vectorAddr) | 0);
     c.interruptMask = c.pendingInterrupt;
     c.pendingInterrupt = 0;
@@ -1398,7 +1365,7 @@ function addressArithmeticOp(c, bus) {
         c.reg[addressIndex] = addressOffset(c.reg[addressIndex], source);
         return;
     }
-    c.reg[addressIndex] = ((c.reg[addressIndex] >>> 0) - (source >>> 0)) | 0;
+    c.reg[addressIndex] = addressOffset(c.reg[addressIndex], -source);
 }
 
 /**
@@ -1674,6 +1641,9 @@ function branchOp(c, bus) {
     }
     if (conditionIsTrue(c, condition)) {
         setPc(c, addressOffset(base, displ));
+        if (c.exception === 0) {
+            c.instructionCycleOverride = 18;
+        }
     }
 }
 
@@ -1898,8 +1868,13 @@ function dbccOp(c, bus) {
     const counterReg = code & 7;
     const oldCounter = c.reg[counterReg] & 0xFFFF;
     writeDataRegisterSized(c, counterReg, operandWord, oldCounter - 1);
-    if (oldCounter !== 0) {
-        setPc(c, addressOffset(base, displ));
+    if (oldCounter === 0) {
+        c.instructionCycleOverride = 26;
+        return;
+    }
+    setPc(c, addressOffset(base, displ));
+    if (c.exception === 0) {
+        c.instructionCycleOverride = 18;
     }
 }
 
@@ -1959,8 +1934,8 @@ function exgOp(c, bus) {
     const code = c.code;
     let leftIndex = (code >> 9) & 7;
     let rightIndex = code & 7;
-    const form = code & exgFormMask;
-    switch (form) {
+    // EXG Dx,Dy keeps both indices; only the three forms reach here.
+    switch (code & exgFormMask) {
     case exgAddressAddressForm:
         leftIndex += addressRegisterBase;
         rightIndex += addressRegisterBase;
@@ -1968,11 +1943,6 @@ function exgOp(c, bus) {
     case exgDataAddressForm:
         rightIndex += addressRegisterBase;
         break;
-    case exgDataDataForm:
-        break;
-    default:
-        raiseInstructionException(c, illegalInstructionVector);
-        return;
     }
     const value = c.reg[leftIndex];
     c.reg[leftIndex] = c.reg[rightIndex];
@@ -2044,7 +2014,12 @@ function linkOp(c, bus) {
     const code = c.code;
     const index = addressRegisterBase + (code & 7);
     const displacement = asI16(readPcWord(c, bus));
-    if (c.exception !== 0 || !pushLongToStack(c, bus, c.reg[index])) {
+    let saved = c.reg[index];
+    if (index === stackRegisterIndex) {
+        // LINK A7 saves A7 as already decremented by its own push.
+        saved = addressOffset(saved, -longSize);
+    }
+    if (c.exception !== 0 || !pushLongToStack(c, bus, saved)) {
         return;
     }
     c.reg[index] = c.reg[stackRegisterIndex];
@@ -2232,16 +2207,20 @@ function movemOp(c, bus) {
     if (size === operandLong) {
         movemCycles *= 2;
     }
+    // MC68008 base clocks by mode; a store saves a load's extra read.
+    if (eaMode === 2 || eaMode === 3 || eaMode === 4) {
+        movemCycles += 24;
+    } else if (eaMode === 5 || (eaMode === 7 && (eaReg === 0 || eaReg === 2))) {
+        movemCycles += 32;
+    } else if (eaMode === 6 || (eaMode === 7 && eaReg === 3)) {
+        movemCycles += 34;
+    } else if (eaMode === 7 && eaReg === 1) {
+        movemCycles += 40;
+    }
+    if (!load) {
+        movemCycles -= 8;
+    }
     if (load) {
-        if (eaMode === 2 || eaMode === 3) {
-            movemCycles += 24;
-        } else if (eaMode === 5 || (eaMode === 7 && (eaReg === 0 || eaReg === 2))) {
-            movemCycles += 32;
-        } else if (eaMode === 6 || (eaMode === 7 && eaReg === 3)) {
-            movemCycles += 34;
-        } else if (eaMode === 7 && eaReg === 1) {
-            movemCycles += 40;
-        }
         let ea = c.reg[addressRegisterBase + eaReg];
         if (eaMode !== 3) {
             ea = getEa(c, bus, eaMode, eaReg);
@@ -2327,11 +2306,11 @@ function movepOp(c, bus) {
     }
     if ((code & movepRegisterToMemoryBit) === 0) {
         const highByte = readByte(c, bus, ea);
-        const lowByte = readByte(c, bus, addressOffset(ea, qdosWordSize));
+        const lowByte = readByte(c, bus, addressOffset(ea, wordSize));
         let value = (highByte << 8) | lowByte;
         if ((code & movepLongBit) !== 0) {
-            const high2 = readByte(c, bus, addressOffset(ea, 2 * qdosWordSize));
-            const low2 = readByte(c, bus, addressOffset(ea, 3 * qdosWordSize));
+            const high2 = readByte(c, bus, addressOffset(ea, 2 * wordSize));
+            const low2 = readByte(c, bus, addressOffset(ea, 3 * wordSize));
             value = (value << 16) | (high2 << 8) | low2;
             writeDataRegisterSized(c, dataIndex, operandLong, value);
             return;
@@ -2342,13 +2321,13 @@ function movepOp(c, bus) {
     const value = c.reg[dataIndex] >>> 0;
     if ((code & movepLongBit) !== 0) {
         writeByte(c, bus, ea, value >>> 24);
-        writeByte(c, bus, addressOffset(ea, qdosWordSize), value >>> 16);
-        writeByte(c, bus, addressOffset(ea, 2 * qdosWordSize), value >>> 8);
-        writeByte(c, bus, addressOffset(ea, 3 * qdosWordSize), value);
+        writeByte(c, bus, addressOffset(ea, wordSize), value >>> 16);
+        writeByte(c, bus, addressOffset(ea, 2 * wordSize), value >>> 8);
+        writeByte(c, bus, addressOffset(ea, 3 * wordSize), value);
         return;
     }
     writeByte(c, bus, ea, value >>> 8);
-    writeByte(c, bus, addressOffset(ea, qdosWordSize), value);
+    writeByte(c, bus, addressOffset(ea, wordSize), value);
 }
 
 /**
@@ -2382,7 +2361,8 @@ function multiplyOp(c, bus) {
     const signedMultiply = (code & multiplySignedBit) !== 0;
     let cycleBits = source;
     if (signedMultiply) {
-        cycleBits ^= source >>> 1;
+        // MULS counts 01 and 10 pairs with a zero appended below bit 0.
+        cycleBits = (source ^ (source << 1)) & 0xFFFF;
     }
     c.instructionCycleOverride = 42 + 2 * popcount(cycleBits) + cpuEaReadCycles(eaMode, eaReg, operandWord);
     let result;
@@ -2487,7 +2467,7 @@ function nbcdOp(c, bus) {
     }
     let nbcdLo = 0 - (d & 0x0F) - Number(c.xflag);
     const nbcdHi = 0 - (d & 0xF0);
-    if (nbcdLo > 9) {
+    if (nbcdLo < 0) {
         nbcdLo -= 6;
     }
     let nbcdRes = nbcdHi + nbcdLo;
@@ -2656,7 +2636,7 @@ function pushLongToStack(c, bus, value) {
     if (c.exception !== 0) {
         return false;
     }
-    c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -qdosLongSize);
+    c.reg[stackRegisterIndex] = addressOffset(c.reg[stackRegisterIndex], -longSize);
     writeLong(c, bus, c.reg[stackRegisterIndex], value >>> 0);
     return c.exception === 0;
 }
@@ -2685,56 +2665,12 @@ function shiftRotateMemoryWord(c, bus) {
     }
     const left = (code & shiftRotateLeftBit) !== 0;
     const operation = (code >> memoryShiftOperationShift) & shiftOperationMask;
-    let value = modifyAtEaSized(c, bus, operandWord, eaMode, eaReg);
+    const value = modifyAtEaSized(c, bus, operandWord, eaMode, eaReg);
     if (c.exception !== 0) {
         return;
     }
-    let newOverflow = false;
-    let newCarry = c.carry;
-    switch (operation) {
-    case shiftOperationArithmetic:
-    case shiftOperationLogical:
-        if (left) {
-            newCarry = (value & 0x8000) !== 0;
-        } else {
-            newCarry = (value & 1) !== 0;
-        }
-        if (operation === shiftOperationArithmetic) {
-            if (left) {
-                const shifted = arithmeticShiftLeft(value, 1, 16);
-                value = shifted.value;
-                newOverflow = shifted.flag;
-            } else {
-                value = arithmeticShiftRight(value, 1, 16);
-            }
-        } else {
-            value = logicalShift(value, 1, 16, left);
-        }
-        break;
-    case shiftOperationRotateExtend:
-        const rotated = rotateExtend(value, 1, 16, c.xflag, left);
-        value = rotated.value;
-        newCarry = rotated.flag;
-        break;
-    case shiftOperationRotate:
-        value = rotateBits(value, 1, 16, left);
-        if (left) {
-            newCarry = (value & 1) !== 0;
-        } else {
-            newCarry = (value & 0x8000) !== 0;
-        }
-        break;
-    }
-    if (!rewriteEaSized(c, bus, operandWord, value)) {
-        return;
-    }
-    c.overflow = newOverflow;
-    c.carry = newCarry;
-    if (operation !== shiftOperationRotate) {
-        c.xflag = newCarry;
-    }
-    c.negative = (value & 0x8000) !== 0;
-    c.zero = value === 0;
+    // Rewriting the operand just read cannot fault, so the flags can go first.
+    rewriteEaSized(c, bus, operandWord, shiftRotate(c, operation, left, value, 1, 16));
 }
 
 /**
@@ -2807,7 +2743,7 @@ function rtsOp(c, bus) {
     if (c.exception !== 0) {
         return;
     }
-    c.reg[stackRegisterIndex] = addressOffset(stack, qdosLongSize);
+    c.reg[stackRegisterIndex] = addressOffset(stack, longSize);
 }
 
 /**
@@ -2837,6 +2773,9 @@ function sccOp(c, bus) {
     const condition = (code >> 8) & conditionCodeMask;
     if (conditionIsTrue(c, condition)) {
         conditionValue = 0xFF;
+        if (eaMode === 0) {
+            c.instructionCycleOverride = 10;
+        }
     }
     putToEaSized(c, bus, operandByte, eaMode, eaReg, conditionValue);
 }
@@ -3114,16 +3053,16 @@ function writeLong(c, bus, addr, d) {
         return;
     }
     addr &= addrMask;
-    const lowAddr = (addr + qdosWordSize) & addrMask;
+    const lowAddr = (addr + wordSize) & addrMask;
     if (isDirectRamLongAccess(bus, addr, lowAddr)) {
         addCpuBusCycles(c, addr, longBusCycles);
         if (addr >= qdosUserRamBase) {
-            bus.beforeMemoryWrite(addr, qdosLongSize);
+            bus.beforeMemoryWrite(addr, longSize);
             writePointerLong(bus.mem, addr, d);
             return;
         }
         if (lowAddr >= qdosUserRamBase) {
-            bus.beforeMemoryWrite(lowAddr, qdosWordSize);
+            bus.beforeMemoryWrite(lowAddr, wordSize);
             writePointerWord(bus.mem, lowAddr, d & 0xFFFF);
         }
         return;
@@ -3165,7 +3104,7 @@ function writeDecodedWord(c, bus, addr, d) {
         return;
     }
     if (addr >= qdosUserRamBase) {
-        bus.beforeMemoryWrite(addr, qdosWordSize);
+        bus.beforeMemoryWrite(addr, wordSize);
         writePointerWord(bus.mem, addr, d);
     }
 }
@@ -3201,7 +3140,7 @@ function writeByte(c, bus, addr, d) {
         return;
     }
     if (addr >= qdosUserRamBase) {
-        bus.beforeMemoryWrite(addr, qdosByteSize);
+        bus.beforeMemoryWrite(addr, byteSize);
         bus.mem[addr] = d & 0xFF;
     }
 }
@@ -3362,8 +3301,8 @@ function memoryEaAddr(c, bus, mode, r, byteCount) {
     case 3:
     case 4:
         let step = byteCount;
-        if (byteCount === qdosByteSize && r === stackAddressRegister) {
-            step = qdosWordSize;
+        if (byteCount === byteSize && r === stackAddressRegister) {
+            step = wordSize;
         }
         if (mode === 3) {
             const addr = c.reg[addressRegisterBase + r];
@@ -3452,7 +3391,7 @@ function readPcWord(c, bus) {
     if (c.exception !== 0) {
         return 0;
     }
-    c.pc = cpuAddressOffset(c.pc, qdosWordSize);
+    c.pc = cpuAddressOffset(c.pc, wordSize);
     return value;
 }
 
@@ -3529,8 +3468,9 @@ function unlkOp(c, bus) {
     if (c.exception !== 0) {
         return;
     }
+    c.reg[stackRegisterIndex] = addressOffset(stack, longSize);
+    // UNLK A7 leaves A7 holding the loaded long.
     c.reg[index] = restored;
-    c.reg[stackRegisterIndex] = addressOffset(stack, qdosLongSize);
 }
 
 /**
@@ -3549,7 +3489,7 @@ function readLong(c, bus, addr) {
         addCpuBusCycles(c, addr, longBusCycles);
         return bus.readHwLongClock();
     }
-    const lowAddr = (addr + qdosWordSize) & addrMask;
+    const lowAddr = (addr + wordSize) & addrMask;
     if (isDirectRamLongAccess(bus, addr, lowAddr)) {
         addCpuBusCycles(c, addr, longBusCycles);
         return readPointerLong(bus.mem, addr);
@@ -3717,9 +3657,14 @@ function addCpuBusCycles(c, addr, busCycles) {
     if (!c.accessActive) {
         return;
     }
+    // Only the onboard RAM shares its bus with the ZX8301.
+    const first = addr & addrMask;
+    if (first >= zx8301OnboardRamEnd || first + busCycles <= qdosUserRamBase) {
+        c.cycleCount += busCycles * busCycleClocks;
+        return;
+    }
     for (let i = 0; i < busCycles; i += 1) {
-        // Only the onboard RAM shares its bus with the ZX8301.
-        const address = addressOffset(addr, i) & addrMask;
+        const address = (addr + i) & addrMask;
         if (address >= qdosUserRamBase && address < zx8301OnboardRamEnd) {
             zx8301WaitForCpuRamSlot(c);
         }
@@ -3736,7 +3681,7 @@ function addCpuBusCycles(c, addr, busCycles) {
  * @returns {number}
  */
 function addressOffset(base, offset) {
-    return ((base >>> 0) + (offset >>> 0)) | 0;
+    return (base + offset) | 0;
 }
 
 /**
@@ -3750,12 +3695,9 @@ function zx8301WaitForCpuRamSlot(c) {
     if (alignment !== 0) {
         c.cycleCount += busCycleClocks - alignment;
     }
-    for (;;) {
-        const slot = Math.floor(c.cycleCount / busCycleClocks) % zx8301BusSlotsPerLine;
-        if (slot >= zx8301DisplayBusSlots || slot % zx8301BusSlotsPerChunk === zx8301CpuDisplaySlot) {
-            return;
-        }
-        c.cycleCount += busCycleClocks;
+    const slot = Math.floor(c.cycleCount / busCycleClocks) % zx8301BusSlotsPerLine;
+    if (slot < zx8301DisplayBusSlots) {
+        c.cycleCount += (zx8301CpuDisplaySlot - slot % zx8301BusSlotsPerChunk) * busCycleClocks;
     }
 }
 
@@ -3814,7 +3756,7 @@ function accessHardwareByte(c, bus, addr, write, data) {
     }
     const start = c.cycleCount;
     let end = start + busCycleClocks;
-    const peripheral = bus.isEClocked(addr);
+    const peripheral = addr >= bus.qsoundBase && addr < bus.qsoundEnd;
     if (peripheral) {
         let sync = start + 3;
         const phase = sync % peripheralEClocks;
@@ -3859,10 +3801,25 @@ function shiftRotateDataRegister(c, bus) {
         // Timed here, from the count before the shift can overwrite it.
         c.instructionCycleOverride = cpuShiftCycles(code, count);
     }
-    const width = 8 << size;
     const operation = (code >> dataRegisterShiftOperationShift) & shiftOperationMask;
     const index = code & 7;
-    let value = (c.reg[index] >>> 0) & operandSizes[size].valueMask;
+    const value = c.reg[index] & operandSizes[size].valueMask;
+    writeDataRegisterSized(c, index, size, shiftRotate(c, operation, left, value, count, 8 << size));
+}
+
+/**
+ * Shift or rotate `value` by `count` bits of `width`, set the flags, and
+ * return the result.
+ *
+ * @param {Cpu} c
+ * @param {number} operation
+ * @param {boolean} left
+ * @param {number} value
+ * @param {number} count
+ * @param {number} width
+ * @returns {number}
+ */
+function shiftRotate(c, operation, left, value, count, width) {
     const signBit = (1 << (width - 1)) >>> 0;
     c.carry = false;
     let newOverflow = false;
@@ -3880,22 +3837,18 @@ function shiftRotateDataRegister(c, bus) {
                 // Every bit shifted out past the operand is a copy of the sign.
                 c.carry = (value & signBit) !== 0;
             }
-            if (operation === shiftOperationArithmetic) {
-                if (left) {
-                    const shifted = arithmeticShiftLeft(value, count, width);
-                    value = shifted.value;
-                    newOverflow = shifted.flag;
-                } else {
-                    value = arithmeticShiftRight(value, count, width);
-                }
+            if (operation === shiftOperationArithmetic && left) {
+                newOverflow = arithmeticShiftOverflows(value, count, width);
+            }
+            if (operation === shiftOperationArithmetic && !left) {
+                value = arithmeticShiftRight(value, count, width);
             } else {
                 value = logicalShift(value, count, width, left);
             }
             break;
         case shiftOperationRotateExtend:
-            const rotated = rotateExtend(value, count, width, c.xflag, left);
-            value = rotated.value;
-            c.carry = rotated.flag;
+            c.carry = rotateExtendFlag(value, count, width, c.xflag, left);
+            value = rotateExtend(value, count, width, c.xflag, left);
             break;
         case shiftOperationRotate:
             value = rotateBits(value, count, width, left);
@@ -3912,10 +3865,10 @@ function shiftRotateDataRegister(c, bus) {
     } else if (operation === shiftOperationRotateExtend) {
         c.carry = c.xflag;
     }
-    writeDataRegisterSized(c, index, size, value);
     c.negative = (value & signBit) !== 0;
     c.zero = value === 0;
     c.overflow = newOverflow;
+    return value;
 }
 
 /**
@@ -3980,30 +3933,28 @@ function arithmeticShiftRight(value, count, width) {
 }
 
 /**
- * Shift left; `flag` is the overflow, set when the sign bit changes at any
- * step.
+ * ASL's overflow: whether the sign bit changes at any step. ASL shifts the
+ * value as LSL does.
  *
  * @param {number} value
  * @param {number} count
  * @param {number} width
- * @returns {{value: number, flag: boolean}}
+ * @returns {boolean}
  */
-function arithmeticShiftLeft(value, count, width) {
+function arithmeticShiftOverflows(value, count, width) {
     const valueMask = bitWidthMask(width);
     value &= valueMask;
     if (count >= width) {
-        return {value: 0, flag: value !== 0};
+        return value !== 0;
     }
     const signBit = 1 << (width - 1);
-    const oldNegative = (value & signBit) !== 0;
     let shiftedOutMask = valueMask << (width - 1 - count);
     shiftedOutMask &= valueMask;
     let expected = 0;
-    if (oldNegative) {
+    if ((value & signBit) !== 0) {
         expected = shiftedOutMask;
     }
-    const newOverflow = (value & shiftedOutMask) !== expected;
-    return {value: (value << count) & valueMask, flag: newOverflow};
+    return (value & shiftedOutMask) !== expected;
 }
 
 /**
@@ -4028,14 +3979,14 @@ function rotateBits(value, count, width, left) {
 }
 
 /**
- * Rotate through X; `flag` is the final X bit.
+ * Rotate through X.
  *
  * @param {number} value
  * @param {number} count
  * @param {number} width
  * @param {boolean} oldX
  * @param {boolean} left
- * @returns {{value: number, flag: boolean}}
+ * @returns {number}
  */
 function rotateExtend(value, count, width, oldX, left) {
     const valueMask = bitWidthMask(width);
@@ -4057,7 +4008,28 @@ function rotateExtend(value, count, width, oldX, left) {
             x = newX;
         }
     }
-    return {value, flag: x};
+    return value;
+}
+
+/**
+ * The X bit a rotate through X leaves: the last bit rotated out of `value`.
+ *
+ * @param {number} value
+ * @param {number} count
+ * @param {number} width
+ * @param {boolean} oldX
+ * @param {boolean} left
+ * @returns {boolean}
+ */
+function rotateExtendFlag(value, count, width, oldX, left) {
+    count %= width + 1;
+    if (count === 0) {
+        return oldX;
+    }
+    if (left) {
+        return ((value >>> (width - count)) & 1) !== 0;
+    }
+    return ((value >>> (count - 1)) & 1) !== 0;
 }
 
 /**
@@ -4103,5 +4075,5 @@ function writeDataRegisterSized(c, index, size, value) {
         return;
     }
     const valueMask = operandSizes[size].valueMask;
-    c.reg[index] = (((c.reg[index] >>> 0) & ~valueMask) | (value & valueMask)) | 0;
+    c.reg[index] = (c.reg[index] & ~valueMask) | (value & valueMask);
 }

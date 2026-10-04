@@ -241,8 +241,8 @@ export function setPaused(sfx, on) {
 }
 
 /**
- * One frame of mixed planes the worklet will interleave, exactly as the
- * machine's `audio` record accumulates it. Aliased rather than copied so the
+ * One frame of mixed planes, which `push` interleaves for the worklet,
+ * exactly as the machine's `audio` record accumulates it. Aliased rather than copied so the
  * shape stays checked against its producer. This is a type-only import and
  * pulls in no code.
  *
@@ -256,9 +256,7 @@ export function setPaused(sfx, on) {
  * @param {AudioChunk} chunk
  */
 export function push(sfx, chunk) {
-    // The machine reuses one 8192-sample buffer. A view of it can deserialize
-    // with the full backing store, so later frames would replay stale loader
-    // audio. Copy a cap of two frames, nothing more.
+    // Send at most two frames, the size every buffer is made for.
     const maxN = sfx.frameSampleCount * 2;
     const n = Math.min(chunk.n, maxN);
     if (n <= 0) {
@@ -266,10 +264,10 @@ export function push(sfx, chunk) {
     }
     // Interleave once and transfer ownership to the audio thread. This avoids
     // four structured-clone copies and four more allocations in the worklet.
-    // Buffers come back once played, so a steady stream allocates nothing; they
-    // are always cut to the cap, which lets any of them hold any frame.
+    // Buffers come back once played, so a steady stream allocates nothing. One
+    // made at a higher frame rate, for shorter frames, is too small and goes.
     let samples = sfx.pool.pop();
-    if (samples === undefined) {
+    if (samples === undefined || samples.length < maxN * 4) {
         samples = new Float32Array(maxN * 4);
     }
     for (let i = 0; i < n; i += 1) {

@@ -2,14 +2,15 @@ import * as io from "./io.js";
 import * as zip from "./zip.js";
 import * as media from "./media.js";
 
-const maxMediaBytes = 2 * 1024 * 1024;
+/** Largest Microdrive image accepted, as a file or inside a ZIP. */
+export const maxMdvBytes = 2 * 1024 * 1024;
 /** Largest ZIP archive accepted from a URL or a local file. */
 export const maxZipBytes = 8 * 1024 * 1024;
 
 /**
  * Fetch a Microdrive image, or a ZIP containing one, for `index.html?url=`.
  * Returns an abort operation, or null when `onDone` has already run; aborting
- * reports "Aborted." through `onDone`.
+ * reports "Canceled." through `onDone`.
  *
  * @param {string} urlParam
  * @param {function(string | null, string | null, ArrayBuffer | null): void} onDone
@@ -46,7 +47,7 @@ export function fromUrl(urlParam, onDone) {
         return null;
     }
     const requestUrl = url.origin + url.pathname + url.search;
-    let maxBytes = maxMediaBytes;
+    let maxBytes = maxMdvBytes;
     if (isZip) {
         maxBytes = maxZipBytes;
     }
@@ -62,11 +63,6 @@ export function fromUrl(urlParam, onDone) {
             if (err !== null) {
                 done = true;
                 onDone(err, null, null);
-                return;
-            }
-            if (!(buf instanceof ArrayBuffer)) {
-                done = true;
-                onDone("Could not load " + requestUrl + ": empty response.", null, null);
                 return;
             }
             if (!isZip) {
@@ -96,7 +92,7 @@ export function fromUrl(urlParam, onDone) {
         }
         done = true;
         abort();
-        onDone("Aborted.", null, null);
+        onDone("Canceled.", null, null);
     };
 }
 
@@ -134,14 +130,11 @@ export function zipMember(buf, member, onDone) {
     } else {
         for (let i = 0; i < listing.entries.length; i += 1) {
             const entry = listing.entries[i];
-            const stored = entry.method === 0;
-            const deflated = entry.method === 8 && typeof DecompressionStream !== "undefined";
             if (
                 media.isJunkName(entry.name) ||
                 !media.isMdvName(entry.name) ||
-                entry.encrypted ||
-                (!stored && !deflated) ||
-                entry.size > maxMediaBytes
+                !entry.readable ||
+                entry.size > maxMdvBytes
             ) {
                 continue;
             }
@@ -154,23 +147,15 @@ export function zipMember(buf, member, onDone) {
             return;
         }
     }
-    if (chosen.size > maxMediaBytes) {
-        onDone("ZIP entry " + chosen.name + " is larger than " + maxMediaBytes + " bytes.", null, null);
+    if (chosen.size > maxMdvBytes) {
+        onDone("ZIP entry " + chosen.name + " is larger than " + maxMdvBytes + " bytes.", null, null);
         return;
     }
     zip.readEntry(
         buf,
         chosen,
         function (extractErr, bytes) {
-            if (extractErr !== null) {
-                onDone(extractErr, chosen.name, null);
-                return;
-            }
-            if (!(bytes instanceof ArrayBuffer)) {
-                onDone("Could not extract ZIP member.", chosen.name, null);
-                return;
-            }
-            onDone(null, chosen.name, bytes);
+            onDone(extractErr, chosen.name, bytes);
         },
     );
 }

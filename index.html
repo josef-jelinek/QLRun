@@ -937,18 +937,16 @@ body.keyboard-splitting {
     color: var(--w);
     text-shadow: 0 0 2px var(--k), 0 0 2px var(--k), 0 0 2px var(--k);
 }
+/* A ROM card, when too narrow for its title and buttons, moves the buttons
+   to a second line, keeping them at the right edge. */
 .rom {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 10px;
     padding: 10px;
 }
-/* A ROM card with a button group, when too narrow for its title and buttons,
-   moves the buttons to a second line, keeping them at the right edge. */
-.rom:has(> .rom-actions) {
-    flex-wrap: wrap;
-}
-.rom:has(> .rom-actions) > .drive-title {
+.rom > .drive-title {
     flex-basis: 10em;
 }
 .rom-actions {
@@ -1054,10 +1052,10 @@ body.screen-only .app {
     height: 100%;
     padding: 0;
 }
+/* The screen's title bar stays, so its [ ] leads back without an F11 key. */
 body.screen-only .top,
 body.screen-only .side,
 body.screen-only .status,
-body.screen-only #monitor > .title,
 body.screen-only .screen-hint {
     display: none;
 }
@@ -1159,6 +1157,8 @@ body.screen-only #screen-slot {
     <symbol id="i-cart" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12"/><circle cx="8.5" cy="12" r="2"/><circle cx="15.5" cy="12" r="2"/><path d="M10.5 12h3"/></symbol>
     <symbol id="i-hdd" viewBox="0 0 24 24"><path d="M22 12H2"/><path d="M5.5 5 2 12v8h20v-8l-3.5-7z"/><path d="M6 16h1M10 16h1"/></symbol>
     <symbol id="i-flp" viewBox="0 0 24 24"><path d="M3 3h13l5 5v13H3z"/><path d="M17 21v-8H7v8M7 3v5h8"/></symbol>
+    <symbol id="i-serial" viewBox="0 0 24 24"><path d="M2 7h20l-3 10H5z"/><path d="M7 10h1M11.5 10h1M16 10h1M9 14h1M14 14h1"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v5"/></symbol>
     <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="3" width="12" height="18"/><path d="M3 7h3M3 11h3M3 15h3M18 7h3M18 11h3M18 15h3"/></symbol>
     <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></symbol>
     <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14"/><path d="M8 21h8M12 17v4"/></symbol>
@@ -1231,7 +1231,7 @@ body.screen-only #screen-slot {
         <div class="tabs">
             <label class="tab" title="Microdrive, hard disk, and floppy images"><input id="tab-media" type="radio" name="tab" value="media" checked><svg class="i"><use href="#i-media"></use></svg>Media</label>
             <label class="tab" title="System ROM and extension ROM slots"><input id="tab-roms" type="radio" name="tab" value="roms"><svg class="i"><use href="#i-chip"></use></svg>ROMs</label>
-            <label class="tab" title="Machine timing, memory, sound cards, and mouse"><input id="tab-hardware" type="radio" name="tab" value="hardware"><svg class="i"><use href="#i-cpu"></use></svg>Hardware</label>
+            <label class="tab" title="Machine timing, memory, sound cards, mouse, and serial ports"><input id="tab-hardware" type="radio" name="tab" value="hardware"><svg class="i"><use href="#i-cpu"></use></svg>Hardware</label>
             <label class="tab" title="Display filter, layout, and onscreen keyboard"><input id="tab-display" type="radio" name="tab" value="display"><svg class="i"><use href="#i-monitor"></use></svg>Display</label>
         </div>
         <div id="tab-panels">
@@ -1373,7 +1373,7 @@ body.screen-only #screen-slot {
                         <div class="rom-actions">
                             <button id="load-rom" class="li sm" title="Replace the 48 KiB system ROM"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
                             <input id="file-rom" type="file" accept=".rom,.bin" hidden>
-                            <button id="rom-minerva" class="li sm" title="Use the bundled Minerva 1.98 ROM instead of js.rom or jsu.rom">Minerva</button>
+                            <button id="rom-minerva" class="li sm" title="Use the bundled Minerva 1.98a1 ROM instead of js.rom or jsu.rom">Minerva</button>
                             <button id="rom-auto" class="li sm" title="Return to the automatic js.rom or jsu.rom that follows PAL or NTSC" disabled>Auto</button>
                         </div>
                     </article>
@@ -1385,7 +1385,7 @@ body.screen-only #screen-slot {
                             <div class="addr">$0C000 · 16K</div>
                         </div>
                         <div class="rom-actions">
-                            <button id="load-rom-cart" class="li sm" title="Cartridge ROM at 0x0C000"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                            <button id="load-rom-cart" class="li sm" title="Load a 16 KiB ROM into the cartridge slot at $0C000"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
                             <input id="file-rom-cart" type="file" accept=".rom,.bin" hidden>
                             <button id="rom-toolkit2" class="li sm" title="Use the bundled Toolkit II v2.36 in the cartridge slot">Toolkit II</button>
                             <button id="eject-rom-cart" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
@@ -1399,9 +1399,11 @@ body.screen-only #screen-slot {
                             <div id="rom-io1-info" class="drive-name">No ROM.</div>
                             <div class="addr">$10000 · 16K</div>
                         </div>
-                        <button id="load-rom-io1" class="li sm" title="I/O ROM 1 at 0x10000"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
-                        <input id="file-rom-io1" type="file" accept=".rom,.bin" hidden>
-                        <button id="eject-rom-io1" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                        <div class="rom-actions">
+                            <button id="load-rom-io1" class="li sm" title="Load a 16 KiB ROM into I/O ROM 1 at $10000"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                            <input id="file-rom-io1" type="file" accept=".rom,.bin" hidden>
+                            <button id="eject-rom-io1" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                        </div>
                     </article>
                     <article id="rom-io2-card" class="card rom empty">
                         <div class="drive-ico"><svg class="i"><use href="#i-chip"></use></svg></div>
@@ -1410,9 +1412,11 @@ body.screen-only #screen-slot {
                             <div id="rom-io2-info" class="drive-name">No ROM.</div>
                             <div class="addr">$14000 · 16K</div>
                         </div>
-                        <button id="load-rom-io2" class="li sm" title="I/O ROM 2 at 0x14000"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
-                        <input id="file-rom-io2" type="file" accept=".rom,.bin" hidden>
-                        <button id="eject-rom-io2" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                        <div class="rom-actions">
+                            <button id="load-rom-io2" class="li sm" title="Load a 16 KiB ROM into I/O ROM 2 at $14000"><svg class="i"><use href="#i-upload"></use></svg>Load</button>
+                            <input id="file-rom-io2" type="file" accept=".rom,.bin" hidden>
+                            <button id="eject-rom-io2" class="li sm icon" title="Eject" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                        </div>
                     </article>
                 </div>
             </section>
@@ -1488,6 +1492,43 @@ body.screen-only #screen-slot {
                         <label class="toggle" title="Show the host cursor over the screen while the PE pointer device is selected; when off, only the QL pointer is visible there"><input id="mouse-cursor" type="checkbox"><span>OFF</span><span>ON</span></label>
                     </div>
                 </div>
+
+                <div class="section-h"><span>Serial ports</span></div>
+                <div class="stack">
+                    <div id="serial-note" class="note" hidden><svg class="i"><use href="#i-warn"></use></svg><span id="serial-note-text"></span></div>
+                    <article id="ser1-card" class="card drive empty">
+                        <div class="drive-head">
+                            <div class="drive-ico"><svg class="i"><use href="#i-serial"></use></svg></div>
+                            <div class="drive-title">
+                                <div class="drive-id">SER1<span id="ser1-baud" class="badge neutral" title="The rate set with BAUD, which the host port follows">9600</span></div>
+                                <div id="ser1-info" class="drive-name">Not connected.</div>
+                            </div>
+                            <i id="ser1-led" class="led" title="SER1 not connected"></i>
+                        </div>
+                        <div class="drop-hint">Connect a host serial port. It runs at the QL's BAUD rate; its CTS line holds back QL output, and its RTS and DTR hold back the device while the QL cannot take data.</div>
+                        <div class="drive-actions">
+                            <button id="connect-ser1" class="li sm" title="Choose a host serial port for SER1"><svg class="i"><use href="#i-plug"></use></svg>Connect</button>
+                            <span class="grow"></span>
+                            <button id="disconnect-ser1" class="li sm icon" title="Disconnect" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                        </div>
+                    </article>
+                    <article id="ser2-card" class="card drive empty">
+                        <div class="drive-head">
+                            <div class="drive-ico"><svg class="i"><use href="#i-serial"></use></svg></div>
+                            <div class="drive-title">
+                                <div class="drive-id">SER2<span id="ser2-baud" class="badge neutral" title="The rate set with BAUD, which the host port follows">9600</span></div>
+                                <div id="ser2-info" class="drive-name">Not connected.</div>
+                            </div>
+                            <i id="ser2-led" class="led" title="SER2 not connected"></i>
+                        </div>
+                        <div class="drop-hint">Connect a host serial port. It runs at the QL's BAUD rate; its CTS line holds back QL output, and its RTS and DTR hold back the device while the QL cannot take data.</div>
+                        <div class="drive-actions">
+                            <button id="connect-ser2" class="li sm" title="Choose a host serial port for SER2"><svg class="i"><use href="#i-plug"></use></svg>Connect</button>
+                            <span class="grow"></span>
+                            <button id="disconnect-ser2" class="li sm icon" title="Disconnect" disabled><svg class="i"><use href="#i-eject"></use></svg></button>
+                        </div>
+                    </article>
+                </div>
             </section>
 
             <section id="panel-display" class="panel">
@@ -1521,11 +1562,13 @@ body.screen-only #screen-slot {
         <span class="tag"><span>#0</span></span>
         <div class="messages"><span id="init-info">Initializing...</span><span id="qsound-info"></span><span id="audio-info"></span><span id="startup-file-info"></span><span id="drop-info"></span></div>
         <div class="status-right">
-            <div class="leds" title="Drive activity">
+            <div class="leds" title="Drive and serial port activity">
                 <span><i id="led-mdv1" class="led" title="MDV1 idle"></i>MDV1</span>
                 <span><i id="led-mdv2" class="led" title="MDV2 idle"></i>MDV2</span>
                 <span><i id="led-win1" class="led" title="WIN1 idle"></i>WIN1</span>
                 <span><i id="led-flp1" class="led" title="FLP1 idle"></i>FLP1</span>
+                <span id="led-ser1-item" hidden><i id="led-ser1" class="led" title="SER1 not connected"></i>SER1</span>
+                <span id="led-ser2-item" hidden><i id="led-ser2" class="led" title="SER2 not connected"></i>SER2</span>
             </div>
             <div id="stats-info" title="Emulated frames per second (about 50.1 on PAL, or 50.4 or 60.1 on NTSC, is real time), then audio overrun discarded and underrun filled with silence over the last second, in ms">
                 <span>FPS <b id="fps">-</b></span>
